@@ -67,7 +67,7 @@ def _get_db():
     global _db_pool
     if _db_pool is None:
         try:
-            _db_pool = psycopg2.connect(_DB_URL)
+            _db_pool = psycopg2.connect(_DB_URL, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
             _db_pool.autocommit = True
             with _db_pool.cursor() as cur:
                 cur.execute("""

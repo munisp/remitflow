@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback } from 'react';
 import { View, Text, FlatList, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { trpc } from '../services/trpc';
@@ -7,6 +7,42 @@ const TYPE_ICONS: Record<string, string> = {
   transfer: '💸', kyc: '🪪', fx_alert: '📈', payout: '💰',
   security: '🔒', system: 'ℹ️', marketing: '📣',
 };
+
+// wave14 perf (L1): fixed row geometry for getItemLayout — notifItem height
+// 110 (enforced in styles; title 1 line, body 2 lines) + 1 borderBottom.
+const NOTIF_ROW_HEIGHT = 110 + 1;
+
+type NotificationItem = {
+  id: string;
+  type: string;
+  isRead: boolean;
+  title: string;
+  body: string;
+  createdAt: string | Date;
+};
+
+const NotificationRow = React.memo(function NotificationRow({
+  item,
+  onPress,
+}: {
+  item: NotificationItem;
+  onPress: (item: NotificationItem) => void;
+}) {
+  return (
+    <TouchableOpacity
+      style={[styles.notifItem, !item.isRead && styles.notifItemUnread]}
+      onPress={() => onPress(item)}
+    >
+      <Text style={styles.notifIcon}>{TYPE_ICONS[item.type] ?? 'ℹ️'}</Text>
+      <View style={styles.notifContent}>
+        <Text style={styles.notifTitle} numberOfLines={1}>{item.title}</Text>
+        <Text style={styles.notifBody} numberOfLines={2}>{item.body}</Text>
+        <Text style={styles.notifTime}>{new Date(item.createdAt).toLocaleString()}</Text>
+      </View>
+      {!item.isRead && <View style={styles.unreadDot} />}
+    </TouchableOpacity>
+  );
+});
 
 export default function NotificationsScreen() {
   const navigation = useNavigation();
@@ -18,7 +54,29 @@ export default function NotificationsScreen() {
     onSuccess: () => refetch(),
   });
 
-  const unreadCount = (notifications ?? []).filter(n => !n.isRead).length;
+  const unreadCount = (notifications ?? []).filter((n: any) => !n.isRead).length;
+
+  // wave14 perf (L1): stable renderItem/getItemLayout.
+  const markReadMutateRef = React.useRef(markReadMutation.mutate);
+  markReadMutateRef.current = markReadMutation.mutate;
+  const handlePress = useCallback(
+    (item: NotificationItem) => {
+      if (!item.isRead) markReadMutateRef.current({ id: item.id });
+    },
+    [],
+  );
+  const renderItem = useCallback(
+    ({ item }: { item: NotificationItem }) => <NotificationRow item={item} onPress={handlePress} />,
+    [handlePress],
+  );
+  const getItemLayout = useCallback(
+    (_: ArrayLike<NotificationItem> | null | undefined, index: number) => ({
+      length: NOTIF_ROW_HEIGHT,
+      offset: NOTIF_ROW_HEIGHT * index,
+      index,
+    }),
+    [],
+  );
 
   return (
     <View style={styles.container}>
@@ -40,20 +98,11 @@ export default function NotificationsScreen() {
         <FlatList
           data={notifications ?? []}
           keyExtractor={(item) => item.id}
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              style={[styles.notifItem, !item.isRead && styles.notifItemUnread]}
-              onPress={() => !item.isRead && markReadMutation.mutate({ id: item.id })}
-            >
-              <Text style={styles.notifIcon}>{TYPE_ICONS[item.type] ?? 'ℹ️'}</Text>
-              <View style={styles.notifContent}>
-                <Text style={styles.notifTitle}>{item.title}</Text>
-                <Text style={styles.notifBody} numberOfLines={2}>{item.body}</Text>
-                <Text style={styles.notifTime}>{new Date(item.createdAt).toLocaleString()}</Text>
-              </View>
-              {!item.isRead && <View style={styles.unreadDot} />}
-            </TouchableOpacity>
-          )}
+          renderItem={renderItem}
+          getItemLayout={getItemLayout}
+          removeClippedSubviews
+          initialNumToRender={12}
+          windowSize={7}
           ListEmptyComponent={
             <View style={styles.empty}>
               <Text style={styles.emptyIcon}>🔔</Text>
@@ -74,7 +123,7 @@ const styles = StyleSheet.create({
   backText: { color: '#6366f1', fontSize: 16, fontWeight: '600' },
   title: { fontSize: 18, fontWeight: '700', color: '#fff' },
   markAllText: { color: '#6366f1', fontSize: 13, fontWeight: '600' },
-  notifItem: { flexDirection: 'row', alignItems: 'flex-start', padding: 16, borderBottomWidth: 1, borderBottomColor: '#2d2d4e' },
+  notifItem: { flexDirection: 'row', alignItems: 'flex-start', padding: 16, borderBottomWidth: 1, borderBottomColor: '#2d2d4e', height: 111 },
   notifItemUnread: { backgroundColor: '#1a1a2e' },
   notifIcon: { fontSize: 24, marginRight: 12, marginTop: 2 },
   notifContent: { flex: 1 },

@@ -20,7 +20,7 @@ buildscript {
 
 apply plugin: "com.facebook.react.rootproject"
 
-// Some native modules (react-native-gesture-handler, reanimated, etc.) don't
+// Some native modules (react-native-gesture-handler, etc.) don't
 // pin an explicit androidx.core version; Gradle's conflict resolution then
 // picks the newest one requested across the graph (1.16.0), which requires
 // AGP 8.6.0+/compileSdk 35 — newer than what RN 0.73.4's template ships.

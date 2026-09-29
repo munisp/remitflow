@@ -284,15 +284,15 @@ type AuthRequest struct {
 }
 
 type AuthResponse struct {
-	Authorized   bool    `json:"authorized"`
-	AuthCode     string  `json:"authCode,omitempty"`
-	DeclineCode  string  `json:"declineCode,omitempty"`
-	DeclineMsg   string  `json:"declineMessage,omitempty"`
-	Amount       float64 `json:"amount"`
-	Currency     string  `json:"currency"`
-	TxID         string  `json:"txId,omitempty"`
-	TerminalID   string  `json:"terminalId"`
-	ProcessedAt  string  `json:"processedAt"`
+	Authorized  bool    `json:"authorized"`
+	AuthCode    string  `json:"authCode,omitempty"`
+	DeclineCode string  `json:"declineCode,omitempty"`
+	DeclineMsg  string  `json:"declineMessage,omitempty"`
+	Amount      float64 `json:"amount"`
+	Currency    string  `json:"currency"`
+	TxID        string  `json:"txId,omitempty"`
+	TerminalID  string  `json:"terminalId"`
+	ProcessedAt string  `json:"processedAt"`
 }
 
 type NonceTracker struct {
@@ -580,7 +580,10 @@ func (s *Server) dbUpsert(table, key string, value interface{}) {
 			log.Printf("[QR/NFC] dbUpsert marshal failed for table=%s key=%s: %v", table, key, err)
 			return
 		}
-		if _, err := s.db.Exec(
+		// W14 residual: bounded 5s ctx so a hung conn cannot pin a semaphore slot forever.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := s.db.ExecContext(ctx,
 			fmt.Sprintf(`INSERT INTO %s (id, data, updated_at) VALUES ($1, $2::jsonb, NOW())
 			ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`, table),
 			key, string(data),
@@ -650,6 +653,7 @@ func (s *Server) handleParseEMV(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Payload string `json:"payload"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 		return
@@ -666,6 +670,7 @@ func (s *Server) handleValidateQRSignature(w http.ResponseWriter, r *http.Reques
 		Payload   string `json:"payload"`
 		Signature string `json:"signature"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request"})
 		return
@@ -678,6 +683,7 @@ func (s *Server) handleValidateNDEF(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Payload string `json:"payload"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request"})
 		return
@@ -688,6 +694,7 @@ func (s *Server) handleValidateNDEF(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	var req AuthRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request"})
 		return
@@ -745,8 +752,8 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[QR/NFC] ledger posting failed for %s (terminal=%s amount=%.2f): %v", txID, req.TerminalID, req.Amount, err)
 		writeJSON(w, 503, AuthResponse{
 			Authorized: false, DeclineCode: "LEDGER_UNAVAILABLE",
-			DeclineMsg:  "Ledger write failed — authorization aborted, no funds movement booked",
-			TerminalID:  req.TerminalID, TxID: txID,
+			DeclineMsg: "Ledger write failed — authorization aborted, no funds movement booked",
+			TerminalID: req.TerminalID, TxID: txID,
 			ProcessedAt: time.Now().UTC().Format(time.RFC3339),
 		})
 		return
@@ -767,6 +774,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRegisterTerminal(w http.ResponseWriter, r *http.Request) {
 	var t Terminal
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request"})
 		return
@@ -791,6 +799,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		FirmwareVersion string `json:"firmwareVersion,omitempty"`
 		BatteryLevel    int    `json:"batteryLevel,omitempty"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request"})
 		return
@@ -819,6 +828,7 @@ func (s *Server) handleOfflineBatch(w http.ResponseWriter, r *http.Request) {
 			Timestamp string  `json:"timestamp"`
 		} `json:"transactions"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request"})
 		return
@@ -926,7 +936,7 @@ func main() {
 	mux.HandleFunc("/api/nfc/terminal/heartbeat", srv.handleHeartbeat)
 	mux.HandleFunc("/api/nfc/offline/batch", srv.handleOfflineBatch)
 
-	httpSrv := &http.Server{Addr: ":" + cfg.Port, Handler: mux}
+	httpSrv := &http.Server{Addr: ":" + cfg.Port, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 
 	// Graceful shutdown
 	stop := make(chan os.Signal, 1)

@@ -14,7 +14,7 @@ export default function AirtimeScreen() {
   const [amount, setAmount] = useState('');
   const topupMutation = trpc.airtime.topup.useMutation({
     onSuccess: () => { Alert.alert('Success', 'Airtime sent successfully!'); setPhone(''); setAmount(''); },
-    onError: (e) => Alert.alert('Error', e.message),
+    onError: (e: any) => Alert.alert('Error', e.message),
   });
   return (
     <View style={s.container}>

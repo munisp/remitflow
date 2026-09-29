@@ -1,0 +1,10 @@
+{
+  "extends": "@react-native/typescript-config/tsconfig.json",
+  "compilerOptions": {
+    // module es2022 (preset ships es2015) so React.lazy dynamic imports
+    // type-check (TS1323); Metro handles them natively.
+    "module": "es2022"
+  },
+  "include": ["App.tsx", "index.js", "src/**/*"],
+  "exclude": ["node_modules", "android", "ios"]
+}

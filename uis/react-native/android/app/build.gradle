@@ -52,9 +52,11 @@ react {
 }
 
 /**
- * Set this to true to Run Proguard on Release builds to minify the Java bytecode.
+ * wave14 perf: release builds always run ProGuard/R8 minification +
+ * shrinkResources. Set back to false only for local debugging of release
+ * crashes.
  */
-def enableProguardInReleaseBuilds = false
+def enableProguardInReleaseBuilds = true
 
 /**
  * The preferred build flavor of JavaScriptCore (JSC)
@@ -86,10 +88,6 @@ android {
         versionCode 1
         versionName "1.0.0"
         multiDexEnabled true
-        // react-native-camera declares its own "react-native-camera" flavor
-        // dimension (general/mlkit); pick "general" so it doesn't conflict
-        // with our "environment" dimension (dev/staging/production).
-        missingDimensionStrategy 'react-native-camera', 'general'
     }
     signingConfigs {
         debug {
@@ -109,7 +107,20 @@ android {
             // see https://reactnative.dev/docs/signed-apk-android.
             signingConfig signingConfigs.debug
             minifyEnabled enableProguardInReleaseBuilds
+            // wave14 perf: strip unused resources in release (requires minify).
+            shrinkResources enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+        }
+    }
+
+    // wave14 perf: build one APK per ABI instead of a single fat universal
+    // APK — each device downloads only its own native libraries.
+    splits {
+        abi {
+            reset()
+            enable true
+            universalApk false
+            include "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
         }
     }
 

@@ -26,15 +26,15 @@
 package main
 
 import (
-	"database/sql"
-	"encoding/json"
-	"log/slog"
-	_ "github.com/lib/pq"
 	"bytes"
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
+	_ "github.com/lib/pq"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -54,7 +54,6 @@ import (
 )
 
 // ─── Configuration ────────────────────────────────────────────────────────────
-
 
 var _processStartTime = time.Now()
 
@@ -82,7 +81,7 @@ func configFromEnv() Config {
 		ListenAddr:      ":8080",
 		UpstreamURL:     upstream,
 		MaxConcurrentIP: 20,
-		APIBodyLimit:    10 * 1024,        // 10 KB
+		APIBodyLimit:    10 * 1024,       // 10 KB
 		UploadBodyLimit: 5 * 1024 * 1024, // 5 MB
 		SlowDownAfter:   50,
 		SlowDownMs:      500,
@@ -188,10 +187,10 @@ func (b *IPBlocklist) AddCIDR(cidr string) error {
 // ─── Per-IP Rate Limiter + Concurrency Tracker ───────────────────────────────
 
 type IPState struct {
-	limiter     *rate.Limiter
-	concurrency int64
+	limiter      *rate.Limiter
+	concurrency  int64
 	requestCount int64
-	lastSeen    time.Time
+	lastSeen     time.Time
 }
 
 type RateLimiterStore struct {
@@ -225,10 +224,10 @@ func (s *RateLimiterStore) get(ip string) *IPState {
 			lastSeen: time.Now(),
 		}
 		s.states[ip] = st
-	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
-	if db != nil {
-		go func() { _ = dbLogEvent("get.state_change", map[string]string{"service": "go-security-sidecar"}) }()
-	}
+		// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+		if db != nil {
+			go func() { _ = dbLogEvent("get.state_change", map[string]string{"service": "go-security-sidecar"}) }()
+		}
 	}
 	st.lastSeen = time.Now()
 	return st
@@ -270,7 +269,7 @@ func newSidecar(cfg Config) (*SecuritySidecar, error) {
 	// Pre-load known Tor exit node ranges and common attack CIDRs
 	// In production these would be loaded from a threat-intel feed
 	for _, cidr := range []string{
-		"192.0.2.0/24",   // TEST-NET (RFC 5737) — placeholder
+		"192.0.2.0/24",    // TEST-NET (RFC 5737) — placeholder
 		"198.51.100.0/24", // TEST-NET-2
 		"203.0.113.0/24",  // TEST-NET-3
 	} {
@@ -480,7 +479,6 @@ func wafInspect(r *http.Request) (bool, string) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-
 func initDB() error {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -523,11 +521,14 @@ func initDB() error {
 
 // dbUpsert stores or updates a record in the service state table
 func dbUpsert(id string, data interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO security_sidecar_state (id, data, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
@@ -537,8 +538,11 @@ func dbUpsert(id string, data interface{}) error {
 
 // dbGet retrieves a record from the service state table
 func dbGet(id string, dest interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM security_sidecar_state WHERE id = $1", id).Scan(&jsonData)
+	err := db.QueryRowContext(ctx, "SELECT data FROM security_sidecar_state WHERE id = $1", id).Scan(&jsonData)
 	if err != nil {
 		return err
 	}
@@ -547,7 +551,10 @@ func dbGet(id string, dest interface{}) error {
 
 // dbList retrieves all records from the service state table
 func dbList(limit int) ([]json.RawMessage, error) {
-	rows, err := db.Query("SELECT data FROM security_sidecar_state ORDER BY updated_at DESC LIMIT $1", limit)
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT data FROM security_sidecar_state ORDER BY updated_at DESC LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -565,22 +572,27 @@ func dbList(limit int) ([]json.RawMessage, error) {
 
 // dbLogEvent stores an event in the events table
 func dbLogEvent(eventType string, payload interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("INSERT INTO security_sidecar_events (event_type, payload) VALUES ($1, $2)",
+	_, err = db.ExecContext(ctx, "INSERT INTO security_sidecar_events (event_type, payload) VALUES ($1, $2)",
 		eventType, jsonData)
 	return err
 }
 
-
 // loadFromDB populates in-memory state from database on startup (write-through cache warm)
 func loadFromDB() {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query("SELECT id, data FROM security_sidecar_state ORDER BY updated_at DESC LIMIT 1000")
+	rows, err := db.QueryContext(ctx, "SELECT id, data FROM security_sidecar_state ORDER BY updated_at DESC LIMIT 1000")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
@@ -639,7 +651,7 @@ func main() {
 	}
 
 	// Graceful shutdown
-	
+
 	// Periodic state persistence to PostgreSQL (write-through cache)
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -658,7 +670,7 @@ func main() {
 
 	go func() {
 		log.Printf("[Sidecar] Listening on %s → upstream %s", cfg.ListenAddr, cfg.UpstreamURL)
-	fmt.Fprintf(os.Stderr, "{\"event\":\"pod.startup.complete\",\"service\":\"%s\",\"startup_ms\":%d,\"timestamp\":\"%s\"}\n", "go-security-sidecar", time.Since(_processStartTime).Milliseconds(), time.Now().Format(time.RFC3339))
+		fmt.Fprintf(os.Stderr, "{\"event\":\"pod.startup.complete\",\"service\":\"%s\",\"startup_ms\":%d,\"timestamp\":\"%s\"}\n", "go-security-sidecar", time.Since(_processStartTime).Milliseconds(), time.Now().Format(time.RFC3339))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("[Sidecar] Server error: %v", err)
 		}

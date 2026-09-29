@@ -28,14 +28,14 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"database/sql"
-	"log/slog"
-	_ "github.com/lib/pq"
-	"context"
 	"encoding/json"
 	"fmt"
+	_ "github.com/lib/pq"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -47,7 +47,6 @@ import (
 )
 
 // ── Config ────────────────────────────────────────────────────────────────────
-
 
 var _processStartTime = time.Now()
 
@@ -104,10 +103,10 @@ func getEnv(key, fallback string) string {
 type GhIPSSTransferType string
 
 const (
-	GIPInstantPay    GhIPSSTransferType = "GIP"  // GhIPSS Instant Pay
+	GIPInstantPay    GhIPSSTransferType = "GIP"    // GhIPSS Instant Pay
 	GhLink           GhIPSSTransferType = "GHLINK" // gh-link card scheme
-	MobileMoneyInter GhIPSSTransferType = "MMI"  // Mobile Money Interoperability
-	PAPSSCorridor    GhIPSSTransferType = "PAPSS" // PAPSS West Africa corridor
+	MobileMoneyInter GhIPSSTransferType = "MMI"    // Mobile Money Interoperability
+	PAPSSCorridor    GhIPSSTransferType = "PAPSS"  // PAPSS West Africa corridor
 )
 
 type GhIPSSTransferRequest struct {
@@ -118,7 +117,7 @@ type GhIPSSTransferRequest struct {
 	ReceiveCurrency string             `json:"receiveCurrency"`                 // GHS or PAPSS corridor currency
 	SenderAccount   string             `json:"senderAccount" binding:"required"`
 	ReceiverAccount string             `json:"receiverAccount" binding:"required"`
-	ReceiverBank    string             `json:"receiverBank"`    // Bank of Ghana sort code
+	ReceiverBank    string             `json:"receiverBank"`   // Bank of Ghana sort code
 	ReceiverMSISDN  string             `json:"receiverMsisdn"` // For MMI
 	SenderName      string             `json:"senderName"`
 	ReceiverName    string             `json:"receiverName"`
@@ -128,14 +127,14 @@ type GhIPSSTransferRequest struct {
 }
 
 type GhIPSSTransferResponse struct {
-	TransferID      string  `json:"transferId"`
-	GhIPSSRef       string  `json:"ghipssRef"`
-	Status          string  `json:"status"`
-	ReceiveAmount   float64 `json:"receiveAmount"`
-	SettlementTime  string  `json:"settlementTime"`
-	MojaloopRouted  bool    `json:"mojaloopRouted"`
-	PAPSSRouted     bool    `json:"papssRouted"`
-	Message         string  `json:"message"`
+	TransferID     string  `json:"transferId"`
+	GhIPSSRef      string  `json:"ghipssRef"`
+	Status         string  `json:"status"`
+	ReceiveAmount  float64 `json:"receiveAmount"`
+	SettlementTime string  `json:"settlementTime"`
+	MojaloopRouted bool    `json:"mojaloopRouted"`
+	PAPSSRouted    bool    `json:"papssRouted"`
+	Message        string  `json:"message"`
 }
 
 // ── Middleware helpers ────────────────────────────────────────────────────────
@@ -394,7 +393,6 @@ func healthCheck(cfg Config) gin.HandlerFunc {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-
 func initDB() error {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -437,11 +435,14 @@ func initDB() error {
 
 // dbUpsert stores or updates a record in the service state table
 func dbUpsert(id string, data interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO ghipss_adapter_state (id, data, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
@@ -451,8 +452,11 @@ func dbUpsert(id string, data interface{}) error {
 
 // dbGet retrieves a record from the service state table
 func dbGet(id string, dest interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM ghipss_adapter_state WHERE id = $1", id).Scan(&jsonData)
+	err := db.QueryRowContext(ctx, "SELECT data FROM ghipss_adapter_state WHERE id = $1", id).Scan(&jsonData)
 	if err != nil {
 		return err
 	}
@@ -461,7 +465,10 @@ func dbGet(id string, dest interface{}) error {
 
 // dbList retrieves all records from the service state table
 func dbList(limit int) ([]json.RawMessage, error) {
-	rows, err := db.Query("SELECT data FROM ghipss_adapter_state ORDER BY updated_at DESC LIMIT $1", limit)
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT data FROM ghipss_adapter_state ORDER BY updated_at DESC LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -479,22 +486,27 @@ func dbList(limit int) ([]json.RawMessage, error) {
 
 // dbLogEvent stores an event in the events table
 func dbLogEvent(eventType string, payload interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("INSERT INTO ghipss_adapter_events (event_type, payload) VALUES ($1, $2)",
+	_, err = db.ExecContext(ctx, "INSERT INTO ghipss_adapter_events (event_type, payload) VALUES ($1, $2)",
 		eventType, jsonData)
 	return err
 }
 
-
 // loadFromDB populates in-memory state from database on startup (write-through cache warm)
 func loadFromDB() {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query("SELECT id, data FROM ghipss_adapter_state ORDER BY updated_at DESC LIMIT 1000")
+	rows, err := db.QueryContext(ctx, "SELECT id, data FROM ghipss_adapter_state ORDER BY updated_at DESC LIMIT 1000")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
@@ -552,7 +564,7 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"transferId": c.Param("transferId"), "status": "pending", "rail": "ghipss"})
 	})
 
-	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
+	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() {
 		log.Printf("[GhIPSS] Adapter ready on :%s | GhIPSS: %s | Mojaloop: %s | PAPSS: %s",
 			cfg.Port, cfg.GhIPSSEndpoint, cfg.MojaloopHubURL, cfg.PAPSSEndpoint)
@@ -561,7 +573,6 @@ func main() {
 		}
 	}()
 
-	
 	// Periodic state persistence to PostgreSQL (write-through cache)
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)

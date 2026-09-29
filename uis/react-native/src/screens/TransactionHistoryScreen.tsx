@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
   TextInput, ActivityIndicator,
@@ -12,12 +12,74 @@ const STATUS_COLORS: Record<string, string> = {
   processing: '#6366f1',
 };
 
+// wave14 perf (L1): fixed row geometry for getItemLayout — txItem height 68
+// (enforced in styles, texts are numberOfLines={1}) + 8 marginBottom.
+const TX_ROW_HEIGHT = 68 + 8;
+
+type Tx = {
+  id: string;
+  status: string;
+  type: string;
+  description?: string | null;
+  createdAt: string | Date;
+  currency: string;
+  amount: number | string;
+  reference?: string | null;
+};
+
+const TxRow = React.memo(function TxRow({ item }: { item: Tx }) {
+  return (
+    <View style={styles.txItem}>
+      <View style={[styles.txDot, { backgroundColor: STATUS_COLORS[item.status] ?? '#6b7280' }]} />
+      <View style={styles.txDetails}>
+        <Text style={styles.txTitle} numberOfLines={1}>{item.description ?? `${item.type} transfer`}</Text>
+        <Text style={styles.txMeta} numberOfLines={1}>
+          {item.status} · {new Date(item.createdAt).toLocaleDateString()}
+        </Text>
+      </View>
+      <View style={styles.txRight}>
+        <Text style={[styles.txAmount, { color: item.type === 'receive' ? '#10b981' : '#e2e8f0' }]} numberOfLines={1}>
+          {item.type === 'receive' ? '+' : '-'}{item.currency} {Number(item.amount).toLocaleString()}
+        </Text>
+        <Text style={styles.txRef} numberOfLines={1}>{item.reference?.slice(0, 8)}...</Text>
+      </View>
+    </View>
+  );
+});
+
 export default function TransactionHistoryScreen() {
   const [search, setSearch] = useState('');
+  // wave14 perf (H4): debounce the search text ~300ms before it enters the
+  // query key — previously every keystroke fired a new transactions.list
+  // query. Single characters are ignored (min length 0-or-2).
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(1);
-  const { data, isLoading, refetch } = trpc.transactions.list.useQuery({ limit: 20, page, search });
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const q = search.trim();
+      if (q.length === 0 || q.length >= 2) {
+        setDebouncedSearch(q);
+        setPage(1);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  const { data, isLoading, refetch } = trpc.transactions.list.useQuery({ limit: 20, page, search: debouncedSearch });
 
   const transactions = data?.items ?? [];
+
+  const renderItem = useCallback(({ item }: { item: Tx }) => <TxRow item={item} />, []);
+
+  const getItemLayout = useCallback(
+    (_: ArrayLike<Tx> | null | undefined, index: number) => ({
+      length: TX_ROW_HEIGHT,
+      offset: TX_ROW_HEIGHT * index,
+      index,
+    }),
+    [],
+  );
 
   return (
     <View style={styles.container}>
@@ -26,7 +88,7 @@ export default function TransactionHistoryScreen() {
       <TextInput
         style={styles.search}
         value={search}
-        onChangeText={(v) => { setSearch(v); setPage(1); }}
+        onChangeText={setSearch}
         placeholder="Search transactions..."
         placeholderTextColor="#6b7280"
       />
@@ -37,23 +99,11 @@ export default function TransactionHistoryScreen() {
         <FlatList
           data={transactions}
           keyExtractor={(item) => item.id}
-          renderItem={({ item }) => (
-            <View style={styles.txItem}>
-              <View style={[styles.txDot, { backgroundColor: STATUS_COLORS[item.status] ?? '#6b7280' }]} />
-              <View style={styles.txDetails}>
-                <Text style={styles.txTitle}>{item.description ?? `${item.type} transfer`}</Text>
-                <Text style={styles.txMeta}>
-                  {item.status} · {new Date(item.createdAt).toLocaleDateString()}
-                </Text>
-              </View>
-              <View style={styles.txRight}>
-                <Text style={[styles.txAmount, { color: item.type === 'receive' ? '#10b981' : '#e2e8f0' }]}>
-                  {item.type === 'receive' ? '+' : '-'}{item.currency} {Number(item.amount).toLocaleString()}
-                </Text>
-                <Text style={styles.txRef}>{item.reference?.slice(0, 8)}...</Text>
-              </View>
-            </View>
-          )}
+          renderItem={renderItem}
+          getItemLayout={getItemLayout}
+          removeClippedSubviews
+          initialNumToRender={12}
+          windowSize={7}
           ListEmptyComponent={<Text style={styles.empty}>No transactions found</Text>}
           onRefresh={refetch}
           refreshing={isLoading}
@@ -85,7 +135,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0f0f1a', padding: 16 },
   title: { fontSize: 24, fontWeight: '800', color: '#fff', marginBottom: 16, marginTop: 48 },
   search: { backgroundColor: '#1a1a2e', borderRadius: 12, padding: 12, color: '#fff', fontSize: 15, borderWidth: 1, borderColor: '#2d2d4e', marginBottom: 16 },
-  txItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a2e', borderRadius: 12, padding: 14, marginBottom: 8 },
+  txItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a2e', borderRadius: 12, padding: 14, marginBottom: 8, height: 68 },
   txDot: { width: 10, height: 10, borderRadius: 5, marginRight: 12 },
   txDetails: { flex: 1 },
   txTitle: { color: '#e2e8f0', fontSize: 14, fontWeight: '600' },

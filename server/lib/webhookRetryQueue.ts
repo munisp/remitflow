@@ -56,14 +56,15 @@ export async function processPendingWebhookRetries(limit = 50): Promise<RetryPas
     .where(and(eq(webhookRetryQueue.status, "pending"), lte(webhookRetryQueue.nextAttemptAt, now)))
     .limit(limit);
 
-  let succeeded = 0;
-  let failed = 0;
-
-  for (const entry of pending) {
+  // W14: per-entry worker — entries are distinct queue rows, so chunks of 10
+  // run concurrently via Promise.allSettled (was: fully serial). Unused
+  // .returning() clauses on the status updates were dropped (fire-and-forget
+  // writes whose results were never read).
+  const processEntry = async (entry: (typeof pending)[number]): Promise<"succeeded" | "failed"> => {
     // Mark as processing
     await db.update(webhookRetryQueue)
       .set({ status: "processing", lastAttemptAt: now, updatedAt: now })
-      .where(eq(webhookRetryQueue.id, entry.id)).returning();
+      .where(eq(webhookRetryQueue.id, entry.id));
 
     try {
       // Get endpoint details
@@ -72,9 +73,8 @@ export async function processPendingWebhookRetries(limit = 50): Promise<RetryPas
       if (!endpoint || !endpoint.isActive) {
         await db.update(webhookRetryQueue)
           .set({ status: "exhausted", lastError: "Endpoint inactive or deleted", updatedAt: new Date() })
-          .where(eq(webhookRetryQueue.id, entry.id)).returning();
-        failed++;
-        continue;
+          .where(eq(webhookRetryQueue.id, entry.id));
+        return "failed";
       }
 
       // Attempt delivery
@@ -93,14 +93,13 @@ export async function processPendingWebhookRetries(limit = 50): Promise<RetryPas
         if (res.ok) {
           await db.update(webhookRetryQueue)
             .set({ status: "succeeded", updatedAt: new Date() })
-            .where(eq(webhookRetryQueue.id, entry.id)).returning();
+            .where(eq(webhookRetryQueue.id, entry.id));
           await db.update(webhookDeliveries)
             .set({ status: "delivered", responseStatus: res.status, deliveredAt: new Date() })
-            .where(eq(webhookDeliveries.id, entry.deliveryId)).returning();
-          succeeded++;
-        } else {
-          throw new Error(`HTTP ${res.status}`);
+            .where(eq(webhookDeliveries.id, entry.deliveryId));
+          return "succeeded";
         }
+        throw new Error(`HTTP ${res.status}`);
       } catch (err) {
         clearTimeout(timeout);
         const message = err instanceof Error ? err.message : String(err);
@@ -108,10 +107,10 @@ export async function processPendingWebhookRetries(limit = 50): Promise<RetryPas
         if (nextAttempt >= entry.maxAttempts) {
           await db.update(webhookRetryQueue)
             .set({ status: "exhausted", lastError: message, updatedAt: new Date() })
-            .where(eq(webhookRetryQueue.id, entry.id)).returning();
+            .where(eq(webhookRetryQueue.id, entry.id));
           await db.update(webhookDeliveries)
             .set({ status: "failed" })
-            .where(eq(webhookDeliveries.id, entry.deliveryId)).returning();
+            .where(eq(webhookDeliveries.id, entry.deliveryId));
         } else {
           const delaySeconds = BACKOFF_DELAYS_SECONDS[Math.min(nextAttempt, BACKOFF_DELAYS_SECONDS.length - 1)];
           await db.update(webhookRetryQueue)
@@ -122,16 +121,27 @@ export async function processPendingWebhookRetries(limit = 50): Promise<RetryPas
               lastError: message,
               updatedAt: new Date(),
             })
-            .where(eq(webhookRetryQueue.id, entry.id)).returning();
+            .where(eq(webhookRetryQueue.id, entry.id));
         }
-        failed++;
+        return "failed";
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await db.update(webhookRetryQueue)
         .set({ status: "exhausted", lastError: message, updatedAt: new Date() })
-        .where(eq(webhookRetryQueue.id, entry.id)).returning();
-      failed++;
+        .where(eq(webhookRetryQueue.id, entry.id));
+      return "failed";
+    }
+  };
+
+  let succeeded = 0;
+  let failed = 0;
+  const CHUNK = 10;
+  for (let i = 0; i < pending.length; i += CHUNK) {
+    const settled = await Promise.allSettled(pending.slice(i, i + CHUNK).map(processEntry));
+    for (const r of settled) {
+      if (r.status === "fulfilled" && r.value === "succeeded") succeeded++;
+      else failed++;
     }
   }
 

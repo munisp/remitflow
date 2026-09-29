@@ -25,6 +25,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -39,16 +40,18 @@ import (
 var _processStartTime = time.Now()
 
 const (
-	PORT          = "8087"
-	SERVICE_NAME  = "go-bdc-connector"
-	VERSION       = "v188"
+	PORT         = "8087"
+	SERVICE_NAME = "go-bdc-connector"
+	VERSION      = "v188"
 )
 
 var (
 	db          *sql.DB
 	redisClient *redis.Client
 	kafkaWriter *kafka.Writer
-	ctx         = context.Background()
+	// NOTE: no package-global request context. Redis/Kafka/DB ops take the
+	// per-request context (c.Request.Context()); background workers derive
+	// their own from context.Background().
 
 	// Kafka delivery metrics (surfaced in /health and /api/bdc/stats)
 	kafkaPublished     atomic.Int64
@@ -101,13 +104,13 @@ type BDCPartner struct {
 }
 
 type CorridorRate struct {
-	Corridor    string    `json:"corridor"`
-	BMATCHMid   float64   `json:"bmatch_mid"`
-	ADBBid      float64   `json:"adb_bid"`
-	ADBOffer    float64   `json:"adb_offer"`
-	SpreadBps   int       `json:"spread_bps"`
-	ValidUntil  time.Time `json:"valid_until"`
-	SnapshotID  string    `json:"snapshot_id"`
+	Corridor   string    `json:"corridor"`
+	BMATCHMid  float64   `json:"bmatch_mid"`
+	ADBBid     float64   `json:"adb_bid"`
+	ADBOffer   float64   `json:"adb_offer"`
+	SpreadBps  int       `json:"spread_bps"`
+	ValidUntil time.Time `json:"valid_until"`
+	SnapshotID string    `json:"snapshot_id"`
 }
 
 type WebhookPayload struct {
@@ -182,8 +185,19 @@ func initRedis() {
 	if redisAddr == "" {
 		redisAddr = "redis:6379"
 	}
-	redisClient = redis.NewClient(&redis.Options{Addr: redisAddr})
-	if err := redisClient.Ping(ctx).Err(); err != nil {
+	// Pool/timeout options mirror go-rate-limiter: bounded pool + aggressive
+	// dial/read/write timeouts so a slow Redis cannot stall request goroutines.
+	redisClient = redis.NewClient(&redis.Options{
+		Addr:         redisAddr,
+		PoolSize:     20,
+		MinIdleConns: 5,
+		DialTimeout:  3 * time.Second,
+		ReadTimeout:  1 * time.Second,
+		WriteTimeout: 1 * time.Second,
+	})
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pingCancel()
+	if err := redisClient.Ping(pingCtx).Err(); err != nil {
 		log.Printf("[BDCConnector] Redis ping failed: %v", err)
 	} else {
 		log.Println("[BDCConnector] Redis connected")
@@ -206,7 +220,60 @@ func initKafka() {
 	log.Printf("[BDCConnector] Kafka writer configured for broker %s (acks=all)", kafkaBroker)
 }
 
-func publishKafkaEvent(eventType string, payload interface{}) {
+// ─── Bounded async event publisher ────────────────────────────────────────────
+// Kafka/Dapr publishes must not block the transfer-create request path
+// (acks=all can take tens of ms under load). Events are queued on a bounded
+// channel drained by a single worker (FIFO ordering preserved per queue).
+// A FULL queue drops the event and logs it loudly: the authoritative transfer
+// state is already persisted in Postgres, so a dropped event is a telemetry
+// gap, never lost money state.
+
+type publishJob struct {
+	eventType string
+	payload   interface{}
+	daprTopic string // when set, also fan out to Dapr pub/sub
+}
+
+const publishQueueSize = 512
+
+var (
+	publishQueue  = make(chan publishJob, publishQueueSize)
+	publishWorker sync.WaitGroup
+)
+
+func startPublishWorker() {
+	publishWorker.Add(1)
+	go func() {
+		defer publishWorker.Done()
+		for job := range publishQueue {
+			// The worker derives its own bounded context: async publishes must
+			// outlive the request that queued them.
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			publishKafkaEvent(ctx, job.eventType, job.payload)
+			if job.daprTopic != "" {
+				publishDaprEvent(ctx, job.daprTopic, job.payload)
+			}
+			cancel()
+		}
+	}()
+}
+
+// stopPublishWorker drains and stops the publisher (graceful shutdown).
+func stopPublishWorker() {
+	close(publishQueue)
+	publishWorker.Wait()
+}
+
+func enqueueEvent(eventType string, payload interface{}, daprTopic string) {
+	select {
+	case publishQueue <- publishJob{eventType: eventType, payload: payload, daprTopic: daprTopic}:
+	default:
+		kafkaPublishErrors.Add(1)
+		log.Printf("[BDCConnector] publish queue FULL — dropping event %s (state is persisted in Postgres; telemetry gap only)", eventType)
+	}
+}
+
+func publishKafkaEvent(ctx context.Context, eventType string, payload interface{}) {
 	if kafkaWriter == nil {
 		return
 	}
@@ -216,9 +283,7 @@ func publishKafkaEvent(eventType string, payload interface{}) {
 		"timestamp":  time.Now().UTC().Format(time.RFC3339),
 		"payload":    payload,
 	})
-	writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if err := kafkaWriter.WriteMessages(writeCtx, kafka.Message{Value: data}); err != nil {
+	if err := kafkaWriter.WriteMessages(ctx, kafka.Message{Value: data}); err != nil {
 		kafkaPublishErrors.Add(1)
 		log.Printf("[BDCConnector] Kafka publish FAILED topic=bdc-transfer-events event=%s: %v", eventType, err)
 		return
@@ -244,13 +309,13 @@ func recordTigerBeetleTransfer(ref string, amountUSD float64, corridor string) {
 	}
 	// Post debit/credit pair to TigerBeetle via HTTP bridge
 	payload := map[string]interface{}{
-		"id":              ref,
-		"debit_account":   fmt.Sprintf("bdc-outflow-%s", corridor),
-		"credit_account":  "settlement-pool",
-		"amount":          int64(amountUSD * 100), // cents
-		"user_data":       ref,
-		"code":            1001, // BDC_FX_TRANSFER
-		"flags":           0,
+		"id":             ref,
+		"debit_account":  fmt.Sprintf("bdc-outflow-%s", corridor),
+		"credit_account": "settlement-pool",
+		"amount":         int64(amountUSD * 100), // cents
+		"user_data":      ref,
+		"code":           1001, // BDC_FX_TRANSFER
+		"flags":          0,
 	}
 	data, _ := json.Marshal(payload)
 	log.Printf("[BDCConnector] TigerBeetle transfer recorded: %s", string(data))
@@ -261,14 +326,20 @@ func recordTigerBeetleTransfer(ref string, amountUSD float64, corridor string) {
 // daprClient is bounded: a hung Dapr sidecar must not tie up callers (F17).
 var daprClient = &http.Client{Timeout: 5 * time.Second}
 
-func publishDaprEvent(topic string, payload interface{}) {
+func publishDaprEvent(ctx context.Context, topic string, payload interface{}) {
 	daprPort := os.Getenv("DAPR_HTTP_PORT")
 	if daprPort == "" {
 		daprPort = "3500"
 	}
 	data, _ := json.Marshal(payload)
 	url := fmt.Sprintf("http://localhost:%s/v1.0/publish/pubsub/%s", daprPort, topic)
-	resp, err := daprClient.Post(url, "application/json", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		log.Printf("[BDCConnector] Dapr publish request build failed for topic %s: %v", topic, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := daprClient.Do(req)
 	if err != nil || resp == nil {
 		log.Printf("[BDCConnector] Dapr publish failed for topic %s: %v", topic, err)
 		return
@@ -283,7 +354,7 @@ func publishDaprEvent(topic string, payload interface{}) {
 
 // ─── Rate Helpers ─────────────────────────────────────────────────────────────
 
-func getCorridorRate(corridor string) CorridorRate {
+func getCorridorRate(ctx context.Context, corridor string) CorridorRate {
 	// Check Redis cache first (populated by rust-bmatch-engine)
 	cacheKey := fmt.Sprintf("bmatch:rate:%s", corridor)
 	if redisClient != nil {
@@ -300,7 +371,7 @@ func getCorridorRate(corridor string) CorridorRate {
 	baseMids := map[string]float64{
 		"USD/NGN": 1580.0, "GBP/NGN": 1990.0, "EUR/NGN": 1710.0,
 		"CAD/NGN": 1160.0, "AUD/NGN": 1020.0, "USD/GHS": 15.8,
-		"USD/KES": 129.0,  "USD/ZAR": 18.6,   "USD/XOF": 620.0,
+		"USD/KES": 129.0, "USD/ZAR": 18.6, "USD/XOF": 620.0,
 	}
 	mid := baseMids[corridor]
 	if mid == 0 {
@@ -341,16 +412,16 @@ func internalKeyAuth() gin.HandlerFunc {
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 func health(c *gin.Context) {
-	dbOK := db != nil && db.Ping() == nil
-	redisOK := redisClient != nil && redisClient.Ping(ctx).Err() == nil
+	dbOK := db != nil && db.PingContext(c.Request.Context()) == nil
+	redisOK := redisClient != nil && redisClient.Ping(c.Request.Context()).Err() == nil
 	c.JSON(http.StatusOK, gin.H{
-		"status":   "ok",
-		"service":  SERVICE_NAME,
-		"version":  VERSION,
-		"db":       dbOK,
-		"redis":    redisOK,
-		"kafka":    kafkaWriter != nil,
-		"kafka_published": kafkaPublished.Load(),
+		"status":               "ok",
+		"service":              SERVICE_NAME,
+		"version":              VERSION,
+		"db":                   dbOK,
+		"redis":                redisOK,
+		"kafka":                kafkaWriter != nil,
+		"kafka_published":      kafkaPublished.Load(),
 		"kafka_publish_errors": kafkaPublishErrors.Load(),
 	})
 }
@@ -365,13 +436,15 @@ func createTransferRequest(c *gin.Context) {
 	// Generate unique reference
 	ref := fmt.Sprintf("BDC-%d-%04d", time.Now().UnixMilli(), rand.Intn(9999))
 
+	reqCtx := c.Request.Context()
+
 	// Get current ADB rate
-	rate := getCorridorRate(req.CorridorCode)
+	rate := getCorridorRate(reqCtx, req.CorridorCode)
 	amountNGN := req.AmountUSD * rate.ADBOffer
 
 	// Persist to DB
 	if db != nil {
-		_, err := db.Exec(`
+		_, err := db.ExecContext(reqCtx, `
 			INSERT INTO bdc_transfer_requests
 			(reference, bdc_partner_id, corridor_code, amount_usd, amount_ngn, applied_rate,
 			 bmatch_rate_snapshot, beneficiary_account, beneficiary_bank, beneficiary_name,
@@ -389,19 +462,20 @@ func createTransferRequest(c *gin.Context) {
 	// Record in TigerBeetle
 	recordTigerBeetleTransfer(ref, req.AmountUSD, req.CorridorCode)
 
-	// Publish Kafka + Dapr events
-	publishKafkaEvent("bdc-transfer-initiated", map[string]interface{}{
+	// Publish Kafka + Dapr events asynchronously (bounded queue + worker) —
+	// the request path never waits on acks=all replication latency.
+	enqueueEvent("bdc-transfer-initiated", map[string]interface{}{
 		"reference":      ref,
 		"bdc_partner_id": req.BDCPartnerID,
 		"corridor":       req.CorridorCode,
 		"amount_usd":     req.AmountUSD,
 		"amount_ngn":     amountNGN,
 		"applied_rate":   rate.ADBOffer,
-	})
-	publishDaprEvent("bdc-transfer-events", map[string]interface{}{
+	}, "")
+	enqueueEvent("transfer_initiated", map[string]interface{}{
 		"type":      "transfer_initiated",
 		"reference": ref,
-	})
+	}, "bdc-transfer-events")
 
 	// Cache transfer status in Redis
 	if redisClient != nil {
@@ -409,7 +483,7 @@ func createTransferRequest(c *gin.Context) {
 			Reference: ref, Status: "pending", AmountUSD: req.AmountUSD,
 			AmountNGN: amountNGN, AppliedRate: rate.ADBOffer, UpdatedAt: time.Now(),
 		})
-		redisClient.Set(ctx, fmt.Sprintf("bdc:transfer:%s", ref), statusData, 24*time.Hour)
+		redisClient.Set(reqCtx, fmt.Sprintf("bdc:transfer:%s", ref), statusData, 24*time.Hour)
 	}
 
 	c.JSON(http.StatusCreated, TransferResponse{
@@ -425,7 +499,7 @@ func getTransferStatus(c *gin.Context) {
 
 	// Check Redis cache
 	if redisClient != nil {
-		cached, err := redisClient.Get(ctx, fmt.Sprintf("bdc:transfer:%s", ref)).Result()
+		cached, err := redisClient.Get(c.Request.Context(), fmt.Sprintf("bdc:transfer:%s", ref)).Result()
 		if err == nil {
 			var status TransferStatus
 			if json.Unmarshal([]byte(cached), &status) == nil {
@@ -470,7 +544,7 @@ func confirmLiquidity(c *gin.Context) {
 	}
 
 	if db != nil {
-		_, err := db.Exec(`
+		_, err := db.ExecContext(c.Request.Context(), `
 			UPDATE bdc_liquidity_requests
 			SET approved_amount_usd = $1, bmatch_rate_at_request = $2,
 			    adb_transfer_reference = $3, status = 'approved', processed_at = NOW()
@@ -482,11 +556,11 @@ func confirmLiquidity(c *gin.Context) {
 		}
 	}
 
-	publishKafkaEvent("bdc-liquidity-confirmed", map[string]interface{}{
+	enqueueEvent("bdc-liquidity-confirmed", map[string]interface{}{
 		"liquidity_request_id": body.LiquidityRequestID,
 		"approved_amount_usd":  body.ApprovedAmountUSD,
 		"adb_transfer_ref":     body.ADBTransferRef,
-	})
+	}, "")
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":               "confirmed",
@@ -498,7 +572,7 @@ func confirmLiquidity(c *gin.Context) {
 func listPartners(c *gin.Context) {
 	partners := []BDCPartner{}
 	if db != nil {
-		rows, err := db.Query(`
+		rows, err := db.QueryContext(c.Request.Context(), `
 			SELECT id, name, cbn_licence_number, adb_name, COALESCE(adb_code,''), status, max_daily_fx_usd
 			FROM bdc_partners WHERE status = 'approved' ORDER BY name`)
 		if err == nil {
@@ -515,7 +589,7 @@ func listPartners(c *gin.Context) {
 
 func getCorridorRateHandler(c *gin.Context) {
 	corridor := c.Param("corridor")
-	rate := getCorridorRate(corridor)
+	rate := getCorridorRate(c.Request.Context(), corridor)
 	c.JSON(http.StatusOK, rate)
 }
 
@@ -528,7 +602,7 @@ func handleWebhook(c *gin.Context) {
 
 	// Update DB
 	if db != nil {
-		_, err := db.Exec(`
+		_, err := db.ExecContext(c.Request.Context(), `
 			UPDATE bdc_transfer_requests
 			SET status = $1, adb_reference = $2, amount_ngn = $3, applied_rate = $4,
 			    message = $5, updated_at = NOW()
@@ -543,16 +617,16 @@ func handleWebhook(c *gin.Context) {
 
 	// Invalidate Redis cache
 	if redisClient != nil {
-		redisClient.Del(ctx, fmt.Sprintf("bdc:transfer:%s", payload.Reference))
+		redisClient.Del(c.Request.Context(), fmt.Sprintf("bdc:transfer:%s", payload.Reference))
 	}
 
-	publishKafkaEvent("bdc-transfer-webhook", map[string]interface{}{
+	enqueueEvent("bdc-transfer-webhook", map[string]interface{}{
 		"reference":     payload.Reference,
 		"adb_reference": payload.ADBReference,
 		"status":        payload.Status,
 		"amount_ngn":    payload.AmountNGN,
 		"applied_rate":  payload.AppliedRate,
-	})
+	}, "")
 
 	c.JSON(http.StatusOK, gin.H{"status": "processed", "reference": payload.Reference})
 }
@@ -567,13 +641,13 @@ func getStats(c *gin.Context) {
 	if db != nil {
 		var totalRequests, pendingCount, completedCount, failedCount int
 		var totalVolumeUSD float64
-		db.QueryRow(`SELECT COUNT(*), COUNT(*) FILTER (WHERE status='pending'),
+		db.QueryRowContext(c.Request.Context(), `SELECT COUNT(*), COUNT(*) FILTER (WHERE status='pending'),
 			COUNT(*) FILTER (WHERE status='completed'), COUNT(*) FILTER (WHERE status='failed'),
 			COALESCE(SUM(amount_usd),0) FROM bdc_transfer_requests`).
 			Scan(&totalRequests, &pendingCount, &completedCount, &failedCount, &totalVolumeUSD)
 
 		var activePartners int
-		db.QueryRow(`SELECT COUNT(*) FROM bdc_partners WHERE status='approved'`).Scan(&activePartners)
+		db.QueryRowContext(c.Request.Context(), `SELECT COUNT(*) FROM bdc_partners WHERE status='approved'`).Scan(&activePartners)
 
 		stats["total_requests"] = totalRequests
 		stats["pending"] = pendingCount
@@ -594,6 +668,7 @@ func main() {
 	initRedis()
 	initKafka()
 	initTigerBeetle()
+	startPublishWorker()
 
 	if os.Getenv("GIN_MODE") != "debug" {
 		gin.SetMode(gin.ReleaseMode)
@@ -617,11 +692,12 @@ func main() {
 
 	addr := ":" + PORT
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      r,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:              addr,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -633,6 +709,11 @@ func main() {
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
 			log.Printf("[BDCConnector] Shutdown error: %v", err)
+		}
+		// Drain queued events and release the Kafka writer.
+		stopPublishWorker()
+		if kafkaWriter != nil {
+			kafkaWriter.Close()
 		}
 	}()
 

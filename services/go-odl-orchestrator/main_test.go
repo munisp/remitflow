@@ -308,9 +308,9 @@ func TestODL_InitiateSettlement_ReportsUnavailable(t *testing.T) {
 
 func TestODL_SlippageCalculation(t *testing.T) {
 	tests := []struct {
-		name        string
-		quoted      float64
-		actual      float64
+		name         string
+		quoted       float64
+		actual       float64
 		wantSlippage float64
 	}{
 		{"no slippage", 1500.0, 1500.0, 0.0},

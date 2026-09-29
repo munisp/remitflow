@@ -28,6 +28,7 @@ import { getDb } from "../../db";
 import { resolveTenantContext } from "../../tenantMiddleware";
 import { requireTotpStepUp } from "../../_core/totpStepUp";
 import { fetchLiveRates } from "../../fx-rates.service";
+import { cacheGet, cacheSet } from "../../middleware/redis";
 import {
   bdcBranches,
   bdcRateBands,
@@ -37,6 +38,16 @@ import {
 } from "../../../drizzle/schema";
 
 // ─── Local helpers ────────────────────────────────────────────────────────────
+
+/** Collapse the per-currency buy/sell map into the sorted board response. */
+function buildBoard(
+  board: Map<string, { buy: BdcRateQuote | null; sell: BdcRateQuote | null }>,
+) {
+  return [...board.entries()]
+    .map(([currency, cell]) => ({ currency, buy: cell.buy, sell: cell.sell }))
+    .sort((a, b) => a.currency.localeCompare(b.currency));
+}
+
 
 /** Resolve the caller's session tenant; fail closed when unresolvable. */
 async function requireTenantId(userId: number): Promise<number> {
@@ -328,11 +339,19 @@ export const ratesRouter = router({
   }),
 
   currentBoard: auditedProcedure
-    .input(z.object({ branchId: z.number().int().positive().optional() }))
+    .input(z.object({
+      branchId: z.number().int().positive().optional(),
+      limit: z.number().int().min(1).max(500).default(100),
+    }))
     .query(async ({ ctx, input }) => {
       const tenantId = await requireTenantId(ctx.user.id);
       const db = await requireDb();
       const now = new Date();
+      // W14: cache-aside (20s TTL), tenant+branch scoped key. Board is a
+      // read-optimized projection; publish/expire paths tolerate ≤20s staleness.
+      const cacheKey = `bdc:board:${tenantId}:${input.branchId ?? "all"}:${input.limit}`;
+      const cached = await cacheGet<ReturnType<typeof buildBoard>>(cacheKey);
+      if (cached) return cached;
       // Live published quotes: tenant-wide plus (when requested) branch-specific.
       const scope = input.branchId
         ? or(isNull(bdcRateQuotes.branchId), eq(bdcRateQuotes.branchId, input.branchId))
@@ -348,7 +367,8 @@ export const ratesRouter = router({
             scope,
           ),
         )
-        .orderBy(desc(bdcRateQuotes.publishedAt))) as BdcRateQuote[];
+        .orderBy(desc(bdcRateQuotes.publishedAt))
+        .limit(input.limit)) as BdcRateQuote[];
 
       // Latest per (currency, side); branch-specific quotes win on precedence.
       type BoardCell = BdcRateQuote | null;
@@ -368,9 +388,9 @@ export const ratesRouter = router({
         if (take) cell[side] = q;
         board.set(ccy, cell);
       }
-      return [...board.entries()]
-        .map(([currency, cell]) => ({ currency, buy: cell.buy, sell: cell.sell }))
-        .sort((a, b) => a.currency.localeCompare(b.currency));
+      const result = buildBoard(board);
+      await cacheSet(cacheKey, result, 20); // best-effort; failure just skips cache
+      return result;
     }),
 
   crossQuote: auditedProcedure

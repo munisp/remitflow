@@ -3,19 +3,19 @@
 // This service is the central nervous system of the RemitFlow platform.
 // It bridges ALL 13 middleware systems into a single coherent event bus:
 //
-//   Kafka          → unified topic router with 40+ consumer groups
-//   Dapr           → pub/sub bridge + state store manager
-//   Fluvio         → real-time streaming with dead-letter handling
-//   Temporal       → workflow trigger gateway + activity dispatcher
-//   Mojaloop       → FSPIOP event relay + callback handler
-//   APISIX         → dynamic route + plugin provisioner
-//   Keycloak       → token validation gateway + user sync
-//   Permify        → relationship writer + permission enforcer
-//   Redis          → cache-aside coordinator + session store
-//   TigerBeetle    → ledger operation router + reconciliation trigger
-//   OpenSearch     → unified index pipeline + search proxy
-//   OpenAppSec     → WAF event relay + threat intelligence
-//   Lakehouse      → unified ingestion pipeline + ETL coordinator
+//	Kafka          → unified topic router with 40+ consumer groups
+//	Dapr           → pub/sub bridge + state store manager
+//	Fluvio         → real-time streaming with dead-letter handling
+//	Temporal       → workflow trigger gateway + activity dispatcher
+//	Mojaloop       → FSPIOP event relay + callback handler
+//	APISIX         → dynamic route + plugin provisioner
+//	Keycloak       → token validation gateway + user sync
+//	Permify        → relationship writer + permission enforcer
+//	Redis          → cache-aside coordinator + session store
+//	TigerBeetle    → ledger operation router + reconciliation trigger
+//	OpenSearch     → unified index pipeline + search proxy
+//	OpenAppSec     → WAF event relay + threat intelligence
+//	Lakehouse      → unified ingestion pipeline + ETL coordinator
 //
 // Language: Go 1.22
 // Port: 8200 (HTTP API) + 8201 (metrics)
@@ -43,25 +43,25 @@ import (
 // ── Config ────────────────────────────────────────────────────────────────────
 
 type Config struct {
-	Port                string
-	MetricsPort         string
-	KafkaBrokers        string
-	DaprHTTPPort        string
-	FluvioBridgeURL     string
-	TemporalHostPort    string
-	MojaloopConnURL     string
-	APISIXAdminURL      string
-	APISIXAdminKey      string
-	KeycloakURL         string
-	KeycloakRealm       string
-	PermifyURL          string
-	RedisURL            string
+	Port                 string
+	MetricsPort          string
+	KafkaBrokers         string
+	DaprHTTPPort         string
+	FluvioBridgeURL      string
+	TemporalHostPort     string
+	MojaloopConnURL      string
+	APISIXAdminURL       string
+	APISIXAdminKey       string
+	KeycloakURL          string
+	KeycloakRealm        string
+	PermifyURL           string
+	RedisURL             string
 	TigerBeetleBridgeURL string
-	OpenSearchURL       string
-	OpenAppSecURL       string
-	LakehouseURL        string
-	PostgresDSN         string
-	Environment         string
+	OpenSearchURL        string
+	OpenAppSecURL        string
+	LakehouseURL         string
+	PostgresDSN          string
+	Environment          string
 }
 
 func loadConfig() Config {
@@ -98,11 +98,11 @@ func getEnv(key, fallback string) string {
 // ── Metrics ───────────────────────────────────────────────────────────────────
 
 type Metrics struct {
-	eventsRouted    *prometheus.CounterVec
-	eventsFailed    *prometheus.CounterVec
-	routingLatency  *prometheus.HistogramVec
-	middlewareUp    *prometheus.GaugeVec
-	kafkaLag        *prometheus.GaugeVec
+	eventsRouted   *prometheus.CounterVec
+	eventsFailed   *prometheus.CounterVec
+	routingLatency *prometheus.HistogramVec
+	middlewareUp   *prometheus.GaugeVec
+	kafkaLag       *prometheus.GaugeVec
 }
 
 func newMetrics() *Metrics {
@@ -137,25 +137,25 @@ func newMetrics() *Metrics {
 
 // PlatformEvent is the canonical event envelope for all middleware routing.
 type PlatformEvent struct {
-	ID          string                 `json:"id"`
-	Type        string                 `json:"type"`        // e.g. "transfer.initiated"
-	Source      string                 `json:"source"`      // originating service
-	TenantID    string                 `json:"tenantId"`
-	UserID      string                 `json:"userId,omitempty"`
-	CorrelationID string              `json:"correlationId"`
-	Timestamp   time.Time              `json:"timestamp"`
-	Payload     map[string]interface{} `json:"payload"`
-	Metadata    map[string]string      `json:"metadata,omitempty"`
+	ID            string                 `json:"id"`
+	Type          string                 `json:"type"`   // e.g. "transfer.initiated"
+	Source        string                 `json:"source"` // originating service
+	TenantID      string                 `json:"tenantId"`
+	UserID        string                 `json:"userId,omitempty"`
+	CorrelationID string                 `json:"correlationId"`
+	Timestamp     time.Time              `json:"timestamp"`
+	Payload       map[string]interface{} `json:"payload"`
+	Metadata      map[string]string      `json:"metadata,omitempty"`
 }
 
 // RoutingRule defines how an event type maps to middleware destinations.
 type RoutingRule struct {
-	EventType    string
-	Destinations []string // e.g. ["kafka", "dapr", "temporal", "opensearch", "lakehouse"]
-	KafkaTopic   string
-	DaprTopic    string
-	DaprPubSub   string
-	FluvioTopic  string
+	EventType        string
+	Destinations     []string // e.g. ["kafka", "dapr", "temporal", "opensearch", "lakehouse"]
+	KafkaTopic       string
+	DaprTopic        string
+	DaprPubSub       string
+	FluvioTopic      string
 	TemporalWorkflow string
 	OpenSearchIndex  string
 	TigerBeetleOp    string // "create_transfer" | "create_account" | ""
@@ -183,24 +183,24 @@ var routingTable = []RoutingRule{
 		LakehouseTable:   "transfers",
 	},
 	{
-		EventType:        "transfer.completed",
-		Destinations:     []string{"kafka", "dapr", "fluvio", "opensearch", "lakehouse"},
-		KafkaTopic:       "remitflow.transfers.completed",
-		DaprTopic:        "transfer-completed",
-		DaprPubSub:       "remitflow-pubsub",
-		FluvioTopic:      "transfers",
-		OpenSearchIndex:  "transfers",
-		LakehouseTable:   "transfers",
+		EventType:       "transfer.completed",
+		Destinations:    []string{"kafka", "dapr", "fluvio", "opensearch", "lakehouse"},
+		KafkaTopic:      "remitflow.transfers.completed",
+		DaprTopic:       "transfer-completed",
+		DaprPubSub:      "remitflow-pubsub",
+		FluvioTopic:     "transfers",
+		OpenSearchIndex: "transfers",
+		LakehouseTable:  "transfers",
 	},
 	{
-		EventType:        "transfer.failed",
-		Destinations:     []string{"kafka", "dapr", "fluvio", "opensearch", "lakehouse"},
-		KafkaTopic:       "remitflow.transfers.failed",
-		DaprTopic:        "transfer-failed",
-		DaprPubSub:       "remitflow-pubsub",
-		FluvioTopic:      "transfers",
-		OpenSearchIndex:  "transfers",
-		LakehouseTable:   "transfers",
+		EventType:       "transfer.failed",
+		Destinations:    []string{"kafka", "dapr", "fluvio", "opensearch", "lakehouse"},
+		KafkaTopic:      "remitflow.transfers.failed",
+		DaprTopic:       "transfer-failed",
+		DaprPubSub:      "remitflow-pubsub",
+		FluvioTopic:     "transfers",
+		OpenSearchIndex: "transfers",
+		LakehouseTable:  "transfers",
 	},
 	// ── KYC/KYB ────────────────────────────────────────────────────────────
 	{
@@ -216,27 +216,27 @@ var routingTable = []RoutingRule{
 		LakehouseTable:   "kyc_events",
 	},
 	{
-		EventType:        "kyc.completed",
-		Destinations:     []string{"kafka", "dapr", "fluvio", "opensearch", "permify", "redis", "lakehouse"},
-		KafkaTopic:       "remitflow.kyc.completed",
-		DaprTopic:        "kyc-completed",
-		DaprPubSub:       "remitflow-pubsub",
-		FluvioTopic:      "kyc-events",
-		OpenSearchIndex:  "kyc-events",
-		PermifyRelation:  "kyc_verified",
-		RedisKey:         "kyc:status:{userId}",
-		LakehouseTable:   "kyc_events",
+		EventType:       "kyc.completed",
+		Destinations:    []string{"kafka", "dapr", "fluvio", "opensearch", "permify", "redis", "lakehouse"},
+		KafkaTopic:      "remitflow.kyc.completed",
+		DaprTopic:       "kyc-completed",
+		DaprPubSub:      "remitflow-pubsub",
+		FluvioTopic:     "kyc-events",
+		OpenSearchIndex: "kyc-events",
+		PermifyRelation: "kyc_verified",
+		RedisKey:        "kyc:status:{userId}",
+		LakehouseTable:  "kyc_events",
 	},
 	{
-		EventType:        "kyc.frozen",
-		Destinations:     []string{"kafka", "dapr", "fluvio", "opensearch", "permify", "redis", "apisix"},
-		KafkaTopic:       "remitflow.kyc.frozen",
-		DaprTopic:        "kyc-frozen",
-		DaprPubSub:       "remitflow-pubsub",
-		FluvioTopic:      "kyc-events",
-		OpenSearchIndex:  "kyc-events",
-		PermifyRelation:  "account_frozen",
-		RedisKey:         "kyc:frozen:{userId}",
+		EventType:       "kyc.frozen",
+		Destinations:    []string{"kafka", "dapr", "fluvio", "opensearch", "permify", "redis", "apisix"},
+		KafkaTopic:      "remitflow.kyc.frozen",
+		DaprTopic:       "kyc-frozen",
+		DaprPubSub:      "remitflow-pubsub",
+		FluvioTopic:     "kyc-events",
+		OpenSearchIndex: "kyc-events",
+		PermifyRelation: "account_frozen",
+		RedisKey:        "kyc:frozen:{userId}",
 	},
 	{
 		EventType:        "kyb.initiated",
@@ -299,13 +299,13 @@ var routingTable = []RoutingRule{
 		LakehouseTable:   "compliance_events",
 	},
 	{
-		EventType:        "compliance.ctr.filed",
-		Destinations:     []string{"kafka", "dapr", "opensearch", "lakehouse"},
-		KafkaTopic:       "remitflow.compliance.ctr",
-		DaprTopic:        "ctr-filed",
-		DaprPubSub:       "remitflow-pubsub",
-		OpenSearchIndex:  "compliance-events",
-		LakehouseTable:   "compliance_events",
+		EventType:       "compliance.ctr.filed",
+		Destinations:    []string{"kafka", "dapr", "opensearch", "lakehouse"},
+		KafkaTopic:      "remitflow.compliance.ctr",
+		DaprTopic:       "ctr-filed",
+		DaprPubSub:      "remitflow-pubsub",
+		OpenSearchIndex: "compliance-events",
+		LakehouseTable:  "compliance_events",
 	},
 	// ── Stablecoin ─────────────────────────────────────────────────────────
 	{
@@ -333,32 +333,32 @@ var routingTable = []RoutingRule{
 	},
 	// ── User / Auth ─────────────────────────────────────────────────────────
 	{
-		EventType:        "user.registered",
-		Destinations:     []string{"kafka", "dapr", "keycloak", "permify", "opensearch", "lakehouse"},
-		KafkaTopic:       "remitflow.users.registered",
-		DaprTopic:        "user-registered",
-		DaprPubSub:       "remitflow-pubsub",
-		OpenSearchIndex:  "users",
-		PermifyRelation:  "user_created",
-		LakehouseTable:   "users",
+		EventType:       "user.registered",
+		Destinations:    []string{"kafka", "dapr", "keycloak", "permify", "opensearch", "lakehouse"},
+		KafkaTopic:      "remitflow.users.registered",
+		DaprTopic:       "user-registered",
+		DaprPubSub:      "remitflow-pubsub",
+		OpenSearchIndex: "users",
+		PermifyRelation: "user_created",
+		LakehouseTable:  "users",
 	},
 	{
-		EventType:        "user.login",
-		Destinations:     []string{"kafka", "fluvio", "redis", "opensearch"},
-		KafkaTopic:       "remitflow.users.login",
-		FluvioTopic:      "user-activity",
-		OpenSearchIndex:  "audit-log",
-		RedisKey:         "session:{userId}",
+		EventType:       "user.login",
+		Destinations:    []string{"kafka", "fluvio", "redis", "opensearch"},
+		KafkaTopic:      "remitflow.users.login",
+		FluvioTopic:     "user-activity",
+		OpenSearchIndex: "audit-log",
+		RedisKey:        "session:{userId}",
 	},
 	// ── Ledger / TigerBeetle ────────────────────────────────────────────────
 	{
-		EventType:        "ledger.account.created",
-		Destinations:     []string{"kafka", "dapr", "tigerbeetle", "opensearch"},
-		KafkaTopic:       "remitflow.ledger.accounts",
-		DaprTopic:        "ledger-account-created",
-		DaprPubSub:       "remitflow-pubsub",
-		TigerBeetleOp:    "create_account",
-		OpenSearchIndex:  "ledger",
+		EventType:       "ledger.account.created",
+		Destinations:    []string{"kafka", "dapr", "tigerbeetle", "opensearch"},
+		KafkaTopic:      "remitflow.ledger.accounts",
+		DaprTopic:       "ledger-account-created",
+		DaprPubSub:      "remitflow-pubsub",
+		TigerBeetleOp:   "create_account",
+		OpenSearchIndex: "ledger",
 	},
 	{
 		EventType:        "ledger.reconciliation.triggered",
@@ -370,14 +370,14 @@ var routingTable = []RoutingRule{
 	},
 	// ── FX / Rates ──────────────────────────────────────────────────────────
 	{
-		EventType:        "fx.rate.updated",
-		Destinations:     []string{"kafka", "dapr", "fluvio", "redis", "opensearch"},
-		KafkaTopic:       "remitflow.fx.rates",
-		DaprTopic:        "fx-rate-updated",
-		DaprPubSub:       "remitflow-pubsub",
-		FluvioTopic:      "fx-rates",
-		OpenSearchIndex:  "fx-rates",
-		RedisKey:         "fx:rate:{pair}",
+		EventType:       "fx.rate.updated",
+		Destinations:    []string{"kafka", "dapr", "fluvio", "redis", "opensearch"},
+		KafkaTopic:      "remitflow.fx.rates",
+		DaprTopic:       "fx-rate-updated",
+		DaprPubSub:      "remitflow-pubsub",
+		FluvioTopic:     "fx-rates",
+		OpenSearchIndex: "fx-rates",
+		RedisKey:        "fx:rate:{pair}",
 	},
 	// ── Fraud / Risk ────────────────────────────────────────────────────────
 	{
@@ -405,39 +405,39 @@ var routingTable = []RoutingRule{
 	},
 	// ── Notifications ───────────────────────────────────────────────────────
 	{
-		EventType:        "notification.send",
-		Destinations:     []string{"kafka", "dapr"},
-		KafkaTopic:       "remitflow.notifications",
-		DaprTopic:        "send-notification",
-		DaprPubSub:       "remitflow-pubsub",
+		EventType:    "notification.send",
+		Destinations: []string{"kafka", "dapr"},
+		KafkaTopic:   "remitflow.notifications",
+		DaprTopic:    "send-notification",
+		DaprPubSub:   "remitflow-pubsub",
 	},
 	// ── WAF / Security ──────────────────────────────────────────────────────
 	{
-		EventType:        "waf.attack.detected",
-		Destinations:     []string{"kafka", "dapr", "opensearch", "apisix", "lakehouse"},
-		KafkaTopic:       "remitflow.security.waf",
-		DaprTopic:        "waf-attack",
-		DaprPubSub:       "remitflow-pubsub",
-		OpenSearchIndex:  "security-events",
-		LakehouseTable:   "security_events",
+		EventType:       "waf.attack.detected",
+		Destinations:    []string{"kafka", "dapr", "opensearch", "apisix", "lakehouse"},
+		KafkaTopic:      "remitflow.security.waf",
+		DaprTopic:       "waf-attack",
+		DaprPubSub:      "remitflow-pubsub",
+		OpenSearchIndex: "security-events",
+		LakehouseTable:  "security_events",
 	},
 }
 
 // ── Bus Server ────────────────────────────────────────────────────────────────
 
 type BusServer struct {
-	cfg     Config
-	metrics *Metrics
-	logger  *slog.Logger
-	mu      sync.RWMutex
+	cfg          Config
+	metrics      *Metrics
+	logger       *slog.Logger
+	mu           sync.RWMutex
 	healthStatus map[string]bool
 }
 
 func newBusServer(cfg Config) *BusServer {
 	return &BusServer{
-		cfg:     cfg,
-		metrics: newMetrics(),
-		logger:  slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		cfg:          cfg,
+		metrics:      newMetrics(),
+		logger:       slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})),
 		healthStatus: make(map[string]bool),
 	}
 }
@@ -460,9 +460,9 @@ func (s *BusServer) routeEvent(ctx context.Context, event PlatformEvent) error {
 		// Default routing: send to Kafka and OpenSearch for all unknown events
 		s.logger.Warn("no routing rule found, using default", "event_type", event.Type)
 		rule = &RoutingRule{
-			EventType:    event.Type,
-			Destinations: []string{"kafka", "opensearch"},
-			KafkaTopic:   fmt.Sprintf("remitflow.events.%s", event.Type),
+			EventType:       event.Type,
+			Destinations:    []string{"kafka", "opensearch"},
+			KafkaTopic:      fmt.Sprintf("remitflow.events.%s", event.Type),
 			OpenSearchIndex: "platform-events",
 		}
 	}
@@ -709,9 +709,9 @@ func (s *BusServer) routeToKeycloak(ctx context.Context, event PlatformEvent) er
 	if event.Type == "user.registered" {
 		kcURL := fmt.Sprintf("%s/admin/realms/%s/users", s.cfg.KeycloakURL, s.cfg.KeycloakRealm)
 		body := map[string]interface{}{
-			"username":  event.Payload["email"],
-			"email":     event.Payload["email"],
-			"enabled":   true,
+			"username": event.Payload["email"],
+			"email":    event.Payload["email"],
+			"enabled":  true,
 			"attributes": map[string]interface{}{
 				"tenantId": []string{event.TenantID},
 				"userId":   []string{event.UserID},
@@ -736,8 +736,8 @@ func (s *BusServer) routeToAPISIX(ctx context.Context, event PlatformEvent) erro
 			"username": event.UserID,
 			"plugins": map[string]interface{}{
 				"consumer-restriction": map[string]interface{}{
-					"type":     "consumer_name",
-					"whitelist": []string{},
+					"type":          "consumer_name",
+					"whitelist":     []string{},
 					"rejected_code": 403,
 					"rejected_msg":  "Account restricted pending compliance review",
 				},
@@ -762,14 +762,20 @@ func (s *BusServer) httpPatch(ctx context.Context, url string, body interface{})
 	return s.httpRequest(ctx, http.MethodPatch, url, body)
 }
 
+// Shared outbound HTTP clients (wave-14 perf): per-call client construction
+// disabled connection pooling. Separate vars keep the distinct timeout budgets.
+var (
+	busHTTPClient       = &http.Client{Timeout: 5 * time.Second}
+	busHealthHTTPClient = &http.Client{Timeout: 3 * time.Second}
+)
+
 func (s *BusServer) httpPostRaw(ctx context.Context, url string, payload []byte) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := busHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -793,8 +799,7 @@ func (s *BusServer) httpRequest(ctx context.Context, method, url string, body in
 	if method == http.MethodPatch || method == http.MethodPut {
 		req.Header.Set("X-API-KEY", s.cfg.APISIXAdminKey)
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := busHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -809,17 +814,17 @@ func (s *BusServer) httpRequest(ctx context.Context, method, url string, body in
 
 func (s *BusServer) runHealthChecks(ctx context.Context) {
 	systems := map[string]string{
-		"kafka":        fmt.Sprintf("http://localhost:%s/v1.0/metadata", s.cfg.DaprHTTPPort),
-		"dapr":         fmt.Sprintf("http://localhost:%s/v1.0/healthz", s.cfg.DaprHTTPPort),
-		"fluvio":       s.cfg.FluvioBridgeURL + "/health",
-		"mojaloop":     s.cfg.MojaloopConnURL + "/health",
-		"apisix":       s.cfg.APISIXAdminURL + "/apisix/admin/routes",
-		"keycloak":     fmt.Sprintf("%s/realms/%s", s.cfg.KeycloakURL, s.cfg.KeycloakRealm),
-		"permify":      s.cfg.PermifyURL + "/healthz",
-		"tigerbeetle":  s.cfg.TigerBeetleBridgeURL + "/health",
-		"opensearch":   s.cfg.OpenSearchURL + "/_cluster/health",
-		"openappsec":   s.cfg.OpenAppSecURL + "/health",
-		"lakehouse":    s.cfg.LakehouseURL + "/health",
+		"kafka":       fmt.Sprintf("http://localhost:%s/v1.0/metadata", s.cfg.DaprHTTPPort),
+		"dapr":        fmt.Sprintf("http://localhost:%s/v1.0/healthz", s.cfg.DaprHTTPPort),
+		"fluvio":      s.cfg.FluvioBridgeURL + "/health",
+		"mojaloop":    s.cfg.MojaloopConnURL + "/health",
+		"apisix":      s.cfg.APISIXAdminURL + "/apisix/admin/routes",
+		"keycloak":    fmt.Sprintf("%s/realms/%s", s.cfg.KeycloakURL, s.cfg.KeycloakRealm),
+		"permify":     s.cfg.PermifyURL + "/healthz",
+		"tigerbeetle": s.cfg.TigerBeetleBridgeURL + "/health",
+		"opensearch":  s.cfg.OpenSearchURL + "/_cluster/health",
+		"openappsec":  s.cfg.OpenAppSecURL + "/health",
+		"lakehouse":   s.cfg.LakehouseURL + "/health",
 	}
 
 	ticker := time.NewTicker(30 * time.Second)
@@ -832,8 +837,7 @@ func (s *BusServer) runHealthChecks(ctx context.Context) {
 		case <-ticker.C:
 			for name, url := range systems {
 				go func(n, u string) {
-					client := &http.Client{Timeout: 3 * time.Second}
-					resp, err := client.Get(u)
+					resp, err := busHealthHTTPClient.Get(u)
 					up := err == nil && resp != nil && resp.StatusCode < 500
 					if resp != nil {
 						resp.Body.Close()
@@ -922,10 +926,10 @@ func (s *BusServer) setupRoutes() *gin.Engine {
 			status = http.StatusPartialContent
 		}
 		c.JSON(status, gin.H{
-			"status":     "ok",
-			"systems":    s.healthStatus,
-			"all_up":     allUp,
-			"timestamp":  time.Now().UTC(),
+			"status":    "ok",
+			"systems":   s.healthStatus,
+			"all_up":    allUp,
+			"timestamp": time.Now().UTC(),
 		})
 	})
 
@@ -953,12 +957,19 @@ func main() {
 	go srv.runHealthChecks(ctx)
 
 	// Start metrics server
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsSrv := &http.Server{
+		Addr:              ":" + cfg.MetricsPort,
+		Handler:           metricsMux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	go func() {
-		mux := http.NewServeMux()
-		mux.Handle("/metrics", promhttp.Handler())
-		addr := ":" + cfg.MetricsPort
-		srv.logger.Info("metrics server starting", "addr", addr)
-		if err := http.ListenAndServe(addr, mux); err != nil {
+		srv.logger.Info("metrics server starting", "addr", metricsSrv.Addr)
+		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			srv.logger.Error("metrics server failed", "error", err)
 		}
 	}()
@@ -966,11 +977,12 @@ func main() {
 	// Start main API server
 	router := srv.setupRoutes()
 	httpSrv := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      router,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:              ":" + cfg.Port,
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {
@@ -991,6 +1003,9 @@ func main() {
 	defer shutdownCancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		srv.logger.Error("shutdown error", "error", err)
+	}
+	if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+		srv.logger.Error("metrics shutdown error", "error", err)
 	}
 	srv.logger.Info("middleware bus stopped")
 }

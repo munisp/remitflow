@@ -11,10 +11,10 @@ export default function WalletScreen() {
   const { data: wallets, isLoading, refetch } = trpc.wallet.list.useQuery();
   const createMutation = trpc.wallet.create.useMutation({
     onSuccess: () => refetch(),
-    onError: (e) => Alert.alert('Error', e.message),
+    onError: (e: any) => Alert.alert('Error', e.message),
   });
 
-  const totalUSD = wallets?.reduce((s, w) => s + Number(w.balanceUsd ?? 0), 0) ?? 0;
+  const totalUSD = wallets?.reduce((s: any, w: any) => s + Number(w.balanceUsd ?? 0), 0) ?? 0;
 
   return (
     <ScrollView style={styles.container}>
@@ -29,7 +29,7 @@ export default function WalletScreen() {
         <ActivityIndicator color="#6366f1" style={{ marginTop: 40 }} />
       ) : (
         <View style={styles.walletGrid}>
-          {(wallets ?? []).map((wallet) => (
+          {(wallets ?? []).map((wallet: any) => (
             <View key={wallet.id} style={styles.walletCard}>
               <Text style={styles.walletFlag}>{FLAG[wallet.currency] ?? '💱'}</Text>
               <Text style={styles.walletCurrency}>{wallet.currency}</Text>

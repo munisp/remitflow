@@ -19,17 +19,17 @@ import (
 
 // Rail represents a payment rail with health metrics
 type Rail struct {
-	ID           string  `json:"id"`
-	Name         string  `json:"name"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
 	Corridors    []string `json:"corridors"`
-	SuccessRate  float64 `json:"success_rate"`
-	AvgLatencyMs int64   `json:"avg_latency_ms"`
-	MaxAmount    float64 `json:"max_amount"`
-	MinAmount    float64 `json:"min_amount"`
-	IsHealthy    bool    `json:"is_healthy"`
-	CurrentLoad  float64 `json:"current_load"`
-	LastFailure  *string `json:"last_failure,omitempty"`
-	HealthScore  float64 `json:"health_score"`
+	SuccessRate  float64  `json:"success_rate"`
+	AvgLatencyMs int64    `json:"avg_latency_ms"`
+	MaxAmount    float64  `json:"max_amount"`
+	MinAmount    float64  `json:"min_amount"`
+	IsHealthy    bool     `json:"is_healthy"`
+	CurrentLoad  float64  `json:"current_load"`
+	LastFailure  *string  `json:"last_failure,omitempty"`
+	HealthScore  float64  `json:"health_score"`
 }
 
 // FailoverRequest is the input for rail selection
@@ -42,10 +42,10 @@ type FailoverRequest struct {
 
 // FailoverResponse contains the selected rail and fallbacks
 type FailoverResponse struct {
-	SelectedRail string             `json:"selected_rail"`
-	FallbackRails []string          `json:"fallback_rails"`
-	Reason       string             `json:"reason"`
-	HealthScores map[string]float64 `json:"health_scores"`
+	SelectedRail  string             `json:"selected_rail"`
+	FallbackRails []string           `json:"fallback_rails"`
+	Reason        string             `json:"reason"`
+	HealthScores  map[string]float64 `json:"health_scores"`
 }
 
 // HealthCheckResult from monitoring a rail
@@ -99,10 +99,11 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
 	}
 
 	go func() {
@@ -305,6 +306,7 @@ func selectRailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req FailoverRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -401,13 +403,14 @@ func executeFailoverHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		TransferID string `json:"transfer_id"`
-		FailedRail string `json:"failed_rail"`
-		Corridor   string `json:"corridor"`
+		TransferID string  `json:"transfer_id"`
+		FailedRail string  `json:"failed_rail"`
+		Corridor   string  `json:"corridor"`
 		Amount     float64 `json:"amount"`
-		Currency   string `json:"currency"`
+		Currency   string  `json:"currency"`
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return

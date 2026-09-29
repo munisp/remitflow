@@ -1,103 +1,124 @@
 /**
  * Root navigation for RemitFlow React Native app
  * Handles auth flow and main tab navigation
- * v120: Added 20 new screens for full PWA parity
+ *
+ * wave14 perf (H1): rarely-used detail screens are React.lazy'd behind a
+ * Suspense boundary so their modules are only evaluated (with Metro
+ * inlineRequires) when first navigated to. Auth-critical screens
+ * (Login/Onboarding) and the five main-tab screens (Dashboard first) stay
+ * eager so first paint and tab switches never hit a fallback spinner.
+ *
+ * wave14 perf (L3): the truncated VirtualAccountScreen.tsx (11 lines, cut
+ * off mid-statement) was deleted along with its commented-out registration;
+ * it never compiled and was never reachable.
  */
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { ActivityIndicator, View } from 'react-native';
 import { useAuth } from '../contexts/AuthContext';
 
-// Auth screens
+// Auth screens (eager — auth-critical)
 import LoginScreen from '../screens/LoginScreen';
+import OnboardingScreen from '../screens/OnboardingScreen';
 
-// Main tab screens
+// Main tab screens (eager — first paint + tab bar)
 import DashboardScreen from '../screens/DashboardScreen';
 import SendMoneyScreen from '../screens/SendMoneyScreen';
 import TransactionHistoryScreen from '../screens/TransactionHistoryScreen';
 import WalletScreen from '../screens/WalletScreen';
 import ProfileScreen from '../screens/ProfileScreen';
 
-// Detail screens — original
-import KYCScreen from '../screens/KYCScreen';
-import PaymentRailsScreen from '../screens/PaymentRailsScreen';
-import RevenueShareScreen from '../screens/RevenueShareScreen';
-import NotificationsScreen from '../screens/NotificationsScreen';
-import BeneficiaryScreen from '../screens/BeneficiaryScreen';
-import FXAlertsScreen from '../screens/FXAlertsScreen';
-import OnboardingScreen from '../screens/OnboardingScreen';
-import RequestMoneyScreen from '../screens/RequestMoneyScreen';
-import TransactionReceiptScreen from '../screens/TransactionReceiptScreen';
+function ScreenFallback() {
+  return (
+    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0f0f1a' }}>
+      <ActivityIndicator size="large" color="#6366f1" />
+    </View>
+  );
+}
 
-// Detail screens — v120 new screens
-import CardsScreen from '../screens/CardsScreen';
-import SavingsGoalsScreen from '../screens/SavingsGoalsScreen';
-import BNPLScreen from '../screens/BNPLScreen';
-import StablecoinScreen from '../screens/StablecoinScreen';
-import DisputesScreen from '../screens/DisputesScreen';
-import ReferralScreen from '../screens/ReferralScreen';
-import BatchPaymentsScreen from '../screens/BatchPaymentsScreen';
-import RateLockScreen from '../screens/RateLockScreen';
-import RateCalculatorScreen from '../screens/RateCalculatorScreen';
-import AirtimeScreen from '../screens/AirtimeScreen';
-import BillPaymentScreen from '../screens/BillPaymentScreen';
-import QRPayScreen from '../screens/QRPayScreen';
-import DirectDebitScreen from '../screens/DirectDebitScreen';
-import RecurringPaymentsScreen from '../screens/RecurringPaymentsScreen';
-// VirtualAccountScreen is disabled: its source file is truncated (11 lines,
-// cuts off mid-statement) both here and in the upstream remitflow repo it
-// was copied from — needs to be authored, not a mechanical fix.
-// import VirtualAccountScreen from '../screens/VirtualAccountScreen';
-import SettingsScreen from '../screens/SettingsScreen';
-import SupportScreen from '../screens/SupportScreen';
-import SplitBillScreen from '../screens/SplitBillScreen';
-import CBDCScreen from '../screens/CBDCScreen';
-import CheckoutSDKScreen from '../screens/CheckoutSDKScreen';
-// Detail screens — v140 parity screens
-import AfriMarketScreen from '../screens/AfriMarketScreen';
-import AgentNetworkScreen from '../screens/AgentNetworkScreen';
-import CBDCAdminScreen from '../screens/CBDCAdminScreen';
-import CorridorPricingAdminScreen from '../screens/CorridorPricingAdminScreen';
-import DocumentVaultScreen from '../screens/DocumentVaultScreen';
-import FXHedgingScreen from '../screens/FXHedgingScreen';
-import NotificationCenterScreen from '../screens/NotificationCenterScreen';
-import PBACPoliciesScreen from '../screens/PBACPoliciesScreen';
-import RevenueAnalyticsScreen from '../screens/RevenueAnalyticsScreen';
-import RevenueSharePWAScreen from '../screens/RevenueSharePWAScreen';
-import ServicesHealthDashboardScreen from '../screens/ServicesHealthDashboardScreen';
-import SystemConfigPageScreen from '../screens/SystemConfigPageScreen';
-// Detail screens — v138 security screens
-import FraudMonitorScreen from '../screens/FraudMonitorScreen';
-import SecurityDashboardScreen from '../screens/SecurityDashboardScreen';
-// Detail screens — v197 outbound revenue screens
-import SendFromNigeriaScreen from '../screens/SendFromNigeriaScreen';
-import EducationPaymentsScreen from '../screens/EducationPaymentsScreen';
-import MedicalTourismScreen from '../screens/MedicalTourismScreen';
-import FormalizationDashboardScreen from '../screens/FormalizationDashboardScreen';
-import OutboundRevenueModelScreen from '../screens/OutboundRevenueModelScreen';
-import RecipientOnboardingScreen from '../screens/RecipientOnboardingScreen';
-// Country-specific SendTo screens
-import SendToNigeriaScreen from '../screens/SendToNigeriaScreen';
-import SendToGhanaScreen from '../screens/SendToGhanaScreen';
-import SendToKenyaScreen from '../screens/SendToKenyaScreen';
-import SendToSouthAfricaScreen from '../screens/SendToSouthAfricaScreen';
-import SendToTanzaniaScreen from '../screens/SendToTanzaniaScreen';
-import SendToUgandaScreen from '../screens/SendToUgandaScreen';
-import SendToCameroonScreen from '../screens/SendToCameroonScreen';
-import SendToSenegalScreen from '../screens/SendToSenegalScreen';
-import SendToBeninScreen from '../screens/SendToBeninScreen';
-import SendToTogoScreen from '../screens/SendToTogoScreen';
-import SendToNigerScreen from '../screens/SendToNigerScreen';
-import SendToMaliScreen from '../screens/SendToMaliScreen';
-import SendToChinaScreen from '../screens/SendToChinaScreen';
-import SendToBrazilScreen from '../screens/SendToBrazilScreen';
-import SendToIndiaScreen from '../screens/SendToIndiaScreen';
-// wave12 BDC screens — orphan registration + new screens (SPEC-wave12 §6.2)
-import BDCPartnerPortalScreen from '../screens/BDCPartnerPortalScreen';
-import BdcOnboardingEmailPreviewScreen from '../screens/BdcOnboardingEmailPreviewScreen';
-import BdcPickupAuthorizationScreen from '../screens/BdcPickupAuthorizationScreen';
-import BdcReversalStatusScreen from '../screens/BdcReversalStatusScreen';
+/**
+ * Wrap a lazily-loaded screen module in its own Suspense boundary so a
+ * screen being loaded never unmounts the navigator chrome.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function lazyScreen<T extends React.ComponentType<any>>(loader: () => Promise<{ default: T }>) {
+  const Lazy = lazy(loader);
+  return function LazyScreen(props: React.ComponentProps<T>) {
+    return (
+      <Suspense fallback={<ScreenFallback />}>
+        <Lazy {...props} />
+      </Suspense>
+    );
+  };
+}
+
+// Detail screens (lazy — original)
+const KYCScreen = lazyScreen(() => import('../screens/KYCScreen'));
+const PaymentRailsScreen = lazyScreen(() => import('../screens/PaymentRailsScreen'));
+const RevenueShareScreen = lazyScreen(() => import('../screens/RevenueShareScreen'));
+const NotificationsScreen = lazyScreen(() => import('../screens/NotificationsScreen'));
+const BeneficiaryScreen = lazyScreen(() => import('../screens/BeneficiaryScreen'));
+const FXAlertsScreen = lazyScreen(() => import('../screens/FXAlertsScreen'));
+const RequestMoneyScreen = lazyScreen(() => import('../screens/RequestMoneyScreen'));
+const TransactionReceiptScreen = lazyScreen(() => import('../screens/TransactionReceiptScreen'));
+
+// Detail screens (lazy — v120 new screens)
+const CardsScreen = lazyScreen(() => import('../screens/CardsScreen'));
+const SavingsGoalsScreen = lazyScreen(() => import('../screens/SavingsGoalsScreen'));
+const BNPLScreen = lazyScreen(() => import('../screens/BNPLScreen'));
+const StablecoinScreen = lazyScreen(() => import('../screens/StablecoinScreen'));
+const DisputesScreen = lazyScreen(() => import('../screens/DisputesScreen'));
+const ReferralScreen = lazyScreen(() => import('../screens/ReferralScreen'));
+const BatchPaymentsScreen = lazyScreen(() => import('../screens/BatchPaymentsScreen'));
+const RateLockScreen = lazyScreen(() => import('../screens/RateLockScreen'));
+const RateCalculatorScreen = lazyScreen(() => import('../screens/RateCalculatorScreen'));
+const AirtimeScreen = lazyScreen(() => import('../screens/AirtimeScreen'));
+const BillPaymentScreen = lazyScreen(() => import('../screens/BillPaymentScreen'));
+const QRPayScreen = lazyScreen(() => import('../screens/QRPayScreen'));
+const DirectDebitScreen = lazyScreen(() => import('../screens/DirectDebitScreen'));
+const RecurringPaymentsScreen = lazyScreen(() => import('../screens/RecurringPaymentsScreen'));
+const SettingsScreen = lazyScreen(() => import('../screens/SettingsScreen'));
+const SupportScreen = lazyScreen(() => import('../screens/SupportScreen'));
+const SplitBillScreen = lazyScreen(() => import('../screens/SplitBillScreen'));
+const CBDCScreen = lazyScreen(() => import('../screens/CBDCScreen'));
+const CheckoutSDKScreen = lazyScreen(() => import('../screens/CheckoutSDKScreen'));
+
+// Detail screens (lazy — v140 parity screens)
+const AfriMarketScreen = lazyScreen(() => import('../screens/AfriMarketScreen'));
+const AgentNetworkScreen = lazyScreen(() => import('../screens/AgentNetworkScreen'));
+const CBDCAdminScreen = lazyScreen(() => import('../screens/CBDCAdminScreen'));
+const CorridorPricingAdminScreen = lazyScreen(() => import('../screens/CorridorPricingAdminScreen'));
+const DocumentVaultScreen = lazyScreen(() => import('../screens/DocumentVaultScreen'));
+const FXHedgingScreen = lazyScreen(() => import('../screens/FXHedgingScreen'));
+const NotificationCenterScreen = lazyScreen(() => import('../screens/NotificationCenterScreen'));
+const PBACPoliciesScreen = lazyScreen(() => import('../screens/PBACPoliciesScreen'));
+const RevenueAnalyticsScreen = lazyScreen(() => import('../screens/RevenueAnalyticsScreen'));
+const RevenueSharePWAScreen = lazyScreen(() => import('../screens/RevenueSharePWAScreen'));
+const ServicesHealthDashboardScreen = lazyScreen(() => import('../screens/ServicesHealthDashboardScreen'));
+const SystemConfigPageScreen = lazyScreen(() => import('../screens/SystemConfigPageScreen'));
+
+// Detail screens (lazy — v138 security screens)
+const FraudMonitorScreen = lazyScreen(() => import('../screens/FraudMonitorScreen'));
+const SecurityDashboardScreen = lazyScreen(() => import('../screens/SecurityDashboardScreen'));
+
+// Detail screens (lazy — v197 outbound revenue screens)
+const SendFromNigeriaScreen = lazyScreen(() => import('../screens/SendFromNigeriaScreen'));
+const EducationPaymentsScreen = lazyScreen(() => import('../screens/EducationPaymentsScreen'));
+const MedicalTourismScreen = lazyScreen(() => import('../screens/MedicalTourismScreen'));
+const FormalizationDashboardScreen = lazyScreen(() => import('../screens/FormalizationDashboardScreen'));
+const OutboundRevenueModelScreen = lazyScreen(() => import('../screens/OutboundRevenueModelScreen'));
+const RecipientOnboardingScreen = lazyScreen(() => import('../screens/RecipientOnboardingScreen'));
+
+// Country-specific SendTo screens (wave14 H1): ONE shared parameterized
+// screen; all 15 route names below render it with their route-keyed config.
+const SendToCountryScreen = lazyScreen(() => import('../screens/SendToCountryScreen'));
+
+// wave12 BDC screens (lazy)
+const BDCPartnerPortalScreen = lazyScreen(() => import('../screens/BDCPartnerPortalScreen'));
+const BdcOnboardingEmailPreviewScreen = lazyScreen(() => import('../screens/BdcOnboardingEmailPreviewScreen'));
+const BdcPickupAuthorizationScreen = lazyScreen(() => import('../screens/BdcPickupAuthorizationScreen'));
+const BdcReversalStatusScreen = lazyScreen(() => import('../screens/BdcReversalStatusScreen'));
 
 export type RootStackParamList = {
   Auth: undefined;
@@ -127,7 +148,6 @@ export type RootStackParamList = {
   QRPay: undefined;
   DirectDebit: undefined;
   RecurringPayments: undefined;
-  VirtualAccount: undefined;
   Settings: undefined;
   Support: undefined;
   SplitBill: undefined;
@@ -213,6 +233,10 @@ export default function RootNavigator() {
   const { isLoading, isAuthenticated } = useAuth();
 
   if (isLoading) {
+    // Only covers the one-time keystore session read (memoized in
+    // secureStorage). Once a cached session id is known, AuthContext reports
+    // isAuthenticated = true TENTATIVELY (wave14 H5) and Main renders while
+    // auth.me resolves asynchronously — no blocking spinner on the network.
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0f0f1a' }}>
         <ActivityIndicator size="large" color="#6366f1" />
@@ -254,7 +278,6 @@ export default function RootNavigator() {
           <Stack.Screen name="QRPay" component={QRPayScreen} />
           <Stack.Screen name="DirectDebit" component={DirectDebitScreen} />
           <Stack.Screen name="RecurringPayments" component={RecurringPaymentsScreen} />
-          {/* <Stack.Screen name="VirtualAccount" component={VirtualAccountScreen} /> */}
           <Stack.Screen name="Settings" component={SettingsScreen} />
           <Stack.Screen name="Support" component={SupportScreen} />
           <Stack.Screen name="SplitBill" component={SplitBillScreen} />
@@ -283,22 +306,23 @@ export default function RootNavigator() {
           <Stack.Screen name="FormalizationDashboard" component={FormalizationDashboardScreen} />
           <Stack.Screen name="OutboundRevenueModel" component={OutboundRevenueModelScreen} />
           <Stack.Screen name="RecipientOnboarding" component={RecipientOnboardingScreen} />
-          {/* Country-specific SendTo screens */}
-          <Stack.Screen name="SendToNigeria" component={SendToNigeriaScreen} />
-          <Stack.Screen name="SendToGhana" component={SendToGhanaScreen} />
-          <Stack.Screen name="SendToKenya" component={SendToKenyaScreen} />
-          <Stack.Screen name="SendToSouthAfrica" component={SendToSouthAfricaScreen} />
-          <Stack.Screen name="SendToTanzania" component={SendToTanzaniaScreen} />
-          <Stack.Screen name="SendToUganda" component={SendToUgandaScreen} />
-          <Stack.Screen name="SendToCameroon" component={SendToCameroonScreen} />
-          <Stack.Screen name="SendToSenegal" component={SendToSenegalScreen} />
-          <Stack.Screen name="SendToBenin" component={SendToBeninScreen} />
-          <Stack.Screen name="SendToTogo" component={SendToTogoScreen} />
-          <Stack.Screen name="SendToNiger" component={SendToNigerScreen} />
-          <Stack.Screen name="SendToMali" component={SendToMaliScreen} />
-          <Stack.Screen name="SendToChina" component={SendToChinaScreen} />
-          <Stack.Screen name="SendToBrazil" component={SendToBrazilScreen} />
-          <Stack.Screen name="SendToIndia" component={SendToIndiaScreen} />
+          {/* Country-specific SendTo screens — all render SendToCountryScreen
+              with their route-keyed config (wave14 H1) */}
+          <Stack.Screen name="SendToNigeria" component={SendToCountryScreen} />
+          <Stack.Screen name="SendToGhana" component={SendToCountryScreen} />
+          <Stack.Screen name="SendToKenya" component={SendToCountryScreen} />
+          <Stack.Screen name="SendToSouthAfrica" component={SendToCountryScreen} />
+          <Stack.Screen name="SendToTanzania" component={SendToCountryScreen} />
+          <Stack.Screen name="SendToUganda" component={SendToCountryScreen} />
+          <Stack.Screen name="SendToCameroon" component={SendToCountryScreen} />
+          <Stack.Screen name="SendToSenegal" component={SendToCountryScreen} />
+          <Stack.Screen name="SendToBenin" component={SendToCountryScreen} />
+          <Stack.Screen name="SendToTogo" component={SendToCountryScreen} />
+          <Stack.Screen name="SendToNiger" component={SendToCountryScreen} />
+          <Stack.Screen name="SendToMali" component={SendToCountryScreen} />
+          <Stack.Screen name="SendToChina" component={SendToCountryScreen} />
+          <Stack.Screen name="SendToBrazil" component={SendToCountryScreen} />
+          <Stack.Screen name="SendToIndia" component={SendToCountryScreen} />
           {/* wave12 BDC screens */}
           <Stack.Screen name="BDCPartnerPortal" component={BDCPartnerPortalScreen} />
           <Stack.Screen name="BdcOnboardingEmailPreview" component={BdcOnboardingEmailPreviewScreen} />

@@ -4,13 +4,14 @@
 package main
 
 import (
-	"database/sql"
-	_ "github.com/lib/pq"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	_ "github.com/lib/pq"
 	"log/slog"
 	"math"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,6 +26,18 @@ import (
 var _processStartTime = time.Now()
 
 var db *sql.DB
+
+// providerClient is the shared HTTP client for upstream FX providers — one
+// pooled transport (per-host idle conns cover the concurrent provider fan-out)
+// and a hard 8s timeout, instead of http.DefaultClient (no timeout).
+var providerClient = &http.Client{
+	Timeout: 8 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 16,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
 
 type Provider struct {
 	Name     string
@@ -74,13 +87,42 @@ func (c *RateCache) Get(pair string) (AggregatedRate, bool) {
 	return r, true
 }
 
+// rateFlushQueue feeds the single bounded flush worker that persists cache
+// writes to PostgreSQL. A full queue DROPS the upsert (logged in the worker's
+// absence — the next 60s poll re-writes the pair anyway; rates are
+// re-derivable, so dropping a flush never loses authoritative state).
+const rateFlushQueueSize = 512
+
+var rateFlushQueue = make(chan rateFlushJob, rateFlushQueueSize)
+
+type rateFlushJob struct {
+	id   string
+	rate AggregatedRate
+}
+
+// rateFlushWorker is the ONLY goroutine writing rate rows to PostgreSQL —
+// one writer, bounded backlog, instead of one goroutine per cache Set.
+func rateFlushWorker() {
+	for job := range rateFlushQueue {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := dbUpsert(ctx, job.id, job.rate); err != nil {
+			slog.Warn("rate flush upsert failed (best-effort)", "id", job.id, "err", err)
+		}
+		cancel()
+	}
+}
+
 func (c *RateCache) Set(pair string, rate AggregatedRate) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.rates[pair] = rate
-	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+	c.mu.Unlock()
+	// Write-through to PostgreSQL via the bounded flush worker.
 	if db != nil {
-		go func() { _ = dbUpsert("rate:"+pair, rate) }()
+		select {
+		case rateFlushQueue <- rateFlushJob{id: "rate:" + pair, rate: rate}:
+		default:
+			slog.Warn("rate flush queue full — dropping upsert", "pair", pair)
+		}
 	}
 }
 
@@ -103,7 +145,7 @@ func fetchCurrencyLayer(ctx context.Context, base string) (map[string]float64, e
 	url := fmt.Sprintf("http://api.currencylayer.com/live?access_key=%s&source=%s", apiKey, base)
 
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := providerClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("currencylayer request failed: %w", err)
 	}
@@ -140,7 +182,7 @@ func fetchOpenExchangeRates(ctx context.Context, base string) (map[string]float6
 	url := fmt.Sprintf("https://openexchangerates.org/api/latest.json?app_id=%s&base=%s", appID, base)
 
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := providerClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("openexchangerates request failed: %w", err)
 	}
@@ -159,7 +201,7 @@ func fetchOpenExchangeRates(ctx context.Context, base string) (map[string]float6
 func fetchECB(ctx context.Context, _ string) (map[string]float64, error) {
 	url := "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := providerClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("ECB request failed: %w", err)
 	}
@@ -216,7 +258,6 @@ func calculateSpread(entries []RateEntry) float64 {
 	return math.Abs(max-min) / mid * 100 // spread as percentage
 }
 
-
 func initDB() error {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -258,12 +299,12 @@ func initDB() error {
 }
 
 // dbUpsert stores or updates a record in the service state table
-func dbUpsert(id string, data interface{}) error {
+func dbUpsert(ctx context.Context, id string, data interface{}) error {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO fx_aggregator_state (id, data, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
@@ -272,9 +313,9 @@ func dbUpsert(id string, data interface{}) error {
 }
 
 // dbGet retrieves a record from the service state table
-func dbGet(id string, dest interface{}) error {
+func dbGet(ctx context.Context, id string, dest interface{}) error {
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM fx_aggregator_state WHERE id = $1", id).Scan(&jsonData)
+	err := db.QueryRowContext(ctx, "SELECT data FROM fx_aggregator_state WHERE id = $1", id).Scan(&jsonData)
 	if err != nil {
 		return err
 	}
@@ -282,8 +323,8 @@ func dbGet(id string, dest interface{}) error {
 }
 
 // dbList retrieves all records from the service state table
-func dbList(limit int) ([]json.RawMessage, error) {
-	rows, err := db.Query("SELECT data FROM fx_aggregator_state ORDER BY updated_at DESC LIMIT $1", limit)
+func dbList(ctx context.Context, limit int) ([]json.RawMessage, error) {
+	rows, err := db.QueryContext(ctx, "SELECT data FROM fx_aggregator_state ORDER BY updated_at DESC LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -305,11 +346,13 @@ func dbLogEvent(eventType string, payload interface{}) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("INSERT INTO fx_aggregator_events (event_type, payload) VALUES ($1, $2)",
+	// W14 residual: bounded 5s ctx (was a no-timeout DB call on the event path).
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = db.ExecContext(ctx, "INSERT INTO fx_aggregator_events (event_type, payload) VALUES ($1, $2)",
 		eventType, jsonData)
 	return err
 }
-
 
 // loadFromDB populates in-memory state from database on startup (write-through cache warm)
 func loadFromDB() {
@@ -358,29 +401,40 @@ func main() {
 		{Name: "ecb", Priority: 3, Fetch: fetchECB},
 	}
 
-	// Background rate fetcher
+	// Background rate fetcher: providers are fetched CONCURRENTLY per base
+	// (they are independent), and the 60s poll carries ±10s jitter so
+	// clustered replicas don't stampede upstream providers in lockstep.
 	go func() {
 		bases := []string{"USD", "GBP", "EUR", "NGN"}
 		for {
 			for _, base := range bases {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				var allEntries = make(map[string][]RateEntry)
+				var entriesMu sync.Mutex
 
+				var wg sync.WaitGroup
 				for _, p := range providers {
-					rates, err := p.Fetch(ctx, base)
-					if err != nil {
-						slog.Warn("Provider fetch failed", "provider", p.Name, "base", base, "error", err)
-						continue
-					}
-					for target, rate := range rates {
-						pair := base + "/" + target
-						allEntries[pair] = append(allEntries[pair], RateEntry{
-							Rate:      rate,
-							Source:    p.Name,
-							FetchedAt: time.Now(),
-						})
-					}
+					wg.Add(1)
+					go func(p Provider) {
+						defer wg.Done()
+						rates, err := p.Fetch(ctx, base)
+						if err != nil {
+							slog.Warn("Provider fetch failed", "provider", p.Name, "base", base, "error", err)
+							return
+						}
+						entriesMu.Lock()
+						for target, rate := range rates {
+							pair := base + "/" + target
+							allEntries[pair] = append(allEntries[pair], RateEntry{
+								Rate:      rate,
+								Source:    p.Name,
+								FetchedAt: time.Now(),
+							})
+						}
+						entriesMu.Unlock()
+					}(p)
 				}
+				wg.Wait()
 
 				for pair, entries := range allEntries {
 					agg := AggregatedRate{
@@ -402,7 +456,9 @@ func main() {
 				cancel()
 			}
 
-			time.Sleep(60 * time.Second) // Refresh every minute
+			// Refresh every ~minute, with up to 10s jitter.
+			jitter := time.Duration(rand.Int63n(10 * int64(time.Second)))
+			time.Sleep(60*time.Second + jitter)
 		}
 	}()
 
@@ -424,22 +480,24 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		// DB-primary read: reconstruct from stored state if available
-		if db != nil {
-			var dbRates map[string]AggregatedRate
-			if dbErr := dbGet("rates_cache", &dbRates); dbErr == nil && len(dbRates) > 0 {
-				dbFiltered := make(map[string]AggregatedRate)
-				for pair, rate := range dbRates {
-					if len(pair) >= 3 && pair[:3] == base {
-						dbFiltered[pair] = rate
+		// CACHE-FIRST: serve from memory; hit PostgreSQL only on a cold cache
+		// (e.g. fresh boot before the first poll completes). The poller keeps
+		// the cache warm, so the steady-state path never touches the DB.
+		if len(filtered) == 0 && db != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+			rows, dbErr := dbList(ctx, 1000)
+			cancel()
+			if dbErr == nil {
+				for _, raw := range rows {
+					var rate AggregatedRate
+					if jsonErr := json.Unmarshal(raw, &rate); jsonErr != nil {
+						continue
+					}
+					// Rows are keyed "rate:<PAIR>"; the pair is inside the doc.
+					if len(rate.Pair) >= 3 && rate.Pair[:3] == base {
+						filtered[rate.Pair] = rate
 					}
 				}
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"base":  base,
-					"rates": dbFiltered,
-					"count": len(dbFiltered),
-				})
-				return
 			}
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -460,20 +518,16 @@ func main() {
 
 		pair := from + "/" + to
 
-		// Try DB-primary read first
-		if db != nil {
-			var dbRates map[string]AggregatedRate
-			if dbErr := dbGet("rates_cache", &dbRates); dbErr == nil {
-				if dbRate, found := dbRates[pair]; found {
-					w.Header().Set("Content-Type", "application/json")
-					json.NewEncoder(w).Encode(dbRate)
-					return
-				}
-			}
-		}
-
-		// Fall back to in-memory cache
+		// CACHE-FIRST: in-memory cache is the steady-state source.
 		rate, ok := cache.Get(pair)
+		if !ok && db != nil {
+			// Cold-cache miss (fresh boot): try the persisted row written by
+			// the flush worker under key "rate:<PAIR>".
+			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+			dbErr := dbGet(ctx, "rate:"+pair, &rate)
+			cancel()
+			ok = dbErr == nil
+		}
 		if !ok {
 			http.Error(w, fmt.Sprintf(`{"error": "rate not found for %s"}`, pair), http.StatusNotFound)
 			return
@@ -503,7 +557,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
 		if db != nil {
-			dbData, dbErr := dbList(100)
+			dbData, dbErr := dbList(r.Context(), 100)
 			if dbErr == nil && len(dbData) > 0 {
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(dbData)
@@ -517,7 +571,17 @@ func main() {
 		})
 	})
 
-	server := &http.Server{Addr: ":" + port, Handler: mux}
+	// Start the bounded DB flush worker before serving traffic.
+	go rateFlushWorker()
+
+	server := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	// Graceful shutdown
 	go func() {

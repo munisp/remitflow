@@ -30,8 +30,11 @@ from enum import Enum
 from statistics import median
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from contextlib import asynccontextmanager
+
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel
+import httpx
 import uvicorn
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -65,6 +68,31 @@ DEPEG_POLL_INTERVAL = int(os.environ.get("DEPEG_POLL_INTERVAL", "300"))  # 5 min
 
 logger = logging.getLogger("stablecoin-oracle")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+# ── Shared HTTP client (SPEC-wave14 §4.2) ────────────────────────────────────
+# One lifespan-managed AsyncClient for ALL outbound HTTP (FX providers, Pyth /
+# Chainlink oracles, core API, lakehouse). Per-request `AsyncClient(...)`
+# construction paid full connection-pool + TLS setup on every call; the
+# singleton reuses keep-alive connections. Default timeout 5s; the two core-API
+# call sites pass an explicit per-request 15s override. Pool capped at 100
+# connections.
+_http_client: httpx.AsyncClient | None = None
+
+
+def get_http_client() -> httpx.AsyncClient:
+    """Return the lifespan-managed shared client.
+
+    Lazy fallback exists only so module-level consumers (tests, background
+    loops started outside the lifespan) never see None — in normal serving the
+    lifespan handler creates the client before any request is accepted.
+    """
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(5.0),
+            limits=httpx.Limits(max_connections=100),
+        )
+    return _http_client
 
 # ── Data Models ──────────────────────────────────────────────────────────────
 
@@ -223,21 +251,20 @@ class LakehouseIngestRequest(BaseModel):
 async def fetch_ecb_rate(base: str, target: str) -> float | None:
     """Fetch FX rate from European Central Bank."""
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            url = f"{ECB_API_URL}/D.{target}.EUR.SP00.A?format=csvdata&lastNObservations=1"
-            resp = await client.get(url)
-            if resp.status_code == 200:
-                lines = resp.text.strip().split("\n")
-                if len(lines) > 1:
-                    rate = float(lines[-1].split(",")[-1])
-                    if base == "EUR":
-                        return rate
-                    usd_resp = await client.get(f"{ECB_API_URL}/D.USD.EUR.SP00.A?format=csvdata&lastNObservations=1")
-                    if usd_resp.status_code == 200:
-                        usd_lines = usd_resp.text.strip().split("\n")
-                        usd_rate = float(usd_lines[-1].split(",")[-1])
-                        return rate / usd_rate
+        client = get_http_client()
+        url = f"{ECB_API_URL}/D.{target}.EUR.SP00.A?format=csvdata&lastNObservations=1"
+        resp = await client.get(url)
+        if resp.status_code == 200:
+            lines = resp.text.strip().split("\n")
+            if len(lines) > 1:
+                rate = float(lines[-1].split(",")[-1])
+                if base == "EUR":
+                    return rate
+                usd_resp = await client.get(f"{ECB_API_URL}/D.USD.EUR.SP00.A?format=csvdata&lastNObservations=1")
+                if usd_resp.status_code == 200:
+                    usd_lines = usd_resp.text.strip().split("\n")
+                    usd_rate = float(usd_lines[-1].split(",")[-1])
+                    return rate / usd_rate
     except Exception as e:
         logger.warning(f"ECB rate fetch failed: {e}")
     return None
@@ -248,16 +275,15 @@ async def fetch_open_exchange_rate(base: str, target: str) -> float | None:
     if not OPEN_EXCHANGE_APP_ID:
         return None
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{OPEN_EXCHANGE_URL}?app_id={OPEN_EXCHANGE_APP_ID}")
-            if resp.status_code == 200:
-                data = resp.json()
-                rates = data.get("rates", {})
-                if target in rates and base in rates:
-                    return rates[target] / rates[base]
-                elif target in rates and base == "USD":
-                    return rates[target]
+        client = get_http_client()
+        resp = await client.get(f"{OPEN_EXCHANGE_URL}?app_id={OPEN_EXCHANGE_APP_ID}")
+        if resp.status_code == 200:
+            data = resp.json()
+            rates = data.get("rates", {})
+            if target in rates and base in rates:
+                return rates[target] / rates[base]
+            elif target in rates and base == "USD":
+                return rates[target]
     except Exception as e:
         logger.warning(f"Open Exchange rate fetch failed: {e}")
     return None
@@ -268,14 +294,13 @@ async def fetch_wise_rate(base: str, target: str) -> float | None:
     if not WISE_API_KEY:
         return None
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            headers = {"Authorization": f"Bearer {WISE_API_KEY}"}
-            resp = await client.get(f"{WISE_API_URL}?source={base}&target={target}", headers=headers)
-            if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, list) and data:
-                    return data[0].get("rate")
+        client = get_http_client()
+        headers = {"Authorization": f"Bearer {WISE_API_KEY}"}
+        resp = await client.get(f"{WISE_API_URL}?source={base}&target={target}", headers=headers)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and data:
+                return data[0].get("rate")
     except Exception as e:
         logger.warning(f"Wise rate fetch failed: {e}")
     return None
@@ -286,16 +311,15 @@ async def fetch_xe_rate(base: str, target: str) -> float | None:
     if not XE_ACCOUNT_ID or not XE_API_KEY:
         return None
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            auth = (XE_ACCOUNT_ID, XE_API_KEY)
-            resp = await client.get(
-                f"{XE_API_URL}?from={base}&to={target}&amount=1", auth=auth
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                if "to" in data and len(data["to"]) > 0:
-                    return data["to"][0].get("mid")
+        client = get_http_client()
+        auth = (XE_ACCOUNT_ID, XE_API_KEY)
+        resp = await client.get(
+            f"{XE_API_URL}?from={base}&to={target}&amount=1", auth=auth
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if "to" in data and len(data["to"]) > 0:
+                return data["to"][0].get("mid")
     except Exception as e:
         logger.warning(f"XE rate fetch failed: {e}")
     return None
@@ -386,16 +410,15 @@ async def fetch_pyth_price(symbol: str) -> float | None:
     if not feed_id:
         return None
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{PYTH_NETWORK_URL}?ids[]={feed_id}")
-            if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, list) and data:
-                    price_info = data[0].get("price", {})
-                    price = int(price_info.get("price", 0))
-                    expo = int(price_info.get("expo", 0))
-                    return price * (10 ** expo)
+        client = get_http_client()
+        resp = await client.get(f"{PYTH_NETWORK_URL}?ids[]={feed_id}")
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and data:
+                price_info = data[0].get("price", {})
+                price = int(price_info.get("price", 0))
+                expo = int(price_info.get("expo", 0))
+                return price * (10 ** expo)
     except Exception as e:
         logger.warning(f"Pyth price fetch failed for {symbol}: {e}")
     return None
@@ -407,7 +430,6 @@ async def fetch_chainlink_price(symbol: str) -> float | None:
     if not feed_addr or not CHAINLINK_RPC:
         return None
     try:
-        import httpx
         # ABI for latestRoundData(): (uint80, int256, uint256, uint256, uint80)
         call_data = "0xfeaf968c"
         payload = {
@@ -416,14 +438,14 @@ async def fetch_chainlink_price(symbol: str) -> float | None:
             "params": [{"to": feed_addr, "data": call_data}, "latest"],
             "id": 1,
         }
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(CHAINLINK_RPC, json=payload)
-            if resp.status_code == 200:
-                data = resp.json()
-                result = data.get("result", "0x")
-                if len(result) >= 130:
-                    answer = int(result[66:130], 16)
-                    return answer / 1e8  # Chainlink uses 8 decimals for USD feeds
+        client = get_http_client()
+        resp = await client.post(CHAINLINK_RPC, json=payload)
+        if resp.status_code == 200:
+            data = resp.json()
+            result = data.get("result", "0x")
+            if len(result) >= 130:
+                answer = int(result[66:130], 16)
+                return answer / 1e8  # Chainlink uses 8 decimals for USD feeds
     except Exception as e:
         logger.warning(f"Chainlink price fetch failed for {symbol}: {e}")
     return None
@@ -567,31 +589,33 @@ async def execute_dca(plan: DcaPlan) -> dict:
     logger.info(f"Executing DCA plan {plan.plan_id}: {plan.amount} {plan.fiat_currency} → {plan.stablecoin}")
 
     try:
-        import httpx
         core_url = os.environ.get("CORE_API_URL", "http://localhost:3000")
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                f"{core_url}/api/trpc/stablecoin.buyWithFiat",
-                json={
-                    "json": {
-                        "stablecoinAmount": plan.amount,
-                        "stablecoin": plan.stablecoin,
-                        "fiatCurrency": plan.fiat_currency,
-                        "paymentMethod": "wallet_balance",
-                        "source": "dca_scheduler",
-                        "dcaPlanId": plan.plan_id,
-                    }
-                },
-                headers={"x-user-id": str(plan.user_id)},
-            )
-            if resp.status_code == 200:
-                plan.total_executed += 1
-                plan.total_invested += plan.amount
-                plan.next_execution = get_next_execution(plan.frequency).isoformat()
-                return {"success": True, "plan_id": plan.plan_id, "execution_count": plan.total_executed}
-            else:
-                logger.warning(f"DCA execution failed: {resp.status_code} {resp.text[:200]}")
-                return {"success": False, "plan_id": plan.plan_id, "error": resp.text[:200]}
+        client = get_http_client()
+        # Per-request 15s timeout override on the shared 5s client — the core
+        # buyWithFiat path can legitimately take longer than an oracle fetch.
+        resp = await client.post(
+            f"{core_url}/api/trpc/stablecoin.buyWithFiat",
+            json={
+                "json": {
+                    "stablecoinAmount": plan.amount,
+                    "stablecoin": plan.stablecoin,
+                    "fiatCurrency": plan.fiat_currency,
+                    "paymentMethod": "wallet_balance",
+                    "source": "dca_scheduler",
+                    "dcaPlanId": plan.plan_id,
+                }
+            },
+            headers={"x-user-id": str(plan.user_id)},
+            timeout=15.0,
+        )
+        if resp.status_code == 200:
+            plan.total_executed += 1
+            plan.total_invested += plan.amount
+            plan.next_execution = get_next_execution(plan.frequency).isoformat()
+            return {"success": True, "plan_id": plan.plan_id, "execution_count": plan.total_executed}
+        else:
+            logger.warning(f"DCA execution failed: {resp.status_code} {resp.text[:200]}")
+            return {"success": False, "plan_id": plan.plan_id, "error": resp.text[:200]}
     except Exception as e:
         logger.error(f"DCA execution error: {e}")
         oracle_metrics["errors"] += 1
@@ -630,14 +654,13 @@ async def ingest_to_lakehouse(event_type: str, payload: dict) -> dict:
     }
 
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                f"{LAKEHOUSE_URL}/v1/namespaces/remitflow/tables/stablecoin_events_bronze/records",
-                json=event,
-            )
-            if resp.status_code < 300:
-                return {"success": True, "event_id": event["checksum"]}
+        client = get_http_client()
+        resp = await client.post(
+            f"{LAKEHOUSE_URL}/v1/namespaces/remitflow/tables/stablecoin_events_bronze/records",
+            json=event,
+        )
+        if resp.status_code < 300:
+            return {"success": True, "event_id": event["checksum"]}
     except Exception as e:
         logger.warning(f"Lakehouse ingestion failed: {e}")
 
@@ -648,7 +671,35 @@ async def ingest_to_lakehouse(event_type: str, payload: dict) -> dict:
 
 # ── FastAPI Application ──────────────────────────────────────────────────────
 
-app = FastAPI(title="RemitFlow Stablecoin Oracle", version="1.0.0")
+startup_time = time.time()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """SPEC-wave14 §4.2: create the shared AsyncClient at startup and close it
+    on shutdown; start background loops here (replaces @app.on_event, which is
+    ignored when a lifespan is supplied)."""
+    global startup_time, _http_client
+    startup_time = time.time()
+    _http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(5.0),
+        limits=httpx.Limits(max_connections=100),
+    )
+    logger.info(f"Stablecoin Oracle starting on port {PORT}")
+    tasks = [
+        asyncio.create_task(depeg_monitoring_loop()),
+        asyncio.create_task(dca_scheduler_loop()),
+    ]
+    try:
+        yield
+    finally:
+        for t in tasks:
+            t.cancel()
+        await _http_client.aclose()
+        _http_client = None
+
+
+app = FastAPI(title="RemitFlow Stablecoin Oracle", version="1.0.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -666,7 +717,7 @@ async def health():
 
 
 @app.post("/fx/rate")
-async def fx_rate(req: FxRateRequest):
+async def fx_rate(req: FxRateRequest, background_tasks: BackgroundTasks):
     """Multi-source FX rate with median verification and caching."""
     if req.base not in SUPPORTED_FIAT and req.base != "USD":
         raise HTTPException(400, f"Unsupported base currency: {req.base}")
@@ -675,8 +726,11 @@ async def fx_rate(req: FxRateRequest):
 
     result = await get_multi_source_fx_rate(req.base, req.target)
 
-    # Ingest to lakehouse
-    await ingest_to_lakehouse("fx_rate_fetch", {
+    # SPEC-wave14 §4.2: lakehouse ingestion is telemetry — run it AFTER the
+    # response is sent (BackgroundTasks) so it never adds latency to the FX
+    # request path. Ingestion failures already degrade to a local-log fallback
+    # inside ingest_to_lakehouse.
+    background_tasks.add_task(ingest_to_lakehouse, "fx_rate_fetch", {
         "base": req.base,
         "target": req.target,
         "rate": result.rate,
@@ -733,7 +787,7 @@ async def get_depeg_alerts():
 
 
 @app.post("/dca/create")
-async def create_dca_plan(req: DcaPlanRequest):
+async def create_dca_plan(req: DcaPlanRequest, background_tasks: BackgroundTasks):
     """Create a new DCA plan."""
     if req.stablecoin not in SUPPORTED_STABLECOINS:
         raise HTTPException(400, f"Unsupported stablecoin: {req.stablecoin}")
@@ -757,7 +811,8 @@ async def create_dca_plan(req: DcaPlanRequest):
     )
     dca_plans[plan_id] = plan
 
-    await ingest_to_lakehouse("dca_plan_created", {
+    # Lakehouse ingestion off the request path (see /fx/rate note).
+    background_tasks.add_task(ingest_to_lakehouse, "dca_plan_created", {
         "plan_id": plan_id,
         "user_id": req.user_id,
         "stablecoin": req.stablecoin,
@@ -823,23 +878,24 @@ async def execute_auto_convert(request: Request):
     logger.info(f"Auto-converting {convert_amount} {currency} → {target} for user {user_id}")
 
     try:
-        import httpx
         core_url = os.environ.get("CORE_API_URL", "http://localhost:3000")
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                f"{core_url}/api/trpc/stablecoin.buyWithFiat",
-                json={
-                    "json": {
-                        "stablecoinAmount": convert_amount,
-                        "stablecoin": target,
-                        "fiatCurrency": currency,
-                        "paymentMethod": "wallet_balance",
-                        "source": "auto_convert",
-                    }
-                },
-                headers={"x-user-id": str(user_id)},
-            )
-            return {"converted": True, "amount": convert_amount, "target": target, "status": resp.status_code}
+        client = get_http_client()
+        # Per-request 15s timeout override (see execute_dca).
+        resp = await client.post(
+            f"{core_url}/api/trpc/stablecoin.buyWithFiat",
+            json={
+                "json": {
+                    "stablecoinAmount": convert_amount,
+                    "stablecoin": target,
+                    "fiatCurrency": currency,
+                    "paymentMethod": "wallet_balance",
+                    "source": "auto_convert",
+                }
+            },
+            headers={"x-user-id": str(user_id)},
+            timeout=15.0,
+        )
+        return {"converted": True, "amount": convert_amount, "target": target, "status": resp.status_code}
     except Exception as e:
         logger.error(f"Auto-convert execution error: {e}")
         return {"converted": False, "reason": str(e)}
@@ -866,18 +922,9 @@ async def metrics():
 
 
 # ── Lifecycle ────────────────────────────────────────────────────────────────
-
-startup_time = time.time()
-
-
-@app.on_event("startup")
-async def on_startup():
-    global startup_time
-    startup_time = time.time()
-    logger.info(f"Stablecoin Oracle starting on port {PORT}")
-    asyncio.create_task(depeg_monitoring_loop())
-    asyncio.create_task(dca_scheduler_loop())
-
+# Startup/shutdown now live in the `lifespan` handler above (shared HTTP
+# client + background loops); @app.on_event is ignored once a lifespan is
+# supplied, so the old handler was removed.
 
 shutdown_event = asyncio.Event()
 
@@ -891,4 +938,6 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+    # SPEC-wave14 §4.6: worker count is env-configurable (default 1).
+    workers = int(os.environ.get("UVICORN_WORKERS", "1"))
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, log_level="info", workers=workers)

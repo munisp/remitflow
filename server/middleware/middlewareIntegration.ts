@@ -162,6 +162,12 @@ interface RedisClientLike {
   pSubscribe?(pattern: string, listener: (message: string, channel: string) => void): Promise<unknown>;
 }
 
+// W14 NOTE (dual-stack, documented not ripped out): this class uses the
+// node-redis `createClient` stack while server/middleware/redis.ts +
+// redisHardened.ts use ioredis via getRedisClient(). Both coexist; new cache
+// code should prefer getRedisClient(). Consolidation is deliberately NOT in
+// this wave — the subscribers/pub-sub paths here have no ioredis equivalent
+// wired and the risk outweighs the gain.
 export class RedisIntegration {
   private connected = false;
   private client: RedisClientLike | null = null;
@@ -1207,6 +1213,54 @@ export class TigerBeetleIntegration {
     }
   }
 
+  /**
+   * W14: batched createTransfers — ONE cluster call for many transfers.
+   * Per-transfer result-code attribution preserved: TB returns per-index
+   * results; exists(46) per index is idempotent-replay success, any other
+   * non-zero result throws with the full per-index error list.
+   */
+  async createTransfersBatch(transfers: Array<{
+    id: bigint;
+    debitAccountId: bigint;
+    creditAccountId: bigint;
+    amount: bigint;
+    ledger: number;
+    code: number;
+    pending?: boolean;
+    timeout?: number;
+    userData128?: bigint;
+  }>): Promise<void> {
+    await this.ensureConnected();
+    if (transfers.length === 0) return;
+    if (!this.client) {
+      logger.warn({ count: transfers.length }, "[TigerBeetle] Skipping batch transfers (dev mode)");
+      return;
+    }
+    const results = await this.client.createTransfers(transfers.map((t) => ({
+      id: t.id,
+      debit_account_id: t.debitAccountId,
+      credit_account_id: t.creditAccountId,
+      amount: t.amount,
+      pending_id: BigInt(0),
+      user_data_128: t.userData128 ?? BigInt(0),
+      user_data_64: BigInt(0),
+      user_data_32: 0,
+      timeout: t.timeout ?? 0,
+      ledger: t.ledger,
+      code: t.code,
+      flags: t.pending ? 2 : 0, // TransferFlags.pending
+      timestamp: BigInt(0),
+    })));
+    if (results && results.length > 0) {
+      const errors = results.filter((r: { result: number }) => r.result !== 0 && r.result !== 46);
+      if (errors.length > 0) {
+        const msg = `[TigerBeetle] Batch transfer failed: ${JSON.stringify(errors)}`;
+        logger.error({ errors, count: transfers.length }, msg);
+        throw new Error(msg);
+      }
+    }
+  }
+
   async createPendingTransfer(transfer: {
     id: bigint;
     debitAccountId: bigint;
@@ -1366,19 +1420,11 @@ export class TigerBeetleIntegration {
     return acc.credits_posted - acc.debits_posted - acc.debits_pending;
   }
 
-  async validateBalance(debitAccountId: bigint, amount: bigint): Promise<boolean> {
-    const balance = await this.getAvailableBalance(debitAccountId);
-    if (balance === null) {
-      if (this.isProduction) {
-        throw new Error("[TigerBeetle] FAIL-CLOSED: Cannot verify balance");
-      }
-      return true;
-    }
-    if (balance < amount) {
-      throw new Error(`[TigerBeetle] Insufficient funds: available=${balance}, required=${amount}`);
-    }
-    return true;
-  }
+  // W14: validateBalance read-before-write pre-check DELETED. It was a stale
+  // read that raced with concurrent holds; TB's own result codes
+  // (exceeds_credits(54)/exceeds_debits(55)) are authoritative and are mapped
+  // to a 4xx in transferPipeline's catch block. getAvailableBalance remains
+  // for genuine balance DISPLAY reads only.
 
   async healthCheck(): Promise<{ connected: boolean; latencyMs: number }> {
     const start = Date.now();

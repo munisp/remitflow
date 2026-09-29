@@ -184,11 +184,11 @@ func TestPAPSS_ComplianceScreen(t *testing.T) {
 	r := newPAPSSRouter()
 
 	tests := []struct {
-		name          string
-		payerCountry  string
-		payeeCountry  string
-		amount        float64
-		wantCleared   bool
+		name         string
+		payerCountry string
+		payeeCountry string
+		amount       float64
+		wantCleared  bool
 	}{
 		{"low-risk NG→GH", "NG", "GH", 50000, true},
 		{"sanctioned country KP", "KP", "NG", 100, false},

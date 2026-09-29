@@ -81,9 +81,32 @@ type ipLimiter struct {
 var (
 	limiters = make(map[string]*ipLimiter)
 	limMu    sync.Mutex
+	// janitorOnce ensures a single sweeper goroutine for the whole process
+	// (wave-14 perf: was one 5-minute goroutine per newly seen IP).
+	janitorOnce sync.Once
 )
 
+// startLimiterJanitor sweeps limiter entries idle for >5m, once per minute.
+func startLimiterJanitor() {
+	janitorOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				limMu.Lock()
+				for k, v := range limiters {
+					if time.Since(v.lastSeen) > 5*time.Minute {
+						delete(limiters, k)
+					}
+				}
+				limMu.Unlock()
+			}
+		}()
+	})
+}
+
 func getLimiter(ip string) *rate.Limiter {
+	startLimiterJanitor()
 	limMu.Lock()
 	defer limMu.Unlock()
 	if l, ok := limiters[ip]; ok {
@@ -95,17 +118,6 @@ func getLimiter(ip string) *rate.Limiter {
 		lastSeen: time.Now(),
 	}
 	limiters[ip] = l
-	// Cleanup old entries
-	go func() {
-		time.Sleep(5 * time.Minute)
-		limMu.Lock()
-		for k, v := range limiters {
-			if time.Since(v.lastSeen) > 5*time.Minute {
-				delete(limiters, k)
-			}
-		}
-		limMu.Unlock()
-	}()
 	return l.limiter
 }
 

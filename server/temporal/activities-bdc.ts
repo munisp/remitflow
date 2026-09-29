@@ -107,13 +107,44 @@ export interface BdcReconReport {
   breachEventsPublished: number;
 }
 
+/**
+ * W14: workflow-history variant of the recon report. Temporal history is
+ * stored per-event and unbounded `unsettled` row arrays would bloat it, so
+ * the activity returns aggregates + counts only. The full row-level detail
+ * still goes out on the BDC_POSITION_BREACH Kafka events.
+ * TODO(wave15+): persist the full report rows to a recon-report table and
+ * carry the report id here instead — no such table exists and this wave does
+ * not create one (additive-index-only migration contract).
+ */
+export interface BdcReconTenantSummary {
+  tenantId: number;
+  accruedCount: number;
+  accruedNgn: number;
+  settledCount: number;
+  settledNgn: number;
+  commissionNgn: number;
+  varianceNgn: number;
+  exceedsThreshold: boolean;
+  unsettledCount: number;
+}
+
+export interface BdcReconSummary {
+  imtoCode: string;
+  period: string;
+  windowStart: string;
+  windowEnd: string;
+  thresholdNgn: number;
+  tenants: BdcReconTenantSummary[];
+  breachEventsPublished: number;
+}
+
 export interface BdcActivities {
   getBatchDeadline(batchId: number): Promise<BdcBatchDeadlineInfo>;
   getBatchStatus(batchId: number): Promise<string>;
   forceLiquidationActivity(batchId: number): Promise<BdcForceLiquidationOutcome>;
   submitReturnActivity(returnId: number): Promise<BdcReturnSubmitOutcome>;
   publishReturnAckTimeoutAlert(returnId: number): Promise<BdcAckTimeoutCheck>;
-  reconcileActivity(imtoCode: string, period: string): Promise<BdcReconReport>;
+  reconcileActivity(imtoCode: string, period: string): Promise<BdcReconSummary>;
   /** wave12 G7 (B6): tenant offboarding blocker evaluation. */
   evaluateOffboardingBlockers(tenantId: number): Promise<BdcOffboardingOutcome>;
 }
@@ -425,7 +456,7 @@ export async function publishReturnAckTimeoutAlert(returnId: number): Promise<Bd
  * workflow (persisted in Temporal history) and (b) embedded in the breach
  * event when published. If a report table is added later, insert it here.
  */
-export async function reconcileActivity(imtoCode: string, period: string): Promise<BdcReconReport> {
+export async function reconcileActivity(imtoCode: string, period: string): Promise<BdcReconSummary> {
   const { getDb } = await import("../db.js");
   const { sql } = await import("drizzle-orm");
   const { KAFKA_TOPICS, publishEvent } = await import("../middleware/kafka.js");
@@ -534,7 +565,26 @@ export async function reconcileActivity(imtoCode: string, period: string): Promi
     { imtoCode, period, tenants: report.tenants.length, breaches: report.breachEventsPublished },
     "[BDC] settlement recon complete",
   );
-  return report;
+  // W14: summary-only into workflow history (see BdcReconSummary TODO).
+  return {
+    imtoCode: report.imtoCode,
+    period: report.period,
+    windowStart: report.windowStart,
+    windowEnd: report.windowEnd,
+    thresholdNgn: report.thresholdNgn,
+    breachEventsPublished: report.breachEventsPublished,
+    tenants: report.tenants.map((t) => ({
+      tenantId: t.tenantId,
+      accruedCount: t.accruedCount,
+      accruedNgn: t.accruedNgn,
+      settledCount: t.settledCount,
+      settledNgn: t.settledNgn,
+      commissionNgn: t.commissionNgn,
+      varianceNgn: t.varianceNgn,
+      exceedsThreshold: t.exceedsThreshold,
+      unsettledCount: t.unsettled.length,
+    })),
+  };
 }
 
 // ─── wave12 G7 tenant offboarding activity (B6) ──────────────────────────────
@@ -751,7 +801,7 @@ export interface BdcReversalWatchdogActivities {
 export async function reversalWatchdogActivity(): Promise<BdcReversalWatchdogReport> {
   const { getDb } = await import("../db.js");
   const { sql } = await import("drizzle-orm");
-  const { publishEvent } = await import("../middleware/kafka.js");
+  const { publishBatch } = await import("../middleware/kafka.js");
   const { logger } = await import("../_core/logger.js");
   const db = await getDb();
   if (!db) throw new Error("[BDC] Database unavailable — reversalWatchdogActivity failing closed");
@@ -778,12 +828,18 @@ export async function reversalWatchdogActivity(): Promise<BdcReversalWatchdogRep
 
   // ORCH adds constant: KAFKA_TOPICS.BDC_REVERSALS = "remitflow.bdc.reversals" (SPEC-wave12 §7).
   const BDC_REVERSALS_TOPIC = "remitflow.bdc.reversals";
+  // W14: workflow-history payload is capped at 100 detail rows (the query is
+  // bounded at 500 for ALERTING, but history should carry a summary, not the
+  // full scan). stuckCount always reflects the full scan.
+  // TODO(wave15+): persist the full watchdog report to a recon/report table
+  // and carry the id — no such table exists; not created in this wave.
+  const HISTORY_DETAIL_CAP = 100;
   const report: BdcReversalWatchdogReport = {
     checkedAt: new Date().toISOString(),
     stuckThresholdHours: BDC_REVERSAL_WATCHDOG_STUCK_HOURS,
     stuckCount: stuck.length,
     alertsPublished: 0,
-    stuck: stuck.map((r) => ({
+    stuck: stuck.slice(0, HISTORY_DETAIL_CAP).map((r) => ({
       reversalId: r.reversalId,
       tenantId: r.tenantId,
       txnId: r.txnId,
@@ -794,32 +850,44 @@ export async function reversalWatchdogActivity(): Promise<BdcReversalWatchdogRep
     })),
   };
 
-  for (const r of report.stuck) {
-    // Fail-soft per alert: an outage must not skip the remaining alerts, and
-    // the full report is in the workflow history regardless.
-    const published = await publishEvent(
-      BDC_REVERSALS_TOPIC,
-      `bdc-reversal:${r.tenantId}:${r.reversalId}:approved_stuck`,
-      {
-        eventType: "bdc.reversal.approved_stuck",
-        reversalId: r.reversalId,
-        tenantId: r.tenantId,
-        transactionId: r.txnId,
-        reversalType: r.reversalType,
-        approvedBy: r.approvedBy,
-        approvedAt: r.approvedAt,
-        stuckHours: r.stuckHours,
-        note: `Reversal approved > ${BDC_REVERSAL_WATCHDOG_STUCK_HOURS}h ago but never executed — ops must re-execute (executeApprovedReversal) or reject; row intentionally unchanged`,
-        timestamp: new Date().toISOString(),
-      },
-    ).catch((err: unknown) => {
-      logger.warn(
-        { err: err instanceof Error ? err.message : String(err), reversalId: r.reversalId },
-        "[BDC] reversal-watchdog alert publish failed (report still returned to workflow history)",
+  // W14: one producer batch for all watchdog alerts (was: one send per alert).
+  // Fail-soft: a publish failure is logged and the report is still returned to
+  // workflow history; alertsPublished reflects the producer-accepted count.
+  if (stuck.length > 0) {
+    try {
+      // Alerts go out for the FULL scan (bounded at 500), not the capped
+      // history subset.
+      const sent = await publishBatch(
+        BDC_REVERSALS_TOPIC,
+        stuck.map((r) => ({
+          key: `bdc-reversal:${r.tenantId}:${r.reversalId}:approved_stuck`,
+          payload: {
+            eventType: "bdc.reversal.approved_stuck",
+            reversalId: r.reversalId,
+            tenantId: r.tenantId,
+            transactionId: r.txnId,
+            reversalType: r.reversalType,
+            approvedBy: r.approvedBy,
+            approvedAt: r.approvedAt ? new Date(r.approvedAt).toISOString() : null,
+            stuckHours: Math.round(Number(r.stuckHours) * 100) / 100,
+            note: `Reversal approved > ${BDC_REVERSAL_WATCHDOG_STUCK_HOURS}h ago but never executed — ops must re-execute (executeApprovedReversal) or reject; row intentionally unchanged`,
+            timestamp: new Date().toISOString(),
+          },
+        })),
       );
-      return false;
-    });
-    if (published) report.alertsPublished += 1;
+      report.alertsPublished = sent;
+      if (sent < stuck.length) {
+        logger.warn(
+          { accepted: sent, attempted: stuck.length },
+          "[BDC] reversal-watchdog alert batch not fully accepted (report still returned to workflow history)",
+        );
+      }
+    } catch (err: unknown) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        "[BDC] reversal-watchdog alert batch publish failed (report still returned to workflow history)",
+      );
+    }
   }
 
   if (report.stuckCount > 0) {

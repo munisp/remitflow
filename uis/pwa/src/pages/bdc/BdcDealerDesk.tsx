@@ -63,6 +63,27 @@ const Gauge: React.FC<{
   );
 };
 
+/**
+ * Live per-batch liquidation countdown. PERF (wave14): the 1s ticker lives
+ * in this small memoized child instead of the page root — previously a
+ * page-level setInterval forced the entire 563-line dealer desk (rate bands,
+ * quotes, entitlements, gauges) to re-render every second.
+ */
+const BatchCountdown: React.FC<{ deadlineAt: string }> = React.memo(
+  function BatchCountdown({ deadlineAt }) {
+    const [, setTick] = useState(0);
+    useEffect(() => {
+      const t = setInterval(() => setTick((n) => n + 1), 1000);
+      return () => clearInterval(t);
+    }, []);
+    const remaining = msUntil(deadlineAt);
+    const expired = Number.isFinite(remaining) && remaining <= 0;
+    return (
+      <Badge tone={expired ? "bad" : "warn"}>{fmtCountdown(deadlineAt)}</Badge>
+    );
+  },
+);
+
 const BdcDealerDesk: React.FC = () => {
   // ── rate bands ──
   const [bandCcy, setBandCcy] = useState("USD");
@@ -97,17 +118,10 @@ const BdcDealerDesk: React.FC = () => {
   const [batchReturnRef, setBatchReturnRef] = useState<Record<number, string>>({});
   const [batchMsg, setBatchMsg] = useState<Record<number, string>>({});
   const [manualBatchId, setManualBatchId] = useState("");
-  const [, setTick] = useState(0);
 
   // ── position ──
   const [position, setPosition] = useState<PositionNow | null>(null);
   const [posErr, setPosErr] = useState<string | null>(null);
-
-  // Live 24h countdown — re-render every second while batches are tracked.
-  useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
 
   const loadEntitlements = useCallback(async () => {
     setEntErr(null);
@@ -460,8 +474,6 @@ const BdcDealerDesk: React.FC = () => {
         ) : (
           <div className="divide-y divide-slate-50">
             {batches.map((b) => {
-              const remaining = msUntil(b.deadlineAt);
-              const expired = Number.isFinite(remaining) && remaining <= 0;
               return (
                 <div key={b.id} className="py-3 space-y-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
@@ -477,9 +489,7 @@ const BdcDealerDesk: React.FC = () => {
                     <div className="flex items-center gap-2">
                       <Badge tone={statusTone(b.status)}>{b.status}</Badge>
                       {b.status === "selling" && b.deadlineAt && (
-                        <Badge tone={expired ? "bad" : "warn"}>
-                          {fmtCountdown(b.deadlineAt)}
-                        </Badge>
+                        <BatchCountdown deadlineAt={b.deadlineAt} />
                       )}
                     </div>
                   </div>

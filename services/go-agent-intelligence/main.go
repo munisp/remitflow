@@ -5,11 +5,11 @@
 package main
 
 import (
-	"database/sql"
-	_ "github.com/lib/pq"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	_ "github.com/lib/pq"
 	"log/slog"
 	"math"
 	"net/http"
@@ -20,7 +20,6 @@ import (
 	"syscall"
 	"time"
 )
-
 
 var _processStartTime = time.Now()
 
@@ -57,14 +56,14 @@ type FloatRecommendation struct {
 }
 
 type PerformanceScore struct {
-	AgentID        string  `json:"agentId"`
-	VolumeScore    float64 `json:"volumeScore"`
-	ActivityScore  float64 `json:"activityScore"`
-	ErrorScore     float64 `json:"errorScore"`
-	CustomerScore  float64 `json:"customerScore"`
-	OverallScore   float64 `json:"overallScore"`
-	Tier           string  `json:"tier"` // bronze, silver, gold, platinum
-	Rank           int     `json:"rank"`
+	AgentID       string  `json:"agentId"`
+	VolumeScore   float64 `json:"volumeScore"`
+	ActivityScore float64 `json:"activityScore"`
+	ErrorScore    float64 `json:"errorScore"`
+	CustomerScore float64 `json:"customerScore"`
+	OverallScore  float64 `json:"overallScore"`
+	Tier          string  `json:"tier"` // bronze, silver, gold, platinum
+	Rank          int     `json:"rank"`
 }
 
 type FloatTransferRequest struct {
@@ -99,9 +98,12 @@ func NewAgentIntelligenceService() *AgentIntelligenceService {
 }
 
 func (s *AgentIntelligenceService) ComputeHeatmap() []DemandHeatmap {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var heatmap []DemandHeatmap
 	if db != nil {
-		rows, err := db.Query("SELECT data FROM agent_intelligence_state WHERE id LIKE 'metrics:%' ORDER BY updated_at DESC LIMIT 100")
+		rows, err := db.QueryContext(ctx, "SELECT data FROM agent_intelligence_state WHERE id LIKE 'metrics:%' ORDER BY updated_at DESC LIMIT 100")
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -200,9 +202,12 @@ func (s *AgentIntelligenceService) ComputeFloatRecommendation(agentID string) Fl
 }
 
 func (s *AgentIntelligenceService) ComputePerformanceScores() []PerformanceScore {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var scores []PerformanceScore
 	if db != nil {
-		rows, err := db.Query("SELECT data FROM agent_intelligence_state WHERE id LIKE 'metrics:%' ORDER BY updated_at DESC LIMIT 200")
+		rows, err := db.QueryContext(ctx, "SELECT data FROM agent_intelligence_state WHERE id LIKE 'metrics:%' ORDER BY updated_at DESC LIMIT 200")
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -298,7 +303,6 @@ func (s *AgentIntelligenceService) RecordTransaction(agentID string, amount floa
 	}
 }
 
-
 func initDB() error {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -341,11 +345,14 @@ func initDB() error {
 
 // dbUpsert stores or updates a record in the service state table
 func dbUpsert(id string, data interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO agent_intelligence_state (id, data, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
@@ -355,8 +362,11 @@ func dbUpsert(id string, data interface{}) error {
 
 // dbGet retrieves a record from the service state table
 func dbGet(id string, dest interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM agent_intelligence_state WHERE id = $1", id).Scan(&jsonData)
+	err := db.QueryRowContext(ctx, "SELECT data FROM agent_intelligence_state WHERE id = $1", id).Scan(&jsonData)
 	if err != nil {
 		return err
 	}
@@ -365,7 +375,10 @@ func dbGet(id string, dest interface{}) error {
 
 // dbList retrieves all records from the service state table
 func dbList(limit int) ([]json.RawMessage, error) {
-	rows, err := db.Query("SELECT data FROM agent_intelligence_state ORDER BY updated_at DESC LIMIT $1", limit)
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT data FROM agent_intelligence_state ORDER BY updated_at DESC LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -383,22 +396,27 @@ func dbList(limit int) ([]json.RawMessage, error) {
 
 // dbLogEvent stores an event in the events table
 func dbLogEvent(eventType string, payload interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("INSERT INTO agent_intelligence_events (event_type, payload) VALUES ($1, $2)",
+	_, err = db.ExecContext(ctx, "INSERT INTO agent_intelligence_events (event_type, payload) VALUES ($1, $2)",
 		eventType, jsonData)
 	return err
 }
 
-
 // loadFromDB populates in-memory state from database on startup (write-through cache warm)
 func loadFromDB(svc *AgentIntelligenceService) {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query("SELECT id, data FROM agent_intelligence_state WHERE id LIKE 'metrics:%'")
+	rows, err := db.QueryContext(ctx, "SELECT id, data FROM agent_intelligence_state WHERE id LIKE 'metrics:%'")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
@@ -441,16 +459,16 @@ func main() {
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "agent-intelligence"})
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		uptime := time.Since(_processStartTime).Seconds()
-		fmt.Fprintf(w, "# HELP pod_uptime_seconds Time since process started\n")
-		fmt.Fprintf(w, "# TYPE pod_uptime_seconds gauge\n")
-		fmt.Fprintf(w, "pod_uptime_seconds{service=\"%s\"} %.1f\n", "go-agent-intelligence", uptime)
-		fmt.Fprintf(w, "# HELP pod_ready Whether pod is ready\n")
-		fmt.Fprintf(w, "# TYPE pod_ready gauge\n")
-		fmt.Fprintf(w, "pod_ready{service=\"%s\"} 1\n", "go-agent-intelligence")
-	})
+		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			uptime := time.Since(_processStartTime).Seconds()
+			fmt.Fprintf(w, "# HELP pod_uptime_seconds Time since process started\n")
+			fmt.Fprintf(w, "# TYPE pod_uptime_seconds gauge\n")
+			fmt.Fprintf(w, "pod_uptime_seconds{service=\"%s\"} %.1f\n", "go-agent-intelligence", uptime)
+			fmt.Fprintf(w, "# HELP pod_ready Whether pod is ready\n")
+			fmt.Fprintf(w, "# TYPE pod_ready gauge\n")
+			fmt.Fprintf(w, "pod_ready{service=\"%s\"} 1\n", "go-agent-intelligence")
+		})
 	})
 
 	mux.HandleFunc("/heatmap", func(w http.ResponseWriter, r *http.Request) {
@@ -483,6 +501,7 @@ func main() {
 			return
 		}
 		var req FloatTransferRequest
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
@@ -514,6 +533,7 @@ func main() {
 			AgentID string  `json:"agentId"`
 			Amount  float64 `json:"amount"`
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
@@ -522,7 +542,7 @@ func main() {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	srv := &http.Server{Addr: ":" + port, Handler: mux}
+	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() {
 		svc.logger.Info("agent-intelligence service starting", "port", port)
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
@@ -531,7 +551,6 @@ func main() {
 		}
 	}()
 
-	
 	// Periodic full state persistence to PostgreSQL (belt-and-suspenders with write-through)
 	// In production, this would also publish to Kafka for downstream analytics
 	go func() {

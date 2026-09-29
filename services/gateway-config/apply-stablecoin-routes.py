@@ -12,7 +12,7 @@ import yaml
 
 ALLOWED_PLUGINS = {"limit-count","limit-req","api-breaker","hmac-auth","key-auth",
     "jwt-auth","cors","proxy-rewrite","response-rewrite","ip-restriction",
-    "openid-connect","prometheus"}
+    "openid-connect","prometheus","consumer-restriction"}
 
 def fail(msg):
     print(f"[stablecoin-routes] ERROR: {msg}", file=sys.stderr); sys.exit(1)
@@ -54,14 +54,28 @@ def main():
         body = {"id": uid, "type": upstream.get("type", "roundrobin"),
                 "scheme": "http", "nodes": nodes, "pass_host": "pass"}
         if upstream.get("health_check"): body["checks"] = upstream["health_check"]
+        # wave14: pass through per-upstream perf/reliability fields instead of
+        # silently dropping them (keepalive_pool/timeout/retries are upstream
+        # attributes in the APISIX schema).
+        for key in ("keepalive_pool", "timeout", "retries"):
+            if key in upstream: body[key] = upstream[key]
         status, resp = admin_request("PUT", f"{admin_url}/apisix/admin/upstreams/{uid}", admin_key, body)
         if status >= 400: fail(f"upstream {uid} rejected: HTTP {status} {resp.decode(errors='replace')}")
         print(f"[stablecoin-routes] upstream {uid} applied (HTTP {status})")
     for route in doc.get("routes", []):
         rid = route["id"]
         body = {"id": rid, "uri": route["uri"], "methods": route.get("methods", ["GET"]),
-                "upstream_id": route["upstream_id"],
                 "plugins": sanitize_plugins(rid, route.get("plugins", {})), "status": 1}
+        # Routes carry either upstream_id (shared upstream) or an inline
+        # upstream object (e.g. deploy/apisix/routes-wave10.yaml internal
+        # services) — pass whichever is present; fail closed if neither.
+        if route.get("upstream_id"):
+            body["upstream_id"] = route["upstream_id"]
+        elif route.get("upstream"):
+            body["upstream"] = route["upstream"]
+        else:
+            fail(f"route {rid}: neither upstream_id nor inline upstream defined")
+        if route.get("timeout"): body["timeout"] = route["timeout"]
         status, resp = admin_request("PUT", f"{admin_url}/apisix/admin/routes/{rid}", admin_key, body)
         if status >= 400: fail(f"route {rid} rejected: HTTP {status} {resp.decode(errors='replace')}")
         print(f"[stablecoin-routes] route {rid} applied (HTTP {status})")

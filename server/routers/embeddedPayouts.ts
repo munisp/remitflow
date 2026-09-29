@@ -213,16 +213,16 @@ export async function deliverPartnerWebhooks(partnerTenantId: number, event: str
   `);
   let attempted = 0;
   let delivered = 0;
-  for (const wh of rows as unknown as Array<{ id: number; url: string; events: unknown; signing_secret: string }>) {
+  // Per-webhook delivery; failures are isolated per hook and never throw.
+  const deliverOne = async (wh: { id: number; url: string; events: unknown; signing_secret: string }): Promise<"skipped" | "delivered" | "failed"> => {
     let events: string[] = [];
     try { events = typeof wh.events === "string" ? JSON.parse(wh.events) : (wh.events as string[] ?? []); } catch { events = []; }
-    if (!events.includes(event) && !events.includes("payout.*") && !events.includes("*")) continue;
+    if (!events.includes(event) && !events.includes("payout.*") && !events.includes("*")) return "skipped";
     // HTTPS only + no redirect following (SSRF guard, developerPortal pattern).
     if (!wh.url.startsWith("https://")) {
       logger.warn({ webhookId: wh.id }, "[EmbeddedPayouts] Webhook URL rejected (HTTPS only)");
-      continue;
+      return "skipped";
     }
-    attempted++;
     const body = JSON.stringify({ event, payload, timestamp: new Date().toISOString(), id: `evt_${pendingTransferIdFor(`${event}:${payload.id ?? Date.now()}`).toString()}` });
     const signature = `sha256=${createHmac("sha256", wh.signing_secret).update(body).digest("hex")}`;
     try {
@@ -239,18 +239,30 @@ export async function deliverPartnerWebhooks(partnerTenantId: number, event: str
         redirect: "manual",
       });
       if (res.status >= 200 && res.status < 300) {
-        delivered++;
         await db.execute(sql`UPDATE partner_webhooks SET last_delivered_at = NOW(), failure_count = 0, updated_at = NOW() WHERE id = ${wh.id}`)
           .catch(() => {});
-      } else {
-        await db.execute(sql`UPDATE partner_webhooks SET failure_count = COALESCE(failure_count, 0) + 1, updated_at = NOW() WHERE id = ${wh.id}`)
-          .catch(() => {});
-        logger.warn({ webhookId: wh.id, status: res.status, event }, "[EmbeddedPayouts] Webhook delivery failed");
+        return "delivered";
       }
+      await db.execute(sql`UPDATE partner_webhooks SET failure_count = COALESCE(failure_count, 0) + 1, updated_at = NOW() WHERE id = ${wh.id}`)
+        .catch(() => {});
+      logger.warn({ webhookId: wh.id, status: res.status, event }, "[EmbeddedPayouts] Webhook delivery failed");
+      return "failed";
     } catch (err) {
       await db.execute(sql`UPDATE partner_webhooks SET failure_count = COALESCE(failure_count, 0) + 1, updated_at = NOW() WHERE id = ${wh.id}`)
         .catch(() => {});
       logger.warn({ webhookId: wh.id, event, err: err instanceof Error ? err.message : String(err) }, "[EmbeddedPayouts] Webhook delivery error");
+      return "failed";
+    }
+  };
+  // W14: bounded parallel fan-out — chunks of 10 instead of fully serial.
+  const hooks = rows as unknown as Array<{ id: number; url: string; events: unknown; signing_secret: string }>;
+  const CHUNK = 10;
+  for (let i = 0; i < hooks.length; i += CHUNK) {
+    const settled = await Promise.allSettled(hooks.slice(i, i + CHUNK).map(deliverOne));
+    for (const r of settled) {
+      if (r.status !== "fulfilled") continue; // deliverOne never throws; defensive
+      if (r.value === "delivered") { attempted++; delivered++; }
+      else if (r.value === "failed") { attempted++; }
     }
   }
   return { attempted, delivered };
@@ -476,7 +488,9 @@ export const embeddedPayoutsRouter = router({
       const holdAmountCents = BigInt(Math.round((input.amount + fee) * 100));
       const holdId = pendingTransferIdFor(`EPP-HOLD-${payout.id}`);
       try {
-        await tigerBeetle.validateBalance(BigInt(partnerFloat.account.tbAccountId), holdAmountCents);
+        // W14: validateBalance read-before-write removed — TB result codes
+        // (exceeds_credits(54)/exceeds_debits(55)) on the hold create are
+        // authoritative and mapped to insufficient_prefund in the catch below.
         await tigerBeetle.createPendingTransfer({
           id: holdId,
           debitAccountId: BigInt(partnerFloat.account.tbAccountId),
@@ -513,6 +527,7 @@ export const embeddedPayoutsRouter = router({
           pendingId: holdId,
           ledger: partnerFloat.ledger!,
           code: 1,
+          amount: holdAmountCents, // W14: known hold amount — skips lookupTransfers
         });
       };
 

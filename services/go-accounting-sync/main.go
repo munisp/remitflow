@@ -367,9 +367,21 @@ type cursorStore interface {
 }
 
 // fileCursorStore is the no-Dapr fallback: a JSON map on local disk.
+//
+// Wave-14 perf: the in-memory map is authoritative once loaded, so Get/Set no
+// longer hold the mutex across a full file read+write. Set snapshots the map
+// under mu, then encodes and writes outside the lock. writeMu serializes file
+// writes and lastWritten (a monotonic version) prevents an older snapshot from
+// overwriting a newer one, preserving the previous read-modify-write atomicity
+// and crash-durability semantics (Set only returns after its update is durable).
 type fileCursorStore struct {
-	mu   sync.Mutex
-	path string
+	mu          sync.Mutex
+	path        string
+	m           map[string]string
+	loaded      bool
+	version     uint64
+	writeMu     sync.Mutex
+	lastWritten uint64
 }
 
 func (s *fileCursorStore) load() (map[string]string, error) {
@@ -387,34 +399,65 @@ func (s *fileCursorStore) load() (map[string]string, error) {
 	return out, nil
 }
 
+// ensureLoaded lazily loads the on-disk cursor map once. Caller must hold mu.
+func (s *fileCursorStore) ensureLoaded() error {
+	if s.loaded {
+		return nil
+	}
+	m, err := s.load()
+	if err != nil {
+		return err
+	}
+	s.m = m
+	s.loaded = true
+	return nil
+}
+
 func (s *fileCursorStore) Get(key string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m, err := s.load()
-	if err != nil {
+	if err := s.ensureLoaded(); err != nil {
 		return "", false, err
 	}
-	v, ok := m[key]
+	v, ok := s.m[key]
 	return v, ok, nil
 }
 
 func (s *fileCursorStore) Set(key, value string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	m, err := s.load()
+	if err := s.ensureLoaded(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	s.m[key] = value
+	s.version++
+	version := s.version
+	// Snapshot under the lock; marshal + file IO happen outside it.
+	snapshot := make(map[string]string, len(s.m))
+	for k, v := range s.m {
+		snapshot[k] = v
+	}
+	s.mu.Unlock()
+
+	data, err := json.Marshal(snapshot)
 	if err != nil {
 		return err
 	}
-	m[key] = value
-	data, err := json.Marshal(m)
-	if err != nil {
-		return err
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if version <= s.lastWritten {
+		// A newer snapshot was already persisted; ours is strictly older.
+		return nil
 	}
 	tmp := s.path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	if err := os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+	s.lastWritten = version
+	return nil
 }
 
 // daprCursorStore persists cursors in the Dapr state store.

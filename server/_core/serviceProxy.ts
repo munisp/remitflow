@@ -61,9 +61,6 @@ export async function callService<T = unknown>(
     retries = 2,
   } = options;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
   const defaultHeaders: Record<string, string> = {
     // W12-F: trace/tenant propagation first — caller headers win on conflict.
     ...telemetryHeaders(),
@@ -75,6 +72,10 @@ export async function callService<T = unknown>(
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
+    // W14-C1: timeout is per-attempt — the previous single AbortController was
+    // cleared after the first response, so retries ran with NO timeout at all.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(serviceUrl, {
         method,
@@ -82,8 +83,6 @@ export async function callService<T = unknown>(
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
-
-      clearTimeout(timer);
 
       if (!res.ok) {
         const text = await res.text().catch(() => "");
@@ -97,13 +96,22 @@ export async function callService<T = unknown>(
       return (await res.text()) as unknown as T;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      if (attempt < retries) {
-        // Exponential back-off: 200ms, 400ms
-        await new Promise((r) => setTimeout(r, 200 * Math.pow(2, attempt)));
+      // W14-C1: never retry a 4xx — the service understood and REJECTED the
+      // request; replaying it returns the same verdict and only adds load
+      // (and, on money-adjacent endpoints, duplicate-work risk). Retries are
+      // reserved for network failures, timeouts/aborts, and 5xx.
+      if (err instanceof ServiceCallError && err.status >= 400 && err.status < 500) {
+        break;
       }
+      if (attempt < retries) {
+        // Exponential back-off with jitter: base 200ms, 400ms, ... ×(0.5–1.5)
+        const base = 200 * Math.pow(2, attempt);
+        await new Promise((r) => setTimeout(r, base * (0.5 + Math.random())));
+      }
+    } finally {
+      clearTimeout(timer);
     }
   }
 
-  clearTimeout(timer);
   throw lastError ?? new Error(`callService failed: ${serviceUrl}`);
 }

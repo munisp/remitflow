@@ -1,4 +1,4 @@
-import { and, desc, eq, like, or, sql } from "drizzle-orm";
+import { and, desc, eq, like, lt, or, sql } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -35,7 +35,11 @@ export async function closeDb() {
 
 function buildPoolConfig() {
   return {
-    max: parseInt(process.env.DB_POOL_MAX || (process.env.NODE_ENV === "test" ? "10" : "100"), 10),
+    // W14-C1 (A2): default pool max 100 → 25. Seven services each holding 100
+    // direct-to-PG connections oversubscribe the database (PgBouncer at :6432
+    // sits unused). 25 per process is the industry-standard starting point for
+    // a pooled OLTP API; DB_POOL_MAX remains the escape hatch.
+    max: parseInt(process.env.DB_POOL_MAX || (process.env.NODE_ENV === "test" ? "10" : "25"), 10),
     idle_timeout: parseInt(process.env.DB_POOL_IDLE_TIMEOUT || "20", 10),
     max_lifetime: parseInt(process.env.DB_POOL_MAX_LIFETIME || "900", 10),
     connect_timeout: 5,
@@ -95,7 +99,13 @@ export async function getDb() {
   return _db;
 }
 
-/** Read-optimized DB connection (falls back to primary if no replica configured) */
+/**
+ * Read-optimized DB connection (falls back to primary if no replica configured).
+ * W14-C1 note: the replica is wired ONLY when DATABASE_REPLICA_URL is set —
+ * otherwise this returns the primary pool, which is the documented, safe
+ * fallback. Routing the read-heavy dashboard path through this helper is the
+ * data-layer owner's (C2) call site change, not done here.
+ */
 export async function getReadDb() {
   await getDb();
   return _readDb || _db;
@@ -106,6 +116,49 @@ export async function requireDb() {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
   return db;
+}
+
+// ─── W14-C1: user profile cache (user:byOpenId) ──────────────────────────────
+// Cache-aside on getUserByOpenId — a PROFILE-FETCH OPTIMIZATION ONLY. No auth,
+// lockout, or tenant-enforcement decision reads this cache: sdk.authenticateRequest
+// uses getUserAuthContextByOpenId (always fresh, lockout JOINed), and tRPC
+// role/KYC checks run against ctx.user from that fresh path. Invalidation is
+// delete-on-write here in upsertUser. Known gap (W14, out of C1 ownership):
+// routers.ts / routers/* mutate users rows via direct db.update(users) and do
+// NOT call invalidateUserByOpenIdCache yet — those reads (profile display)
+// tolerate up to TTL staleness; the exported invalidator below is the hook for
+// the data-layer owner to wire at those mutation sites.
+const USER_BY_OPENID_TTL_SEC = 120; // 2 min (SPEC: 60–300s)
+const userByOpenIdKey = (openId: string) => `user:byOpenId:${openId}`;
+
+// Lazy import to keep module load cheap and avoid any static import cycle
+// (middleware/redis.ts → redisHardened has no db dependency).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _redisFacadePromise: Promise<any> | null = null;
+function getRedisFacade() {
+  if (!_redisFacadePromise) {
+    _redisFacadePromise = import("./middleware/redis.js").catch(() => null);
+  }
+  return _redisFacadePromise;
+}
+
+// Timestamp/date columns that JSON round-tripping would otherwise turn into
+// strings — rehydrate so cached rows are indistinguishable from fresh rows.
+const USER_DATE_FIELDS = ["lastSignedIn", "createdAt", "updatedAt", "dateOfBirth"] as const;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function rehydrateUserDates(row: any): any {
+  for (const f of USER_DATE_FIELDS) {
+    if (typeof row[f] === "string") row[f] = new Date(row[f]);
+  }
+  return row;
+}
+
+/** Delete the cached profile for a user. Call after ANY direct users-row mutation. */
+export async function invalidateUserByOpenIdCache(openId: string): Promise<void> {
+  try {
+    const redis = await getRedisFacade();
+    await redis?.cacheDel(userByOpenIdKey(openId));
+  } catch { /* cache invalidation is best-effort; TTL bounds staleness */ }
 }
 
 export async function upsertUser(user: InsertUser): Promise<{ isNew: boolean }> {
@@ -132,6 +185,8 @@ export async function upsertUser(user: InsertUser): Promise<{ isNew: boolean }> 
     updateSet.role = "admin";
   }
   await db.insert(users).values(values).onConflictDoUpdate({ target: users.openId, set: updateSet });
+  // W14-C1: delete-on-write invalidation for the user:byOpenId cache-aside.
+  await invalidateUserByOpenIdCache(user.openId);
   const dbUser = await getUserByOpenId(user.openId);
   if (dbUser) await autoSeedUser(dbUser.id);
   return { isNew };
@@ -140,8 +195,94 @@ export async function upsertUser(user: InsertUser): Promise<{ isNew: boolean }> 
 export async function getUserByOpenId(openId: string) {
   const db = await getDb();
   if (!db) return undefined;
+  // W14-C1: cache-aside read. Misses are never cached (negative caching would
+  // make just-created users invisible to upsertUser's isNew detection).
+  try {
+    const redis = await getRedisFacade();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cached = await redis?.cacheGet<any>(userByOpenIdKey(openId));
+    if (cached && typeof cached === "object" && typeof cached.openId === "string") {
+      return rehydrateUserDates(cached);
+    }
+  } catch { /* cache failure → fall through to DB (fail over, never fail closed on a cache) */ }
   const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
-  return result[0];
+  const user = result[0];
+  if (user) {
+    // Fire-and-forget populate — cache write must not extend the request path.
+    void getRedisFacade()
+      .then((redis) => redis?.cacheSet(userByOpenIdKey(openId), user, USER_BY_OPENID_TTL_SEC))
+      .catch(() => {});
+  }
+  return user;
+}
+
+/**
+ * W14-C1: single-round-trip auth fetch — user row LEFT JOIN user_lockouts.
+ * Replaces the getUserByOpenId + checkDbUserLockout pair on the authenticated
+ * request path (sdk.authenticateRequest). NOT cached: lockout state is an
+ * enforcement decision and must always be fresh (fail-closed).
+ */
+export async function getUserAuthContextByOpenId(openId: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db
+    .select({ user: users, lockExpiresAt: userLockouts.lockExpiresAt })
+    .from(users)
+    .leftJoin(userLockouts, eq(userLockouts.userId, users.id))
+    .where(eq(users.openId, openId))
+    .limit(1);
+  return rows[0];
+}
+
+/**
+ * Pure evaluation of a pre-fetched lockout expiry (see getUserAuthContextByOpenId).
+ * Same semantics as checkDbUserLockout minus the DB round trip.
+ */
+export function evaluateLockExpiry(lockExpiresAt: Date | string | null): { locked: boolean; retryAfterSec: number } {
+  if (!lockExpiresAt) return { locked: false, retryAfterSec: 0 };
+  const expiresAt = new Date(lockExpiresAt).getTime();
+  const now = Date.now();
+  if (now < expiresAt) {
+    return { locked: true, retryAfterSec: Math.ceil((expiresAt - now) / 1000) };
+  }
+  return { locked: false, retryAfterSec: 0 };
+}
+
+/** Fire-and-forget removal of an expired lockout row (replaces the awaited delete in checkDbUserLockout on the merged auth path). */
+export function clearExpiredLockout(userId: number): void {
+  void getDb()
+    .then((db) => (db ? db.delete(userLockouts).where(eq(userLockouts.userId, userId)) : null))
+    .catch(() => { /* cleanup is opportunistic; the expiry check above is authoritative */ });
+}
+
+// ─── W14-C1: throttled lastSignedIn touch ────────────────────────────────────
+// The old path ran a full upsertUser (SELECT + INSERT ... ON CONFLICT + SELECT
+// + seed probe = ~4 RTTs) on EVERY authenticated request just to bump
+// lastSignedIn. Now: at most one lightweight UPDATE per user per 5 minutes,
+// fire-and-forget — never awaited, never fails the request. lastSignedIn is a
+// telemetry-grade field; the throttled write is intentionally lossy.
+const LAST_SIGNED_IN_THROTTLE_MS = 5 * 60 * 1000;
+const _lastSignInTouches = new Map<string, number>();
+
+export function touchLastSignedIn(openId: string): void {
+  const now = Date.now();
+  const last = _lastSignInTouches.get(openId);
+  if (last !== undefined && now - last < LAST_SIGNED_IN_THROTTLE_MS) return;
+  _lastSignInTouches.set(openId, now);
+  // Bound the map: sweep expired entries once we cross a generous ceiling.
+  if (_lastSignInTouches.size > 10_000) {
+    for (const [k, ts] of _lastSignInTouches) {
+      if (now - ts >= LAST_SIGNED_IN_THROTTLE_MS) _lastSignInTouches.delete(k);
+    }
+  }
+  void (async () => {
+    const db = await getDb();
+    if (!db) return;
+    await db.update(users).set({ lastSignedIn: new Date(now) }).where(eq(users.openId, openId));
+  })().catch((err) => {
+    _lastSignInTouches.delete(openId); // allow a retry on the next request
+    logger.warn({ err: err instanceof Error ? err.message : String(err), openId }, "[DB] lastSignedIn touch failed (non-fatal)");
+  });
 }
 
 /**
@@ -313,7 +454,23 @@ export async function getWalletByUserAndCurrency(userId: number, currency: strin
   return result[0];
 }
 
-export async function getTransactionsByUserId(userId: number, opts?: { limit?: number; offset?: number; type?: string; status?: string; search?: string }) {
+// W14-C1: bounded pagination — page sizes are clamped so a caller can no
+// longer pull an unbounded history (the previous contract allowed limit=10000).
+const TX_PAGE_DEFAULT = 100;
+const TX_PAGE_MAX = 500;
+
+export async function getTransactionsByUserId(
+  userId: number,
+  opts?: {
+    limit?: number;
+    offset?: number;
+    type?: string;
+    status?: string;
+    search?: string;
+    /** Keyset pagination cursor: return rows strictly older than this createdAt. Preferred over offset for deep pages. */
+    beforeCreatedAt?: Date;
+  },
+) {
   const db = await getDb();
   if (!db) return [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -322,8 +479,16 @@ export async function getTransactionsByUserId(userId: number, opts?: { limit?: n
   if (opts?.type && opts.type !== "all") conditions.push(eq(transactions.type, opts.type as any));
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   if (opts?.status && opts.status !== "all") conditions.push(eq(transactions.status, opts.status as any));
-  if (opts?.search) conditions.push(or(like(transactions.description, `%${opts.search}%`), like(transactions.reference, `%${opts.search}%`), like(transactions.recipientName, `%${opts.search}%`)));
-  return db.select().from(transactions).where(and(...conditions)).orderBy(desc(transactions.createdAt)).limit(opts?.limit ?? 50).offset(opts?.offset ?? 0);
+  if (opts?.search) {
+    // W14-C1: leading-wildcard LIKE '%..%' forces a full scan of the user's
+    // partition and cannot use any index. Prefix matching ('term%') is
+    // index-friendly; callers searching by exact reference keep working.
+    const prefix = `${opts.search}%`;
+    conditions.push(or(like(transactions.description, prefix), like(transactions.reference, prefix), like(transactions.recipientName, prefix)));
+  }
+  if (opts?.beforeCreatedAt) conditions.push(lt(transactions.createdAt, opts.beforeCreatedAt));
+  const limit = Math.min(Math.max(1, Math.floor(opts?.limit ?? TX_PAGE_DEFAULT)), TX_PAGE_MAX);
+  return db.select().from(transactions).where(and(...conditions)).orderBy(desc(transactions.createdAt)).limit(limit).offset(opts?.offset ?? 0);
 }
 
 export async function createTransaction(data: {

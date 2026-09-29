@@ -1,7 +1,37 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { View, Text, FlatList, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator, Alert, Modal } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { trpc } from '../services/trpc';
+
+// wave14 perf (L1): fixed row geometry for getItemLayout — card height 86
+// (enforced in styles, texts numberOfLines={1}) + 8 marginBottom.
+const BEN_ROW_HEIGHT = 86 + 8;
+
+type Beneficiary = { id: string; name: string; email: string; bankName: string; currency: string };
+
+const BeneficiaryRow = React.memo(function BeneficiaryRow({
+  item,
+  onDelete,
+}: {
+  item: Beneficiary;
+  onDelete: (item: Beneficiary) => void;
+}) {
+  return (
+    <View style={styles.beneficiaryCard}>
+      <View style={styles.beneficiaryAvatar}>
+        <Text style={styles.beneficiaryAvatarText}>{item.name[0].toUpperCase()}</Text>
+      </View>
+      <View style={styles.beneficiaryInfo}>
+        <Text style={styles.beneficiaryName} numberOfLines={1}>{item.name}</Text>
+        <Text style={styles.beneficiaryDetail} numberOfLines={1}>{item.email}</Text>
+        <Text style={styles.beneficiaryDetail} numberOfLines={1}>{item.bankName} · {item.currency}</Text>
+      </View>
+      <TouchableOpacity onPress={() => onDelete(item)}>
+        <Text style={styles.deleteBtn}>🗑</Text>
+      </TouchableOpacity>
+    </View>
+  );
+});
 
 export default function BeneficiaryScreen() {
   const navigation = useNavigation();
@@ -12,12 +42,35 @@ export default function BeneficiaryScreen() {
   const { data: beneficiaries, isLoading, refetch } = trpc.beneficiaries.list.useQuery();
   const createMutation = trpc.beneficiaries.create.useMutation({
     onSuccess: () => { setShowAdd(false); setForm({ name: '', email: '', bankName: '', accountNumber: '', currency: 'USD', country: '' }); utils.beneficiaries.list.invalidate(); },
-    onError: (e) => Alert.alert('Error', e.message),
+    onError: (e: any) => Alert.alert('Error', e.message),
   });
   const deleteMutation = trpc.beneficiaries.delete.useMutation({
     onSuccess: () => utils.beneficiaries.list.invalidate(),
-    onError: (e) => Alert.alert('Error', e.message),
+    onError: (e: any) => Alert.alert('Error', e.message),
   });
+
+  // wave14 perf (L1): stable renderItem/getItemLayout so FlatList doesn't
+  // re-render rows on every parent render.
+  const deleteMutateRef = React.useRef(deleteMutation.mutate);
+  deleteMutateRef.current = deleteMutation.mutate;
+  const handleDelete = useCallback((item: Beneficiary) => {
+    Alert.alert('Delete', `Remove ${item.name}?`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => deleteMutateRef.current({ id: item.id }) },
+    ]);
+  }, []);
+  const renderItem = useCallback(
+    ({ item }: { item: Beneficiary }) => <BeneficiaryRow item={item} onDelete={handleDelete} />,
+    [handleDelete],
+  );
+  const getItemLayout = useCallback(
+    (_: ArrayLike<Beneficiary> | null | undefined, index: number) => ({
+      length: BEN_ROW_HEIGHT,
+      offset: BEN_ROW_HEIGHT * index + 16, // contentContainerStyle padding
+      index,
+    }),
+    [],
+  );
 
   return (
     <View style={styles.container}>
@@ -38,26 +91,11 @@ export default function BeneficiaryScreen() {
           data={beneficiaries ?? []}
           keyExtractor={(item) => item.id}
           contentContainerStyle={{ padding: 16 }}
-          renderItem={({ item }) => (
-            <View style={styles.beneficiaryCard}>
-              <View style={styles.beneficiaryAvatar}>
-                <Text style={styles.beneficiaryAvatarText}>{item.name[0].toUpperCase()}</Text>
-              </View>
-              <View style={styles.beneficiaryInfo}>
-                <Text style={styles.beneficiaryName}>{item.name}</Text>
-                <Text style={styles.beneficiaryDetail}>{item.email}</Text>
-                <Text style={styles.beneficiaryDetail}>{item.bankName} · {item.currency}</Text>
-              </View>
-              <TouchableOpacity
-                onPress={() => Alert.alert('Delete', `Remove ${item.name}?`, [
-                  { text: 'Cancel', style: 'cancel' },
-                  { text: 'Delete', style: 'destructive', onPress: () => deleteMutation.mutate({ id: item.id }) },
-                ])}
-              >
-                <Text style={styles.deleteBtn}>🗑</Text>
-              </TouchableOpacity>
-            </View>
-          )}
+          renderItem={renderItem}
+          getItemLayout={getItemLayout}
+          removeClippedSubviews
+          initialNumToRender={10}
+          windowSize={7}
           ListEmptyComponent={<Text style={styles.empty}>No beneficiaries yet. Add one to get started.</Text>}
           onRefresh={refetch}
           refreshing={isLoading}
@@ -112,7 +150,7 @@ const styles = StyleSheet.create({
   title: { fontSize: 18, fontWeight: '700', color: '#fff' },
   addBtn: { backgroundColor: '#6366f1', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6 },
   addBtnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
-  beneficiaryCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a2e', borderRadius: 12, padding: 14, marginBottom: 8 },
+  beneficiaryCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a2e', borderRadius: 12, padding: 14, marginBottom: 8, height: 86 },
   beneficiaryAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#6366f1', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
   beneficiaryAvatarText: { color: '#fff', fontSize: 18, fontWeight: '700' },
   beneficiaryInfo: { flex: 1 },

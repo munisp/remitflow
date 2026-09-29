@@ -14,20 +14,25 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"text/template"
 	"time"
 )
 
 func getEnv(k, d string) string {
-	if v := os.Getenv(k); v != "" { return v }
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
 	return d
 }
 
@@ -35,6 +40,7 @@ var port = getEnv("PORT", "8147")
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type Channel string
+
 const (
 	ChannelSMS      Channel = "sms"
 	ChannelEmail    Channel = "email"
@@ -44,21 +50,22 @@ const (
 )
 
 type Priority string
+
 const (
 	PriorityCritical      Priority = "critical"      // OTP, fraud alert — immediate
 	PriorityTransactional Priority = "transactional" // transfer status, receipt
-	PriorityMarketing     Priority = "marketing"      // promotions
+	PriorityMarketing     Priority = "marketing"     // promotions
 )
 
 type NotificationRequest struct {
-	UserID    int64                  `json:"user_id"`
-	Channel   Channel                `json:"channel"`
-	Priority  Priority               `json:"priority"`
-	TemplateID string                `json:"template_id"`
-	Variables map[string]string      `json:"variables"`
-	To        string                 `json:"to"`       // phone/email/device_token
-	Locale    string                 `json:"locale"`
-	Metadata  map[string]interface{} `json:"metadata"`
+	UserID     int64                  `json:"user_id"`
+	Channel    Channel                `json:"channel"`
+	Priority   Priority               `json:"priority"`
+	TemplateID string                 `json:"template_id"`
+	Variables  map[string]string      `json:"variables"`
+	To         string                 `json:"to"` // phone/email/device_token
+	Locale     string                 `json:"locale"`
+	Metadata   map[string]interface{} `json:"metadata"`
 }
 
 type NotificationResult struct {
@@ -73,7 +80,7 @@ type NotificationTemplate struct {
 	ID      string            `json:"id"`
 	Channel Channel           `json:"channel"`
 	Locales map[string]string `json:"locales"` // locale → template body
-	Subject string            `json:"subject"`  // for email
+	Subject string            `json:"subject"` // for email
 }
 
 type DeliveryRecord struct {
@@ -104,9 +111,9 @@ var hub = &Hub{
 }
 
 var (
-	notifSent    atomic.Int64
-	notifFailed  atomic.Int64
-	notifQueued  atomic.Int64
+	notifSent   atomic.Int64
+	notifFailed atomic.Int64
+	notifQueued atomic.Int64
 )
 
 // ── Seed default templates ────────────────────────────────────────────────────
@@ -160,37 +167,59 @@ func init() {
 // ── Template rendering ────────────────────────────────────────────────────────
 func renderTemplate(tmplStr string, vars map[string]string) (string, error) {
 	t, err := template.New("n").Parse(tmplStr)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	data := make(map[string]interface{})
-	for k, v := range vars { data[k] = v }
+	for k, v := range vars {
+		data[k] = v
+	}
 	var buf bytes.Buffer
-	if err := t.Execute(&buf, data); err != nil { return "", err }
+	if err := t.Execute(&buf, data); err != nil {
+		return "", err
+	}
 	return buf.String(), nil
 }
 
 // ── Channel dispatchers ───────────────────────────────────────────────────────
-func dispatchSMS(to, body string) error {
-	twilioSID   := getEnv("TWILIO_ACCOUNT_SID", "")
+// providerHTTP is the shared client for Twilio/SendGrid/360dialog/FCM calls —
+// http.DefaultClient has NO timeout, so a hung provider would pin a dispatch
+// worker forever. 10s ceiling + pooled transport instead.
+var providerHTTP = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 16,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
+func dispatchSMS(ctx context.Context, to, body string) error {
+	twilioSID := getEnv("TWILIO_ACCOUNT_SID", "")
 	twilioToken := getEnv("TWILIO_AUTH_TOKEN", "")
-	twilioFrom  := getEnv("TWILIO_FROM_NUMBER", "+15005550006")
+	twilioFrom := getEnv("TWILIO_FROM_NUMBER", "+15005550006")
 	if twilioSID == "" || twilioToken == "" {
 		slog.Warn("[NotifHub] Twilio not configured, simulating SMS", "to", to)
 		return nil // Graceful degradation in dev
 	}
 	payload := fmt.Sprintf("From=%s&To=%s&Body=%s", twilioFrom, to, body)
-	req, _ := http.NewRequest("POST",
+	req, _ := http.NewRequestWithContext(ctx, "POST",
 		fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/Messages.json", twilioSID),
 		strings.NewReader(payload))
 	req.SetBasicAuth(twilioSID, twilioToken)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { return err }
+	resp, err := providerHTTP.Do(req)
+	if err != nil {
+		return err
+	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 { return fmt.Errorf("twilio error: %d", resp.StatusCode) }
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("twilio error: %d", resp.StatusCode)
+	}
 	return nil
 }
 
-func dispatchEmail(to, subject, body string) error {
+func dispatchEmail(ctx context.Context, to, subject, body string) error {
 	sendgridKey := getEnv("SENDGRID_API_KEY", "")
 	if sendgridKey == "" {
 		slog.Warn("[NotifHub] SendGrid not configured, simulating email", "to", to)
@@ -198,72 +227,93 @@ func dispatchEmail(to, subject, body string) error {
 	}
 	payload := map[string]interface{}{
 		"personalizations": []map[string]interface{}{{"to": []map[string]string{{"email": to}}}},
-		"from":    map[string]string{"email": getEnv("SENDGRID_FROM_EMAIL", "noreply@remitflow.io")},
-		"subject": subject,
-		"content": []map[string]string{{"type": "text/plain", "value": body}},
+		"from":             map[string]string{"email": getEnv("SENDGRID_FROM_EMAIL", "noreply@remitflow.io")},
+		"subject":          subject,
+		"content":          []map[string]string{{"type": "text/plain", "value": body}},
 	}
 	b, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", "https://api.sendgrid.com/v3/mail/send", bytes.NewReader(b))
+	req, _ := http.NewRequestWithContext(ctx, "POST", "https://api.sendgrid.com/v3/mail/send", bytes.NewReader(b))
 	req.Header.Set("Authorization", "Bearer "+sendgridKey)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { return err }
+	resp, err := providerHTTP.Do(req)
+	if err != nil {
+		return err
+	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 { return fmt.Errorf("sendgrid error: %d", resp.StatusCode) }
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("sendgrid error: %d", resp.StatusCode)
+	}
 	return nil
 }
 
-func dispatchWhatsApp(to, body string) error {
-	apiKey  := getEnv("WHATSAPP_360DIALOG_API_KEY", "")
+func dispatchWhatsApp(ctx context.Context, to, body string) error {
+	apiKey := getEnv("WHATSAPP_360DIALOG_API_KEY", "")
 	if apiKey == "" {
 		slog.Warn("[NotifHub] WhatsApp not configured, simulating", "to", to)
 		return nil
 	}
 	payload := map[string]interface{}{
 		"messaging_product": "whatsapp",
-		"to": to,
-		"type": "text",
-		"text": map[string]string{"body": body},
+		"to":                to,
+		"type":              "text",
+		"text":              map[string]string{"body": body},
 	}
 	b, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", "https://waba.360dialog.io/v1/messages", bytes.NewReader(b))
+	req, _ := http.NewRequestWithContext(ctx, "POST", "https://waba.360dialog.io/v1/messages", bytes.NewReader(b))
 	req.Header.Set("D360-API-KEY", apiKey)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { return err }
+	resp, err := providerHTTP.Do(req)
+	if err != nil {
+		return err
+	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 { return fmt.Errorf("whatsapp error: %d", resp.StatusCode) }
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("whatsapp error: %d", resp.StatusCode)
+	}
 	return nil
 }
 
-func dispatchPush(deviceToken, title, body string) error {
+func dispatchPush(ctx context.Context, deviceToken, title, body string) error {
 	fcmKey := getEnv("FCM_SERVER_KEY", "")
 	if fcmKey == "" {
 		slog.Warn("[NotifHub] FCM not configured, simulating push", "token", deviceToken[:min(8, len(deviceToken))])
 		return nil
 	}
 	payload := map[string]interface{}{
-		"to": deviceToken,
+		"to":           deviceToken,
 		"notification": map[string]string{"title": title, "body": body},
-		"priority": "high",
+		"priority":     "high",
 	}
 	b, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", "https://fcm.googleapis.com/fcm/send", bytes.NewReader(b))
+	req, _ := http.NewRequestWithContext(ctx, "POST", "https://fcm.googleapis.com/fcm/send", bytes.NewReader(b))
 	req.Header.Set("Authorization", "key="+fcmKey)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { return err }
+	resp, err := providerHTTP.Do(req)
+	if err != nil {
+		return err
+	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 { return fmt.Errorf("fcm error: %d", resp.StatusCode) }
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("fcm error: %d", resp.StatusCode)
+	}
 	return nil
 }
 
-func min(a, b int) int { if a < b { return a }; return b }
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
 
 // ── Worker pool ───────────────────────────────────────────────────────────────
+var workerWG sync.WaitGroup
+
 func startWorkers(n int) {
 	for i := 0; i < n; i++ {
+		workerWG.Add(1)
 		go func() {
+			defer workerWG.Done()
 			for req := range hub.queue {
 				processNotification(req)
 			}
@@ -290,56 +340,91 @@ func processNotification(req *NotificationRequest) {
 		record.Status = "failed"
 		record.ErrorMsg = "template not found: " + req.TemplateID
 		notifFailed.Add(1)
-		hub.mu.Lock(); hub.records = append(hub.records, record); hub.mu.Unlock()
+		hub.mu.Lock()
+		hub.records = append(hub.records, record)
+		hub.mu.Unlock()
 		return
 	}
 
 	locale := req.Locale
-	if locale == "" { locale = "en" }
+	if locale == "" {
+		locale = "en"
+	}
 	tmplBody, ok := tmpl.Locales[locale]
-	if !ok { tmplBody = tmpl.Locales["en"] }
+	if !ok {
+		tmplBody = tmpl.Locales["en"]
+	}
 
 	body, err := renderTemplate(tmplBody, req.Variables)
 	if err != nil {
-		record.Status = "failed"; record.ErrorMsg = err.Error()
+		record.Status = "failed"
+		record.ErrorMsg = err.Error()
 		notifFailed.Add(1)
-		hub.mu.Lock(); hub.records = append(hub.records, record); hub.mu.Unlock()
+		hub.mu.Lock()
+		hub.records = append(hub.records, record)
+		hub.mu.Unlock()
 		return
 	}
 
+	// Each dispatch gets its own bounded ctx (the worker is detached from any
+	// request ctx — queued notifications must outlive the enqueuing request).
+	dispatchCtx, dispatchCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer dispatchCancel()
+
 	var dispatchErr error
 	switch req.Channel {
-	case ChannelSMS:      dispatchErr = dispatchSMS(req.To, body)
-	case ChannelEmail:    dispatchErr = dispatchEmail(req.To, tmpl.Subject, body)
-	case ChannelWhatsApp: dispatchErr = dispatchWhatsApp(req.To, body)
-	case ChannelPush:     dispatchErr = dispatchPush(req.To, tmpl.Subject, body)
-	case ChannelInApp:    dispatchErr = nil // stored in DB, served via WebSocket
-	default:              dispatchErr = fmt.Errorf("unknown channel: %s", req.Channel)
+	case ChannelSMS:
+		dispatchErr = dispatchSMS(dispatchCtx, req.To, body)
+	case ChannelEmail:
+		dispatchErr = dispatchEmail(dispatchCtx, req.To, tmpl.Subject, body)
+	case ChannelWhatsApp:
+		dispatchErr = dispatchWhatsApp(dispatchCtx, req.To, body)
+	case ChannelPush:
+		dispatchErr = dispatchPush(dispatchCtx, req.To, tmpl.Subject, body)
+	case ChannelInApp:
+		dispatchErr = nil // stored in DB, served via WebSocket
+	default:
+		dispatchErr = fmt.Errorf("unknown channel: %s", req.Channel)
 	}
 
 	if dispatchErr != nil {
-		record.Status = "failed"; record.ErrorMsg = dispatchErr.Error()
+		record.Status = "failed"
+		record.ErrorMsg = dispatchErr.Error()
 		notifFailed.Add(1)
 		slog.Error("[NotifHub] Dispatch failed", "channel", req.Channel, "err", dispatchErr)
 	} else {
 		now := time.Now().UnixMilli()
-		record.Status = "sent"; record.DeliveredAt = &now
+		record.Status = "sent"
+		record.DeliveredAt = &now
 		notifSent.Add(1)
 	}
 
 	hub.mu.Lock()
-	if len(hub.records) > 10000 { hub.records = hub.records[1:] } // ring buffer
+	if len(hub.records) > 10000 {
+		hub.records = hub.records[1:]
+	} // ring buffer
 	hub.records = append(hub.records, record)
 	hub.mu.Unlock()
 }
 
 // ── HTTP Handlers ─────────────────────────────────────────────────────────────
 func sendHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", 405); return }
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
 	var req NotificationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, "Invalid body", 400); return }
-	if req.TemplateID == "" || req.To == "" { http.Error(w, "template_id and to required", 400); return }
-	if req.Priority == "" { req.Priority = PriorityTransactional }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid body", 400)
+		return
+	}
+	if req.TemplateID == "" || req.To == "" {
+		http.Error(w, "template_id and to required", 400)
+		return
+	}
+	if req.Priority == "" {
+		req.Priority = PriorityTransactional
+	}
 
 	select {
 	case hub.queue <- &req:
@@ -358,7 +443,9 @@ func historyHandler(w http.ResponseWriter, r *http.Request) {
 	copy(records, hub.records)
 	hub.mu.RUnlock()
 	// Return last 100
-	if len(records) > 100 { records = records[len(records)-100:] }
+	if len(records) > 100 {
+		records = records[len(records)-100:]
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"records": records, "total": len(records)})
 }
@@ -366,7 +453,9 @@ func historyHandler(w http.ResponseWriter, r *http.Request) {
 func templatesHandler(w http.ResponseWriter, r *http.Request) {
 	hub.mu.RLock()
 	tmpls := make([]*NotificationTemplate, 0, len(hub.templates))
-	for _, t := range hub.templates { tmpls = append(tmpls, t) }
+	for _, t := range hub.templates {
+		tmpls = append(tmpls, t)
+	}
 	hub.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"templates": tmpls})
@@ -393,15 +482,44 @@ func main() {
 	slog.Info("[NotifHub] Starting", "port", port)
 	startWorkers(10) // 10 concurrent dispatch workers
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health",              healthHandler)
-	mux.HandleFunc("/livez",               func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/readyz",              func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/metrics",             metricsHandler)
-	mux.HandleFunc("/notifications/send",  sendHandler)
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/metrics", metricsHandler)
+	mux.HandleFunc("/notifications/send", sendHandler)
 	mux.HandleFunc("/notifications/history", historyHandler)
 	mux.HandleFunc("/notifications/templates", templatesHandler)
 
-	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second}
-	slog.Info("[NotifHub] Ready", "addr", srv.Addr)
-	if err := srv.ListenAndServe(); err != nil { slog.Error("Fatal", "err", err); os.Exit(1) }
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	go func() {
+		slog.Info("[NotifHub] Ready", "addr", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("Fatal", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Graceful shutdown: stop accepting requests, then close the queue and
+	// wait for dispatch workers to finish in-flight notifications.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	slog.Info("[NotifHub] Shutting down...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("[NotifHub] Forced shutdown", "err", err)
+	}
+	close(hub.queue)
+	workerWG.Wait()
+	slog.Info("[NotifHub] Stopped")
 }

@@ -74,29 +74,29 @@ func getEnv(key, fallback string) string {
 // ── Types ───────────────────────────────────────────────────────────────────
 
 type LPProvider struct {
-	ID                     string   `json:"id"`
-	Name                   string   `json:"name"`
-	Tier                   string   `json:"tier"`
-	APIUrl                 string   `json:"apiUrl"`
-	SupportedStablecoins   []string `json:"supportedStablecoins"`
+	ID                      string   `json:"id"`
+	Name                    string   `json:"name"`
+	Tier                    string   `json:"tier"`
+	APIUrl                  string   `json:"apiUrl"`
+	SupportedStablecoins    []string `json:"supportedStablecoins"`
 	SupportedFiatCurrencies []string `json:"supportedFiatCurrencies"`
-	DailyLimitUsd          float64  `json:"dailyLimitUsd"`
-	DailyVolumeUsd         float64  `json:"dailyVolumeUsd"`
-	Healthy                bool     `json:"healthy"`
-	LatencyMs              int      `json:"latencyMs"`
-	SettlementSLA          string   `json:"settlementSla"`
+	DailyLimitUsd           float64  `json:"dailyLimitUsd"`
+	DailyVolumeUsd          float64  `json:"dailyVolumeUsd"`
+	Healthy                 bool     `json:"healthy"`
+	LatencyMs               int      `json:"latencyMs"`
+	SettlementSLA           string   `json:"settlementSla"`
 }
 
 type SettlementRequest struct {
-	ProviderID    string  `json:"providerId" binding:"required"`
-	Direction     string  `json:"direction" binding:"required"`
-	Stablecoin    string  `json:"stablecoin" binding:"required"`
-	Amount        float64 `json:"amount" binding:"required,gt=0"`
-	FiatCurrency  string  `json:"fiatCurrency" binding:"required"`
-	UserID        int     `json:"userId" binding:"required"`
-	BankAccount   string  `json:"bankAccount,omitempty"`
-	BankName      string  `json:"bankName,omitempty"`
-	PayoutRail    string  `json:"payoutRail,omitempty"`
+	ProviderID   string  `json:"providerId" binding:"required"`
+	Direction    string  `json:"direction" binding:"required"`
+	Stablecoin   string  `json:"stablecoin" binding:"required"`
+	Amount       float64 `json:"amount" binding:"required,gt=0"`
+	FiatCurrency string  `json:"fiatCurrency" binding:"required"`
+	UserID       int     `json:"userId" binding:"required"`
+	BankAccount  string  `json:"bankAccount,omitempty"`
+	BankName     string  `json:"bankName,omitempty"`
+	PayoutRail   string  `json:"payoutRail,omitempty"`
 }
 
 type SettlementResult struct {
@@ -152,15 +152,18 @@ type ReconciliationReport struct {
 // ── State ───────────────────────────────────────────────────────────────────
 
 var (
-	settlementCount  int64
-	totalVolumeUsd   float64
-	volumeMu         sync.Mutex
-	providers        map[string]*LPProvider
-	settlements      map[string]*SettlementResult
-	settlementsMu    sync.RWMutex
+	settlementCount int64
+	totalVolumeUsd  float64
+	volumeMu        sync.Mutex
+	providers       map[string]*LPProvider
+	settlements     map[string]*SettlementResult
+	settlementsMu   sync.RWMutex
 )
 
 func dbUpsertSettlement(key string, value interface{}) {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
@@ -169,7 +172,7 @@ func dbUpsertSettlement(key string, value interface{}) {
 		if err != nil {
 			return
 		}
-		_, _ = db.Exec(
+		_, _ = db.ExecContext(ctx,
 			`INSERT INTO lp_settlements (id, data, updated_at) VALUES ($1, $2::jsonb, NOW())
 			ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
 			key, string(data),
@@ -178,10 +181,13 @@ func dbUpsertSettlement(key string, value interface{}) {
 }
 
 func loadSettlementsFromDB() {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query(`SELECT id, data FROM lp_settlements`)
+	rows, err := db.QueryContext(ctx, `SELECT id, data FROM lp_settlements`)
 	if err != nil {
 		slog.Warn("failed to load settlements from DB", "error", err)
 		return
@@ -205,21 +211,21 @@ func init() {
 	providers = map[string]*LPProvider{
 		"mock": {
 			ID: "mock", Name: "Mock LP", Tier: "tier3",
-			SupportedStablecoins: []string{"USDT", "USDC", "BUSD", "DAI", "NGNT", "cUSD", "PYUSD"},
+			SupportedStablecoins:    []string{"USDT", "USDC", "BUSD", "DAI", "NGNT", "cUSD", "PYUSD"},
 			SupportedFiatCurrencies: []string{"USD", "NGN", "GBP", "EUR", "GHS", "KES", "ZAR"},
-			DailyLimitUsd: 1_000_000, Healthy: true, LatencyMs: 1, SettlementSLA: "instant",
+			DailyLimitUsd:           1_000_000, Healthy: true, LatencyMs: 1, SettlementSLA: "instant",
 		},
 		"yellowcard": {
 			ID: "yellowcard", Name: "Yellow Card", Tier: "tier2",
-			SupportedStablecoins: []string{"USDT", "USDC"},
+			SupportedStablecoins:    []string{"USDT", "USDC"},
 			SupportedFiatCurrencies: []string{"NGN", "GHS", "KES", "ZAR", "XOF"},
-			DailyLimitUsd: 500_000, Healthy: true, LatencyMs: 150, SettlementSLA: "5-15 minutes",
+			DailyLimitUsd:           500_000, Healthy: true, LatencyMs: 150, SettlementSLA: "5-15 minutes",
 		},
 		"circle": {
 			ID: "circle", Name: "Circle", Tier: "tier1",
-			SupportedStablecoins: []string{"USDC"},
+			SupportedStablecoins:    []string{"USDC"},
 			SupportedFiatCurrencies: []string{"USD", "EUR", "GBP"},
-			DailyLimitUsd: 10_000_000, Healthy: true, LatencyMs: 80, SettlementSLA: "1-2 business days",
+			DailyLimitUsd:           10_000_000, Healthy: true, LatencyMs: 80, SettlementSLA: "1-2 business days",
 		},
 	}
 	settlements = make(map[string]*SettlementResult)
@@ -236,8 +242,12 @@ var fxRates = map[string]float64{
 func getFxRate(from, to string) float64 {
 	fromRate := fxRates[from]
 	toRate := fxRates[to]
-	if fromRate == 0 { fromRate = 1 }
-	if toRate == 0 { toRate = 1 }
+	if fromRate == 0 {
+		fromRate = 1
+	}
+	if toRate == 0 {
+		toRate = 1
+	}
 	return toRate / fromRate
 }
 
@@ -334,7 +344,7 @@ func createFxHedge(corridor string, amount float64, direction string) *FXHedge {
 	return &FXHedge{
 		HedgeID:        fmt.Sprintf("HEDGE-%s", uuid.New().String()[:8]),
 		Corridor:       corridor,
-		Direction:       direction,
+		Direction:      direction,
 		NotionalAmount: amount,
 		HedgeRate:      rate,
 		ExpiresAt:      time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
@@ -415,7 +425,7 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"status": "healthy", "service": "go-lp-settlement",
-			"uptime": time.Since(_processStartTime).String(),
+			"uptime":      time.Since(_processStartTime).String(),
 			"settlements": atomic.LoadInt64(&settlementCount),
 		})
 	})
@@ -490,7 +500,7 @@ func main() {
 		c.JSON(200, gin.H{
 			"provider": p.Name, "healthy": p.Healthy,
 			"latencyMs": p.LatencyMs, "dailyVolumeUsd": p.DailyVolumeUsd,
-			"dailyLimitUsd": p.DailyLimitUsd,
+			"dailyLimitUsd":     p.DailyLimitUsd,
 			"remainingLimitUsd": p.DailyLimitUsd - p.DailyVolumeUsd,
 		})
 	})
@@ -527,18 +537,27 @@ func main() {
 		for id, p := range providers {
 			found := false
 			for _, s := range p.SupportedStablecoins {
-				if s == stablecoin { found = true; break }
+				if s == stablecoin {
+					found = true
+					break
+				}
 			}
-			if !found { continue }
+			if !found {
+				continue
+			}
 
 			available := 100000.0
-			if id == "circle" { available = 10_000_000 }
-			if id == "yellowcard" { available = 500_000 }
+			if id == "circle" {
+				available = 10_000_000
+			}
+			if id == "yellowcard" {
+				available = 500_000
+			}
 
 			balances = append(balances, gin.H{
 				"provider": p.Name, "tier": p.Tier,
 				"available": available, "reserved": p.DailyVolumeUsd,
-				"total": available + p.DailyVolumeUsd,
+				"total":          available + p.DailyVolumeUsd,
 				"fiatEquivalent": available * fxRate,
 			})
 		}
@@ -569,8 +588,8 @@ func main() {
 		}
 		c.JSON(200, gin.H{
 			"needsRebalancing": len(actions) > 0,
-			"actions": actions,
-			"checkedAt": time.Now().UTC().Format(time.RFC3339),
+			"actions":          actions,
+			"checkedAt":        time.Now().UTC().Format(time.RFC3339),
 		})
 	})
 
@@ -593,14 +612,15 @@ func main() {
 
 	// ── Start Server ────────────────────────────────────────────────────
 	srv := &http.Server{
-		Addr: ":" + cfg.Port, Handler: r,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              ":" + cfg.Port, Handler: r,
 		ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 
 	go func() {
 		slog.Info("go-lp-settlement starting", "port", cfg.Port)
 		startupMs := time.Since(_processStartTime).Milliseconds()
-			_, _ = json.Marshal(map[string]interface{}{
+		_, _ = json.Marshal(map[string]interface{}{
 			"event": "startup_complete", "service": "go-lp-settlement",
 			"port": cfg.Port, "startup_ms": startupMs,
 		})
@@ -620,6 +640,8 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("server forced shutdown", "error", err)
 	}
-	if db != nil { db.Close() }
+	if db != nil {
+		db.Close()
+	}
 	slog.Info("shutdown complete", "uptime", time.Since(_processStartTime).String())
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"time"
 
 	"github.com/remitflow/liveness-aggregator/internal/db"
@@ -21,6 +22,12 @@ const (
 	maxRetries    = 3
 	retryBackoff  = 500 * time.Millisecond
 )
+
+// jitter returns d scaled by a random factor in [0.5, 1.5) (wave-14 perf):
+// avoids synchronized retry storms across consumer replicas (thundering herd).
+func jitter(d time.Duration) time.Duration {
+	return time.Duration(float64(d) * (0.5 + rand.Float64()))
+}
 
 // Config holds Kafka broker addresses and optional TLS settings.
 type Config struct {
@@ -54,7 +61,7 @@ func New(cfg Config, dbClient *db.Client) *Consumer {
 		MaxWait:        500 * time.Millisecond,
 		StartOffset:    startOffset,
 		CommitInterval: time.Second,
-		Logger:         kafka.LoggerFunc(func(msg string, args ...interface{}) {
+		Logger: kafka.LoggerFunc(func(msg string, args ...interface{}) {
 			log.Debug().Msgf("[kafka] "+msg, args...)
 		}),
 		ErrorLogger: kafka.LoggerFunc(func(msg string, args ...interface{}) {
@@ -81,7 +88,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 				return nil
 			}
 			log.Error().Err(err).Msg("[aggregator] fetch message error")
-			time.Sleep(retryBackoff)
+			time.Sleep(jitter(retryBackoff))
 			continue
 		}
 
@@ -126,7 +133,7 @@ func (c *Consumer) processWithRetry(ctx context.Context, msg kafka.Message) erro
 				Int("attempt", attempt).
 				Str("event_id", ev.EventID).
 				Msg("[aggregator] process attempt failed")
-			time.Sleep(retryBackoff * time.Duration(attempt))
+			time.Sleep(jitter(retryBackoff * time.Duration(attempt)))
 			continue
 		}
 		return nil

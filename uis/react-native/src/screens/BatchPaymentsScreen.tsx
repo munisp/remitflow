@@ -9,8 +9,8 @@ export default function BatchPaymentsScreen() {
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({ name: '', description: '' });
   const { data, isLoading, refetch } = trpc.batchPayments.list.useQuery();
-  const createMutation = trpc.batchPayments.create.useMutation({ onSuccess: () => { setShowCreate(false); refetch(); }, onError: (e) => Alert.alert('Error', e.message) });
-  const cancelMutation = trpc.batchPayments.cancel.useMutation({ onSuccess: refetch, onError: (e) => Alert.alert('Error', e.message) });
+  const createMutation = trpc.batchPayments.create.useMutation({ onSuccess: () => { setShowCreate(false); refetch(); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const cancelMutation = trpc.batchPayments.cancel.useMutation({ onSuccess: refetch, onError: (e: any) => Alert.alert('Error', e.message) });
   const STATUS_COLOR: Record<string, string> = { pending: '#f59e0b', processing: '#6366f1', completed: '#10b981', failed: '#ef4444', cancelled: '#6b7280' };
   return (
     <View style={s.container}>

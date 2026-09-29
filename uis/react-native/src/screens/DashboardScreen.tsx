@@ -27,7 +27,7 @@ export default function DashboardScreen() {
     setRefreshing(false);
   };
 
-  const totalBalance = wallets?.reduce((sum, w) => sum + Number(w.balance ?? 0), 0) ?? 0;
+  const totalBalance = wallets?.reduce((sum: any, w: any) => sum + Number(w.balance ?? 0), 0) ?? 0;
 
   return (
     <ScrollView
@@ -81,7 +81,7 @@ export default function DashboardScreen() {
         <ActivityIndicator color="#6366f1" style={{ marginVertical: 20 }} />
       ) : (
         <View style={styles.txList}>
-          {(transactions?.items ?? []).slice(0, 5).map((tx) => (
+          {(transactions?.items ?? []).slice(0, 5).map((tx: any) => (
             <View key={tx.id} style={styles.txItem}>
               <View style={styles.txIcon}>
                 <Text style={styles.txIconText}>

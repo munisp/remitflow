@@ -11,7 +11,7 @@ export default function BNPLScreen() {
   const { data: plans, isLoading: loadingPlans, refetch } = trpc.bnpl.plans.useQuery();
   const applyMutation = trpc.bnpl.apply.useMutation({
     onSuccess: () => { setShowApply(false); refetch(); Alert.alert('Applied', 'Your BNPL application has been submitted'); },
-    onError: (e) => Alert.alert('Error', e.message),
+    onError: (e: any) => Alert.alert('Error', e.message),
   });
   const STATUS_COLOR: Record<string, string> = { active: '#10b981', pending: '#f59e0b', completed: '#6366f1', rejected: '#ef4444' };
   return (

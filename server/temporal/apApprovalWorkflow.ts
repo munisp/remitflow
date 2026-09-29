@@ -30,6 +30,7 @@ export interface ApApprovalActivities {
 
 const acts = proxyActivities<ApApprovalActivities>({
   startToCloseTimeout: "2 minutes",
+  heartbeatTimeout: "30s", // W14
   retry: {
     maximumAttempts: 3,
     initialInterval: "5 seconds",

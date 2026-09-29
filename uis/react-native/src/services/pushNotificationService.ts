@@ -7,6 +7,7 @@
 import messaging from "@react-native-firebase/messaging";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Platform, PermissionsAndroid } from "react-native";
+import { fetchWithTimeout } from "../api/fetchWithTimeout";
 
 const FCM_TOKEN_KEY = "@remitflow:fcm_token";
 
@@ -56,7 +57,7 @@ export async function registerPushToken(
   try {
     const token = await getFCMToken();
     if (!token) return false;
-    const res = await fetch(`${apiBaseUrl}/api/trpc/pushNotifications.register`, {
+    const res = await fetchWithTimeout(`${apiBaseUrl}/api/trpc/pushNotifications.register`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

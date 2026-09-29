@@ -402,9 +402,9 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
     const accounts = await resolveTbTransferAccounts(input.userId, input.fromCurrency);
 
     try {
-      // Pre-check: validate sufficient balance
-      await tigerBeetle.validateBalance(accounts.debitAccountId, amountCents);
-
+      // W14: the validateBalance read-before-write pre-check was removed — it
+      // raced with concurrent holds. TB's own result codes on the hold create
+      // (exceeds_credits(54)/exceeds_debits(55), mapped below) are authoritative.
       // Create pending (two-phase) transfer — holds funds until settlement confirms
       await tigerBeetle.createPendingTransfer({
         id: transferBigId,
@@ -670,7 +670,9 @@ export async function settleTransferHold(input: {
   // 2. Post the TB hold in full. Deterministic post id + exists(46) tolerance
   //    in the bridge client make this replay-safe.
   try {
-    await tigerBeetle.postPendingTransfer({ id: postId, pendingId, ledger: accounts.ledger, code: 1 });
+    // W14: amount from the settlement journal (amountCents) — skips the
+    // bridge's lookupTransfers round trip; TB still rejects mismatches.
+    await tigerBeetle.postPendingTransfer({ id: postId, pendingId, ledger: accounts.ledger, code: 1, amount: amountCents });
     await db.execute(sql`
       UPDATE settlement_journal SET status = 'posted', updated_at = NOW()
       WHERE transfer_id = ${input.transferId}
@@ -725,7 +727,8 @@ export async function reconcileSettlementJournal(limit = 100): Promise<{ retried
         // Retry the post for the full hold amount. The deterministic post id
         // makes a retry of a post that actually committed hit TB exists(46),
         // which the bridge client tolerates as idempotent success.
-        await tigerBeetle.postPendingTransfer({ id: postId, pendingId, ledger: accounts.ledger, code: 1 });
+        // W14: amount from the journal row — skips the lookupTransfers RTT.
+        await tigerBeetle.postPendingTransfer({ id: postId, pendingId, ledger: accounts.ledger, code: 1, amount: BigInt(row.amount_minor) });
         await db.execute(sql`UPDATE settlement_journal SET status = 'posted', updated_at = NOW() WHERE transfer_id = ${row.transfer_id}`);
         retried++;
       } catch (postErr) {

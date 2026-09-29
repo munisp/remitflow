@@ -48,7 +48,7 @@ import type {
   BdcBatchDeadlineInfo,
   BdcForceLiquidationOutcome,
   BdcOffboardingOutcome,
-  BdcReconReport,
+  BdcReconSummary,
   BdcReturnSubmitOutcome,
 } from "./activities-bdc";
 
@@ -56,6 +56,7 @@ import type {
 
 const acts = proxyActivities<BdcActivities>({
   startToCloseTimeout: "5 minutes",
+  heartbeatTimeout: "30s", // W14: long scans heartbeat; dead workers detected in 30s
   retry: {
     maximumAttempts: 3,
     initialInterval: "5 seconds",
@@ -152,9 +153,11 @@ export async function bdcReturnSubmissionWorkflow(returnId: number): Promise<Bdc
 /**
  * Daily recon for one IMTO over one period (format "YYYY-MM", UTC). All work
  * is in the activity: variance report + conditional BDC_POSITION_BREACH
- * alert. Returns the full report so the cron registrar can log/inspect it.
+ * alert (the breach events carry the row-level unsettled detail).
+ * W14: returns the report SUMMARY into workflow history — row-level detail no
+ * longer transits history (see BdcReconSummary TODO in activities-bdc.ts).
  */
-export async function bdcSettlementReconWorkflow(imtoCode: string, period: string): Promise<BdcReconReport> {
+export async function bdcSettlementReconWorkflow(imtoCode: string, period: string): Promise<BdcReconSummary> {
   return acts.reconcileActivity(imtoCode, period);
 }
 
@@ -256,6 +259,7 @@ import type { BdcReversalWatchdogActivities, BdcReversalWatchdogReport } from ".
 
 const watchdogActs = proxyActivities<BdcReversalWatchdogActivities>({
   startToCloseTimeout: "5 minutes",
+  heartbeatTimeout: "30s", // W14
   retry: {
     maximumAttempts: 3,
     initialInterval: "5 seconds",

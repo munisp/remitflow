@@ -31,6 +31,26 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
+
+# ── Shared HTTP clients (SPEC-wave14 §4.6) ────────────────────────────────────
+# Timeout-keyed pool of module-level AsyncClients: outbound calls previously
+# constructed a fresh client per request (TCP/TLS + pool setup each time).
+# Clients live for the process lifetime; pools are capped at 100 connections.
+_http_clients: dict = {}
+
+
+def get_http_client(timeout: float = 5.0, **kwargs) -> httpx.AsyncClient:
+    key = (float(timeout), tuple(sorted(kwargs.items())))
+    client = _http_clients.get(key)
+    if client is None:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout),
+            limits=httpx.Limits(max_connections=100),
+            **kwargs,
+        )
+        _http_clients[key] = client
+    return client
+
 import numpy as np
 import hmac
 import ipaddress
@@ -63,7 +83,7 @@ _db_pool = None
 def _get_db():
     global _db_pool
     if _db_pool is None:
-        _db_pool = psycopg2.connect(_DB_URL)
+        _db_pool = psycopg2.connect(_DB_URL, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
         _db_pool.autocommit = True
         with _db_pool.cursor() as cur:
             cur.execute("""
@@ -280,22 +300,22 @@ async def _load_image_bytes(req: DeepfakeCheckRequest) -> bytes:
         return raw
     if req.image_url:
         url = _validate_image_url(req.image_url)
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
-            async with client.stream("GET", url) as resp:
-                if resp.is_redirect:
-                    raise HTTPException(status_code=400, detail="image_url redirects are not followed")
-                resp.raise_for_status()
-                cl = resp.headers.get("content-length")
-                if cl and cl.isdigit() and int(cl) > MAX_IMAGE_BYTES:
+        client = get_http_client(timeout=15.0, follow_redirects=False)  # shared client (SPEC-wave14 §4.6)
+        async with client.stream("GET", url) as resp:
+            if resp.is_redirect:
+                raise HTTPException(status_code=400, detail="image_url redirects are not followed")
+            resp.raise_for_status()
+            cl = resp.headers.get("content-length")
+            if cl and cl.isdigit() and int(cl) > MAX_IMAGE_BYTES:
+                raise HTTPException(status_code=413, detail="image exceeds maximum allowed size")
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in resp.aiter_bytes(65536):
+                total += len(chunk)
+                if total > MAX_IMAGE_BYTES:
                     raise HTTPException(status_code=413, detail="image exceeds maximum allowed size")
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in resp.aiter_bytes(65536):
-                    total += len(chunk)
-                    if total > MAX_IMAGE_BYTES:
-                        raise HTTPException(status_code=413, detail="image exceeds maximum allowed size")
-                    chunks.append(chunk)
-                return b"".join(chunks)
+                chunks.append(chunk)
+            return b"".join(chunks)
     raise ValueError("Either image_url or image_base64 must be provided")
 
 
@@ -807,7 +827,7 @@ def _get_db_conn():
     """Get PostgreSQL connection (middleware-ready: swap to TigerBeetle in production)."""
     try:
         db_url = _require_env("DATABASE_URL")
-        conn = psycopg2.connect(db_url)
+        conn = psycopg2.connect(db_url, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
         conn.autocommit = True
         return conn
     except Exception:
@@ -903,4 +923,4 @@ def _db_log_event(table_prefix, event_type, payload):
             pass
 
     port = int(os.getenv("PORT", "8097"))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info", workers=int(os.getenv("UVICORN_WORKERS", "1")))  # SPEC-wave14 §4.6: env-configurable workers (default 1)

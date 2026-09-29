@@ -36,6 +36,26 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Set, Tuple
 
 import httpx
+
+# ── Shared HTTP clients (SPEC-wave14 §4.6) ────────────────────────────────────
+# Timeout-keyed pool of module-level AsyncClients: outbound calls previously
+# constructed a fresh client per request (TCP/TLS + pool setup each time).
+# Clients live for the process lifetime; pools are capped at 100 connections.
+_http_clients: dict = {}
+
+
+def get_http_client(timeout: float = 5.0, **kwargs) -> httpx.AsyncClient:
+    key = (float(timeout), tuple(sorted(kwargs.items())))
+    client = _http_clients.get(key)
+    if client is None:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout),
+            limits=httpx.Limits(max_connections=100),
+            **kwargs,
+        )
+        _http_clients[key] = client
+    return client
+
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
@@ -65,7 +85,7 @@ _db_pool = None
 def _get_db():
     global _db_pool
     if _db_pool is None:
-        _db_pool = psycopg2.connect(_DB_URL)
+        _db_pool = psycopg2.connect(_DB_URL, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
         _db_pool.autocommit = True
         with _db_pool.cursor() as cur:
             cur.execute("""
@@ -299,26 +319,26 @@ class SanctionsList:
         new_aliases: Set[str] = set()
         stats: Dict[str, int] = {}
 
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            # OFAC SDN List
-            ofac_count = await self._fetch_ofac(client, new_names, new_aliases)
-            stats["ofac_sdn"] = ofac_count
-            log.info("[Sanctions] OFAC SDN: %d entries loaded", ofac_count)
+        client = get_http_client(timeout=30.0, follow_redirects=True)  # shared client (SPEC-wave14 §4.6)
+        # OFAC SDN List
+        ofac_count = await self._fetch_ofac(client, new_names, new_aliases)
+        stats["ofac_sdn"] = ofac_count
+        log.info("[Sanctions] OFAC SDN: %d entries loaded", ofac_count)
 
-            # UN Consolidated List
-            un_count = await self._fetch_un(client, new_names, new_aliases)
-            stats["un_consolidated"] = un_count
-            log.info("[Sanctions] UN Consolidated: %d entries loaded", un_count)
+        # UN Consolidated List
+        un_count = await self._fetch_un(client, new_names, new_aliases)
+        stats["un_consolidated"] = un_count
+        log.info("[Sanctions] UN Consolidated: %d entries loaded", un_count)
 
-            # EU Financial Sanctions
-            eu_count = await self._fetch_eu(client, new_names, new_aliases)
-            stats["eu_financial"] = eu_count
-            log.info("[Sanctions] EU Financial: %d entries loaded", eu_count)
+        # EU Financial Sanctions
+        eu_count = await self._fetch_eu(client, new_names, new_aliases)
+        stats["eu_financial"] = eu_count
+        log.info("[Sanctions] EU Financial: %d entries loaded", eu_count)
 
-            # HMT (UK) Sanctions
-            hmt_count = await self._fetch_hmt(client, new_names, new_aliases)
-            stats["hmt_uk"] = hmt_count
-            log.info("[Sanctions] HMT UK: %d entries loaded", hmt_count)
+        # HMT (UK) Sanctions
+        hmt_count = await self._fetch_hmt(client, new_names, new_aliases)
+        stats["hmt_uk"] = hmt_count
+        log.info("[Sanctions] HMT UK: %d entries loaded", hmt_count)
 
         self._names = new_names
         # Write-through to PostgreSQL
@@ -1068,4 +1088,4 @@ async def metrics_endpoint() -> str:
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8083))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False, workers=int(os.getenv("UVICORN_WORKERS", "1")))  # SPEC-wave14 §4.6: env-configurable workers (default 1)

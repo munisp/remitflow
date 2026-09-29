@@ -62,6 +62,9 @@ func initDB() {
 }
 
 func dbUpsertAudit(key string, value interface{}) {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
@@ -70,7 +73,7 @@ func dbUpsertAudit(key string, value interface{}) {
 		if err != nil {
 			return
 		}
-		_, _ = db.Exec(
+		_, _ = db.ExecContext(ctx,
 			`INSERT INTO hardening_audit_chain (id, data, updated_at) VALUES ($1, $2::jsonb, NOW())
 			ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
 			key, string(data),
@@ -79,10 +82,13 @@ func dbUpsertAudit(key string, value interface{}) {
 }
 
 func loadAuditChainFromDB() {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query(`SELECT id, data FROM hardening_audit_chain ORDER BY updated_at ASC`)
+	rows, err := db.QueryContext(ctx, `SELECT id, data FROM hardening_audit_chain ORDER BY updated_at ASC`)
 	if err != nil {
 		log.Printf("[Go Platform Hardening] Failed to load audit chain from DB: %v", err)
 		return
@@ -112,7 +118,7 @@ var (
 	cacApiKey         = getEnv("CAC_API_KEY", "")
 	// FAIL CLOSED: no default audit HMAC secret — refuse to boot when unset
 	// rather than ship a publicly known credential.
-	auditHmacSecret   = mustGetEnv("AUDIT_HMAC_SECRET")
+	auditHmacSecret = mustGetEnv("AUDIT_HMAC_SECRET")
 )
 
 func getEnv(key, fallback string) string {
@@ -179,15 +185,15 @@ type GraphEdge struct {
 }
 
 type SettlementBatch struct {
-	BatchID      string                 `json:"batch_id"`
-	Corridor     string                 `json:"corridor"`
-	Outbound     []SettlementTransfer   `json:"outbound"`
-	Inbound      []SettlementTransfer   `json:"inbound"`
-	GrossAmount  float64                `json:"gross_amount"`
-	NetAmount    float64                `json:"net_amount"`
-	NetDirection string                 `json:"net_direction"`
-	Status       string                 `json:"status"`
-	CreatedAt    string                 `json:"created_at"`
+	BatchID      string               `json:"batch_id"`
+	Corridor     string               `json:"corridor"`
+	Outbound     []SettlementTransfer `json:"outbound"`
+	Inbound      []SettlementTransfer `json:"inbound"`
+	GrossAmount  float64              `json:"gross_amount"`
+	NetAmount    float64              `json:"net_amount"`
+	NetDirection string               `json:"net_direction"`
+	Status       string               `json:"status"`
+	CreatedAt    string               `json:"created_at"`
 }
 
 type SettlementTransfer struct {
@@ -198,13 +204,13 @@ type SettlementTransfer struct {
 }
 
 type ReScreeningResult struct {
-	UserID      int      `json:"user_id"`
-	Required    bool     `json:"required"`
-	Reason      string   `json:"reason"`
-	Priority    string   `json:"priority"`
-	Checks      []string `json:"checks"`
-	SanctionsHit bool    `json:"sanctions_hit"`
-	PEPHit       bool    `json:"pep_hit"`
+	UserID       int      `json:"user_id"`
+	Required     bool     `json:"required"`
+	Reason       string   `json:"reason"`
+	Priority     string   `json:"priority"`
+	Checks       []string `json:"checks"`
+	SanctionsHit bool     `json:"sanctions_hit"`
+	PEPHit       bool     `json:"pep_hit"`
 }
 
 type OnRampWebhook struct {
@@ -319,12 +325,12 @@ func verifyAuditChain() (bool, int) {
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	valid, count := verifyAuditChain()
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":           "healthy",
-		"service":          "go-platform-hardening",
-		"port":             port,
-		"audit_chain_len":  count,
+		"status":            "healthy",
+		"service":           "go-platform-hardening",
+		"port":              port,
+		"audit_chain_len":   count,
 		"audit_chain_valid": valid,
-		"uptime":           time.Since(startTime).String(),
+		"uptime":            time.Since(startTime).String(),
 	})
 }
 
@@ -335,6 +341,7 @@ func handleUBOAnalysis(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req UBORequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -416,9 +423,9 @@ func fetchCompaniesHouse(regNumber string) []UBOResult {
 
 	var data struct {
 		Items []struct {
-			Name             string `json:"name"`
+			Name             string   `json:"name"`
 			NaturesOfControl []string `json:"natures_of_control"`
-			Kind             string `json:"kind"`
+			Kind             string   `json:"kind"`
 		} `json:"items"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&data) != nil {
@@ -474,6 +481,7 @@ func handleSettlementNetting(w http.ResponseWriter, r *http.Request) {
 		Outbound []SettlementTransfer `json:"outbound"`
 		Inbound  []SettlementTransfer `json:"inbound"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -510,9 +518,9 @@ func handleSettlementNetting(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"batch":        batch,
-		"savings":      savings,
-		"savings_pct":  fmt.Sprintf("%.1f%%", (savings/batch.GrossAmount)*100),
+		"batch":          batch,
+		"savings":        savings,
+		"savings_pct":    fmt.Sprintf("%.1f%%", (savings/batch.GrossAmount)*100),
 		"transfer_count": len(req.Outbound) + len(req.Inbound),
 	})
 }
@@ -529,6 +537,7 @@ func handleReScreening(w http.ResponseWriter, r *http.Request) {
 		LastScreenedAt string `json:"last_screened_at"`
 		RiskLevel      string `json:"risk_level"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -588,6 +597,7 @@ func handleOnRampWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var event OnRampWebhook
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
 		http.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
@@ -643,6 +653,7 @@ func handleTransactionCoordinator(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CoordinatorRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -650,9 +661,9 @@ func handleTransactionCoordinator(w http.ResponseWriter, r *http.Request) {
 
 	stepDefs := map[string][]string{
 		"cross_border_transfer": {"validate", "compliance", "lock", "debit", "tigerbeetle", "rail", "confirm", "credit", "kafka", "fluvio", "opensearch", "unlock"},
-		"stablecoin_onramp":    {"validate", "compliance", "lock", "verify_payment", "credit_wallet", "tigerbeetle", "kafka", "unlock"},
-		"stablecoin_offramp":   {"validate", "compliance", "lock", "debit_stable", "bank_payout", "tigerbeetle", "credit_fiat", "kafka", "unlock"},
-		"batch_payment":        {"validate_batch", "compliance", "batch_lock", "process_items", "tigerbeetle", "kafka", "unlock"},
+		"stablecoin_onramp":     {"validate", "compliance", "lock", "verify_payment", "credit_wallet", "tigerbeetle", "kafka", "unlock"},
+		"stablecoin_offramp":    {"validate", "compliance", "lock", "debit_stable", "bank_payout", "tigerbeetle", "credit_fiat", "kafka", "unlock"},
+		"batch_payment":         {"validate_batch", "compliance", "batch_lock", "process_items", "tigerbeetle", "kafka", "unlock"},
 	}
 
 	steps := stepDefs["cross_border_transfer"]
@@ -693,6 +704,7 @@ func handleCompensationRetry(w http.ResponseWriter, r *http.Request) {
 		StepName      string `json:"step_name"`
 		Attempt       int    `json:"attempt"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -735,9 +747,9 @@ func handleAuditChain(w http.ResponseWriter, r *http.Request) {
 		auditChainMu.Unlock()
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"valid":        valid,
+			"valid":         valid,
 			"total_entries": count,
-			"recent":       last5,
+			"recent":        last5,
 		})
 
 	case http.MethodPost:
@@ -746,6 +758,7 @@ func handleAuditChain(w http.ResponseWriter, r *http.Request) {
 			UserID int    `json:"user_id"`
 			Data   string `json:"data"`
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 		if json.NewDecoder(r.Body).Decode(&req) != nil {
 			http.Error(w, "Invalid request", http.StatusBadRequest)
 			return
@@ -777,10 +790,11 @@ func main() {
 	mux.HandleFunc("/v1/audit/chain", handleAuditChain)
 
 	server := &http.Server{
-		Addr:         ":" + port,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
 	}
 
 	go func() {

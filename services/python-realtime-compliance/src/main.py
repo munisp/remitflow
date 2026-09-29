@@ -107,6 +107,30 @@ class ScreeningUnavailableError(RuntimeError):
     """Raised when the sanctions screening backend cannot answer. Fail-closed."""
 
 
+# ── Shared HTTP client (SPEC-wave14 §4.4/§4.6) ────────────────────────────────
+# One module-level AsyncClient for all OpenSearch screening calls — per-request
+# construction paid full TCP/TLS + pool setup on every screened name.
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(5.0),
+            limits=httpx.Limits(max_connections=100),
+        )
+    return _http_client
+
+
+@app.on_event("shutdown")
+async def _close_http_client():
+    global _http_client
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
+
+
 async def screen_sanctions(name: str) -> tuple[bool, str]:
     """Screen a name against the live OFAC/UN/EU/HMT OpenSearch index."""
     if not OPENSEARCH_URL:
@@ -125,10 +149,10 @@ async def screen_sanctions(name: str) -> tuple[bool, str]:
         "_source": ["source"],
     }
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(f"{OPENSEARCH_URL}/{SANCTIONS_INDEX}/_search", json=query)
-            resp.raise_for_status()
-            hits = resp.json().get("hits", {}).get("hits", [])
+        client = get_http_client()
+        resp = await client.post(f"{OPENSEARCH_URL}/{SANCTIONS_INDEX}/_search", json=query)
+        resp.raise_for_status()
+        hits = resp.json().get("hits", {}).get("hits", [])
     except Exception as e:
         raise ScreeningUnavailableError(f"Sanctions screening backend error: {e}") from e
     if hits:
@@ -149,10 +173,10 @@ async def screen_pep(name: str) -> bool:
         "query": {"match": {"all_names": {"query": name, "fuzziness": "AUTO", "minimum_should_match": "75%"}}},
     }
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(f"{OPENSEARCH_URL}/{PEP_INDEX}/_search", json=query)
-            resp.raise_for_status()
-            return bool(resp.json().get("hits", {}).get("hits", []))
+        client = get_http_client()
+        resp = await client.post(f"{OPENSEARCH_URL}/{PEP_INDEX}/_search", json=query)
+        resp.raise_for_status()
+        return bool(resp.json().get("hits", {}).get("hits", []))
     except Exception as e:
         # PEP is an advisory signal; log loudly but do not fail the transaction.
         logger.error(f"[PEP] screening backend error (treated as no-hit): {e}")
@@ -205,18 +229,12 @@ def fuzzy_match(name: str, target: str, threshold: float = 0.75) -> bool:
     overlap = len(n_tokens & t_tokens) / max(len(n_tokens), len(t_tokens))
     return overlap >= threshold
 
-def screen_sanctions(name: str) -> tuple[bool, str]:
-    for list_name, names in SANCTIONS_NAMES.items():
-        for sdn_name in names:
-            if fuzzy_match(name, sdn_name):
-                return True, list_name
-    return False, ""
-
-def screen_pep(name: str) -> bool:
-    for pep_name in PEP_NAMES:
-        if fuzzy_match(name, pep_name):
-            return True
-    return False
+# NOTE (SPEC-wave14 §4.4): two dead sync stubs of `screen_sanctions`/`screen_pep`
+# previously lived here and SHADOWED the async implementations above, while
+# referencing `SANCTIONS_NAMES`/`PEP_NAMES` which no longer exist — every
+# screening call raised NameError, breaking the service. They have been
+# deleted; the async OpenSearch-backed implementations (fail-closed) are the
+# only definitions now.
 
 # ── Velocity check ─────────────────────────────────────────────────────────────
 def check_velocity(key: str, window_seconds: int, max_count: int) -> tuple[bool, int]:
@@ -389,7 +407,9 @@ async def _execute_erasure(user_id: int, erasure_id: str) -> list[dict]:
         )
     token = hashlib.sha256(f"erasure:{user_id}:{erasure_id}".encode()).hexdigest()[:16]
     steps: list[dict] = []
-    conn = await asyncpg.connect(DATABASE_URL)
+    # statement_timeout 5s per statement (SPEC-wave14 §4.6) — a runaway
+    # anonymize/purge statement fails loudly instead of pinning the connection.
+    conn = await asyncpg.connect(DATABASE_URL, server_settings={"statement_timeout": "5000"})
     try:
         async with conn.transaction():
             # Anonymize PII columns that actually exist in the schema
@@ -433,7 +453,7 @@ async def _persist_erasure_record(entry: dict) -> None:
     """Persist the erasure record durably so the audit trail survives restarts."""
     if not DATABASE_URL:
         return
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await asyncpg.connect(DATABASE_URL, server_settings={"statement_timeout": "5000"})
     try:
         await conn.execute(
             """CREATE TABLE IF NOT EXISTS gdpr_erasure_log (
@@ -494,7 +514,7 @@ async def get_erasure_status(erasure_id: str, _auth: CallerPrincipal = Depends(r
         if entry["erasure_id"] == erasure_id:
             return entry
     if DATABASE_URL:
-        conn = await asyncpg.connect(DATABASE_URL)
+        conn = await asyncpg.connect(DATABASE_URL, server_settings={"statement_timeout": "5000"})
         try:
             row = await conn.fetchrow(
                 "SELECT erasure_id, user_id, requester_id, reason, status, steps, created_at, completed_at "
@@ -533,4 +553,8 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8143"))
     logger.info(f"[Compliance] Starting on port {port}")
-    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
+    # SPEC-wave14 §4.6: env-configurable workers (default 1 — in-memory
+    # velocity/blocked-user state is per-process, so >1 worker shards state;
+    # keep 1 unless state is externalised).
+    workers = int(os.getenv("UVICORN_WORKERS", "1"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info", workers=workers)

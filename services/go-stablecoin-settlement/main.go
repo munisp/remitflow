@@ -8,7 +8,8 @@
 //   - Mojaloop bridge for cross-border stablecoin settlements
 //   - Kafka event publishing for all settlement activities
 //   - Fluvio streaming for real-time settlement monitoring
-//   - Circuit breaking + retry logic for external providers
+//   - Circuit breaking for external providers; bounded retry with backoff
+//     for internal Dapr/OpenSearch publishes (transport errors and 5xx only)
 //   - P2P claim endpoint for unclaimed stablecoin sends
 //
 // Middleware:
@@ -23,6 +24,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -33,10 +35,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -130,14 +134,88 @@ type CircuitBreaker struct {
 
 // ── Stores ──────────────────────────────────────────────────────────────────
 
+// In-memory stores are best-effort runtime state (the authoritative record is
+// the TigerBeetle/Dapr state store). Each map has its own lock so a hot path
+// (e.g. webhook dedup) never blocks an unrelated one (e.g. claim redemption).
+// All maps are bounded — on overflow an arbitrary old entry is evicted.
 var (
 	settlements   = make(map[string]*SettlementResult)
-	webhookEvents = make(map[string]*WebhookEvent)
-	webhookDedup  = make(map[string]bool) // 24h dedup
-	ledgerEntries = make(map[string]*LedgerEntry)
-	p2pClaims     = make(map[string]*P2PClaim)
-	mu            sync.RWMutex
+	settlementsMu sync.RWMutex
 
+	webhookEvents = make(map[string]*WebhookEvent)
+	webhookDedup  = make(map[string]time.Time) // 24h dedup window, swept periodically
+	webhookMu     sync.RWMutex
+
+	ledgerEntries = make(map[string]*LedgerEntry)
+	ledgerMu      sync.RWMutex
+
+	p2pClaims = make(map[string]*P2PClaim)
+	claimsMu  sync.RWMutex
+)
+
+const (
+	maxSettlementRecords = 10000
+	maxWebhookEvents     = 10000
+	maxLedgerEntries     = 10000
+	maxP2PClaims         = 10000
+	maxWebhookDedupKeys  = 100000
+	webhookDedupTTL      = 24 * time.Hour
+)
+
+// evictOldestLocked removes an arbitrary entry from a bounded map that has
+// reached its cap. Map iteration order is random, so this is "an" entry, not
+// strictly the oldest — acceptable for best-effort in-memory caches.
+func evictOneSettlementLocked() {
+	for k := range settlements {
+		delete(settlements, k)
+		return
+	}
+}
+
+func evictOneWebhookEventLocked() {
+	for k := range webhookEvents {
+		delete(webhookEvents, k)
+		return
+	}
+}
+
+func evictOneLedgerEntryLocked() {
+	for k := range ledgerEntries {
+		delete(ledgerEntries, k)
+		return
+	}
+}
+
+func evictOneP2PClaimLocked() {
+	for k := range p2pClaims {
+		delete(p2pClaims, k)
+		return
+	}
+}
+
+// sweepWebhookDedup periodically removes dedup keys older than the 24h window
+// so the map cannot grow without bound between bursts.
+func sweepWebhookDedup(stop <-chan struct{}) {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			cutoff := time.Now().Add(-webhookDedupTTL)
+			webhookMu.Lock()
+			for k, ts := range webhookDedup {
+				if ts.Before(cutoff) {
+					delete(webhookDedup, k)
+				}
+			}
+			webhookMu.Unlock()
+		}
+	}
+}
+
+var (
 	settlementCount uint64
 	webhookCount    uint64
 	ledgerCount     uint64
@@ -201,34 +279,81 @@ func verifyHMAC(payload []byte, signature, secret string) bool {
 	return hmac.Equal([]byte(expected), []byte(signature))
 }
 
+// ── Shared HTTP clients ─────────────────────────────────────────────────────
+// One client per timeout class, hoisted to package scope: per-call client
+// construction defeats connection reuse (every call dialled a fresh TCP conn).
+var (
+	daprStateClient      = &http.Client{Timeout: 5 * time.Second}
+	daprPublishClient    = &http.Client{Timeout: 3 * time.Second}
+	openSearchClient     = &http.Client{Timeout: 3 * time.Second}
+	providerPayoutClient = &http.Client{Timeout: 15 * time.Second}
+	mojaloopClient       = &http.Client{Timeout: 10 * time.Second}
+)
+
+// publishRetryBackoffs is the bounded retry schedule for internal Dapr /
+// OpenSearch publishes: at most 3 attempts (1 + 2 retries).
+var publishRetryBackoffs = []time.Duration{200 * time.Millisecond, 600 * time.Millisecond}
+
+// doPublishWithRetry runs fn up to len(publishRetryBackoffs)+1 times. It
+// retries ONLY transport errors and 5xx responses — a 4xx is a permanent
+// caller bug and is never retried (fail closed).
+func doPublishWithRetry(fn func() (int, error)) error {
+	var lastErr error
+	for attempt := 0; attempt <= len(publishRetryBackoffs); attempt++ {
+		status, err := fn()
+		if err == nil && status < 500 {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("publish returned HTTP %d", status)
+		}
+		if status > 0 && status < 500 {
+			return lastErr // 4xx: permanent, do not retry
+		}
+		if attempt < len(publishRetryBackoffs) {
+			time.Sleep(publishRetryBackoffs[attempt])
+		}
+	}
+	return lastErr
+}
+
 // ── TigerBeetle via Dapr ────────────────────────────────────────────────────
 
 func writeLedgerEntry(entry *LedgerEntry) error {
-	mu.Lock()
+	ledgerMu.Lock()
+	if len(ledgerEntries) >= maxLedgerEntries {
+		evictOneLedgerEntryLocked()
+	}
 	ledgerEntries[entry.EntryID] = entry
-	mu.Unlock()
+	ledgerMu.Unlock()
 	atomic.AddUint64(&ledgerCount, 1)
 
-	// Write to TigerBeetle via Dapr state store
+	// Write to TigerBeetle via Dapr state store (bounded retry, then give up:
+	// the in-memory record above is the fallback until Dapr is reachable).
 	payload, _ := json.Marshal(map[string]interface{}{
 		"key":   entry.EntryID,
 		"value": entry,
 	})
 
 	url := fmt.Sprintf("http://localhost:%s/v1.0/state/tigerbeetle-store", daprURL)
-	req, _ := http.NewRequest("POST", url, strings.NewReader(fmt.Sprintf("[%s]", string(payload))))
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
+	err := doPublishWithRetry(func() (int, error) {
+		req, _ := http.NewRequest("POST", url, strings.NewReader(fmt.Sprintf("[%s]", string(payload))))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := daprStateClient.Do(req)
+		if err != nil {
+			return 0, err
+		}
+		defer resp.Body.Close()
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return resp.StatusCode, nil
+	})
 	if err != nil {
-		log.Printf("[TigerBeetle] Dapr write failed (best-effort): %v", err)
+		// TODO(outbox): no outbox table exists in this service — failed writes
+		// are logged, not queued for replay. Mechanism gap, flagged honestly.
+		log.Printf("[TigerBeetle] Dapr write failed after bounded retries (best-effort): %v", err)
 		return nil // Non-blocking in dev
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		log.Printf("[TigerBeetle] Dapr write returned %d", resp.StatusCode)
 	}
 
 	return nil
@@ -239,35 +364,48 @@ func writeLedgerEntry(entry *LedgerEntry) error {
 func publishKafkaEvent(topic string, event interface{}) {
 	payload, _ := json.Marshal(event)
 
-	// Via Dapr pub/sub
+	// Via Dapr pub/sub (bounded retry on transport error / 5xx)
 	url := fmt.Sprintf("http://localhost:%s/v1.0/publish/kafka-pubsub/%s", daprURL, topic)
-	req, _ := http.NewRequest("POST", url, strings.NewReader(string(payload)))
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Do(req)
+	err := doPublishWithRetry(func() (int, error) {
+		req, _ := http.NewRequest("POST", url, strings.NewReader(string(payload)))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := daprPublishClient.Do(req)
+		if err != nil {
+			return 0, err
+		}
+		defer resp.Body.Close()
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return resp.StatusCode, nil
+	})
 	if err != nil {
-		log.Printf("[Kafka] Publish to %s failed: %v", topic, err)
+		log.Printf("[Kafka] Publish to %s failed after bounded retries: %v", topic, err)
 		return
 	}
-	defer resp.Body.Close()
 }
 
 // ── OpenSearch Indexing ─────────────────────────────────────────────────────
+// NOTE: documents are indexed one call site at a time (single-doc PUT). A
+// _bulk path is not wired because there is only one producer call site; if a
+// second indexer appears, batch via the OpenSearch _bulk API instead.
 
 func indexToOpenSearch(indexName string, docID string, doc interface{}) {
 	payload, _ := json.Marshal(doc)
 	url := fmt.Sprintf("%s/%s/_doc/%s", openSearchURL, indexName, docID)
-	req, _ := http.NewRequest("PUT", url, strings.NewReader(string(payload)))
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Do(req)
+	err := doPublishWithRetry(func() (int, error) {
+		req, _ := http.NewRequest("PUT", url, strings.NewReader(string(payload)))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := openSearchClient.Do(req)
+		if err != nil {
+			return 0, err
+		}
+		defer resp.Body.Close()
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return resp.StatusCode, nil
+	})
 	if err != nil {
-		log.Printf("[OpenSearch] Index to %s failed: %v", indexName, err)
+		log.Printf("[OpenSearch] Index to %s failed after bounded retries: %v", indexName, err)
 		return
 	}
-	defer resp.Body.Close()
 }
 
 // ── Settlement Execution ────────────────────────────────────────────────────
@@ -320,9 +458,12 @@ func executeSettlement(req SettlementRequest) (*SettlementResult, error) {
 		cb.recordSuccess()
 	}
 
-	mu.Lock()
+	settlementsMu.Lock()
+	if len(settlements) >= maxSettlementRecords {
+		evictOneSettlementLocked()
+	}
 	settlements[result.OperationID] = result
-	mu.Unlock()
+	settlementsMu.Unlock()
 
 	// Write ledger entry
 	ledgerID := fmt.Sprintf("ledger_%s_%d", req.OperationID, time.Now().UnixNano())
@@ -461,9 +602,9 @@ func executeRefund(req SettlementRequest, provider string) (*SettlementResult, e
 	if originalOp == "" {
 		return nil, fmt.Errorf("INVALID_REQUEST: refund requires payload.original_operation_id")
 	}
-	mu.RLock()
+	settlementsMu.RLock()
 	_, known := settlements[originalOp]
-	mu.RUnlock()
+	settlementsMu.RUnlock()
 	if !known {
 		return nil, fmt.Errorf("NOT_FOUND: original operation %q has no settlement record; refusing to report a refund against nothing", originalOp)
 	}
@@ -583,8 +724,7 @@ func callMojaloopTransfer(req SettlementRequest, ref string) (*SettlementResult,
 	httpReq.Header.Set("FSPIOP-Source", "remitflow")
 	httpReq.Header.Set("Date", time.Now().UTC().Format(http.TimeFormat))
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := mojaloopClient.Do(httpReq)
 	if err != nil {
 		log.Printf("[Mojaloop] Transfer failed: %v", err)
 		return &SettlementResult{
@@ -635,6 +775,8 @@ func settlementHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req SettlementRequest
+	// Bound the body read (max 1 MiB) — no unbounded reads.
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", 400)
 		return
@@ -706,15 +848,23 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, provider, secret stri
 	}
 
 	dedupKey := fmt.Sprintf("%s_%s", provider, eventID)
-	mu.Lock()
-	if webhookDedup[dedupKey] {
-		mu.Unlock()
+	webhookMu.Lock()
+	if ts, seen := webhookDedup[dedupKey]; seen && time.Since(ts) < webhookDedupTTL {
+		webhookMu.Unlock()
 		log.Printf("[Webhook] Duplicate %s event: %s", provider, eventID)
 		json.NewEncoder(w).Encode(map[string]string{"status": "duplicate"})
 		return
 	}
-	webhookDedup[dedupKey] = true
-	mu.Unlock()
+	if len(webhookDedup) >= maxWebhookDedupKeys {
+		// Hard cap backstop between sweeps: drop the oldest-seeming entry
+		// (map order is random; the TTL sweeper is the primary eviction path).
+		for k := range webhookDedup {
+			delete(webhookDedup, k)
+			break
+		}
+	}
+	webhookDedup[dedupKey] = time.Now()
+	webhookMu.Unlock()
 
 	event := &WebhookEvent{
 		ID:         eventID,
@@ -725,24 +875,56 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, provider, secret stri
 		Verified:   verified,
 	}
 
-	mu.Lock()
+	webhookMu.Lock()
+	if len(webhookEvents) >= maxWebhookEvents {
+		evictOneWebhookEventLocked()
+	}
 	webhookEvents[eventID] = event
-	mu.Unlock()
+	webhookMu.Unlock()
 
-	// Publish Kafka event
-	publishKafkaEvent("stablecoin_webhook", map[string]interface{}{
-		"event_id":    eventID,
-		"provider":    provider,
-		"type":        event.Type,
-		"verified":    verified,
-		"received_at": event.ReceivedAt,
-	})
+	// Bounded async dispatch: ACK fast, process on a fixed worker pool. If the
+	// queue is full, roll back the dedup/event records (so the provider's retry
+	// is not swallowed as a "duplicate") and return 503 to force that retry.
+	select {
+	case webhookQueue <- event:
+	default:
+		webhookMu.Lock()
+		delete(webhookDedup, dedupKey)
+		delete(webhookEvents, eventID)
+		webhookMu.Unlock()
+		http.Error(w, "Webhook processing queue saturated — retry", http.StatusServiceUnavailable)
+		return
+	}
 
-	// Update transaction status if applicable
-	processWebhookEvent(event)
-
-	log.Printf("[Webhook] %s event processed: id=%s type=%s verified=%v", provider, eventID, event.Type, verified)
+	log.Printf("[Webhook] %s event queued: id=%s type=%s verified=%v", provider, eventID, event.Type, verified)
 	json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "event_id": eventID})
+}
+
+// ── Bounded async webhook dispatch ──────────────────────────────────────────
+// Webhook ACK latency must not wait on Kafka/Dapr round trips. A buffered
+// channel feeds a fixed worker pool; backpressure is signalled to the provider
+// as 503 (retry) rather than unbounded goroutine growth.
+
+const webhookWorkers = 4
+const webhookQueueSize = 256
+
+var webhookQueue = make(chan *WebhookEvent, webhookQueueSize)
+
+func webhookWorker(wg *sync.WaitGroup) {
+	defer wg.Done()
+	for event := range webhookQueue {
+		// Publish Kafka event
+		publishKafkaEvent("stablecoin_webhook", map[string]interface{}{
+			"event_id":    event.ID,
+			"provider":    event.Provider,
+			"type":        event.Type,
+			"verified":    event.Verified,
+			"received_at": event.ReceivedAt,
+		})
+
+		// Update transaction status if applicable
+		processWebhookEvent(event)
+	}
 }
 
 // ── Settlement Outcome Mapping (fail-closed) ────────────────────────────────
@@ -820,7 +1002,7 @@ func processWebhookEvent(event *WebhookEvent) {
 
 	// Persist the real outcome onto any matching settlement record (keyed by the
 	// provider's external reference).
-	mu.Lock()
+	settlementsMu.Lock()
 	updated := false
 	for _, s := range settlements {
 		if s.ExternalRef == txRef {
@@ -829,7 +1011,7 @@ func processWebhookEvent(event *WebhookEvent) {
 			updated = true
 		}
 	}
-	mu.Unlock()
+	settlementsMu.Unlock()
 
 	// STABLECOIN AUDIT NOTE: the previous implementation POSTed every event to
 	// CORE_API_URL + "/api/webhooks/settlement-update" labeled "completed" —
@@ -879,9 +1061,12 @@ func createClaimHandler(w http.ResponseWriter, r *http.Request) {
 		Status:     "pending",
 	}
 
-	mu.Lock()
+	claimsMu.Lock()
+	if len(p2pClaims) >= maxP2PClaims {
+		evictOneP2PClaimLocked()
+	}
 	p2pClaims[req.ClaimID] = claim
-	mu.Unlock()
+	claimsMu.Unlock()
 	atomic.AddUint64(&claimCount, 1)
 
 	publishKafkaEvent("stablecoin_p2p", map[string]interface{}{
@@ -917,16 +1102,16 @@ func redeemClaimHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Hold the lock across the entire check-and-set so two concurrent redeems
 	// cannot both observe status=="pending" (double-redeem TOCTOU).
-	mu.Lock()
+	claimsMu.Lock()
 	claim, exists := p2pClaims[req.ClaimID]
 	if !exists {
-		mu.Unlock()
+		claimsMu.Unlock()
 		http.Error(w, "Claim not found", 404)
 		return
 	}
 
 	if claim.Status != "pending" {
-		mu.Unlock()
+		claimsMu.Unlock()
 		http.Error(w, fmt.Sprintf("Claim already %s", claim.Status), 400)
 		return
 	}
@@ -934,7 +1119,7 @@ func redeemClaimHandler(w http.ResponseWriter, r *http.Request) {
 	expiresAt, _ := time.Parse(time.RFC3339, claim.ExpiresAt)
 	if time.Now().After(expiresAt) {
 		claim.Status = "expired"
-		mu.Unlock()
+		claimsMu.Unlock()
 		http.Error(w, "Claim has expired", 410)
 		return
 	}
@@ -943,7 +1128,7 @@ func redeemClaimHandler(w http.ResponseWriter, r *http.Request) {
 	claim.ClaimedByID = req.ClaimerID
 	claim.ClaimedAt = time.Now().UTC().Format(time.RFC3339)
 	claimedStablecoin, claimedAmount := claim.Stablecoin, claim.Amount
-	mu.Unlock()
+	claimsMu.Unlock()
 
 	publishKafkaEvent("stablecoin_p2p", map[string]interface{}{
 		"claim_id":   req.ClaimID,
@@ -970,10 +1155,10 @@ func getClaimHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write lock: expiry check mutates claim.Status.
-	mu.Lock()
+	claimsMu.Lock()
 	claim, exists := p2pClaims[claimID]
 	if !exists {
-		mu.Unlock()
+		claimsMu.Unlock()
 		http.Error(w, "Claim not found", 404)
 		return
 	}
@@ -983,7 +1168,7 @@ func getClaimHandler(w http.ResponseWriter, r *http.Request) {
 	if time.Now().After(expiresAt) && claim.Status == "pending" {
 		claim.Status = "expired"
 	}
-	mu.Unlock()
+	claimsMu.Unlock()
 
 	json.NewEncoder(w).Encode(claim)
 }
@@ -991,12 +1176,13 @@ func getClaimHandler(w http.ResponseWriter, r *http.Request) {
 // ── Ledger Endpoints ────────────────────────────────────────────────────────
 
 func ledgerHistoryHandler(w http.ResponseWriter, r *http.Request) {
-	mu.RLock()
+	ledgerMu.RLock()
 	entries := make([]*LedgerEntry, 0, len(ledgerEntries))
 	for _, e := range ledgerEntries {
 		entries = append(entries, e)
 	}
-	mu.RUnlock()
+	total := len(ledgerEntries)
+	ledgerMu.RUnlock()
 
 	limit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
@@ -1011,7 +1197,7 @@ func ledgerHistoryHandler(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"entries": entries,
-		"total":   len(ledgerEntries),
+		"total":   total,
 	})
 }
 
@@ -1085,8 +1271,44 @@ func main() {
 	// Ledger
 	mux.HandleFunc("/ledger/history", ledgerHistoryHandler)
 
-	log.Printf("Stablecoin Settlement Orchestrator starting on :%s", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
-		log.Fatal(err)
+	// Background maintenance + bounded webhook worker pool.
+	sweepStop := make(chan struct{})
+	go sweepWebhookDedup(sweepStop)
+	var workerWG sync.WaitGroup
+	for i := 0; i < webhookWorkers; i++ {
+		workerWG.Add(1)
+		go webhookWorker(&workerWG)
 	}
+
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	go func() {
+		log.Printf("Stablecoin Settlement Orchestrator starting on :%s", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Printf("Stablecoin Settlement Orchestrator shutting down...")
+
+	// Stop accepting new dedup-sweep work, drain the server, then the queue.
+	close(sweepStop)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("Server forced to shutdown: %v", err)
+	}
+	close(webhookQueue)
+	workerWG.Wait()
+	log.Printf("Stablecoin Settlement Orchestrator stopped")
 }

@@ -507,4 +507,4 @@ async def list_indicators():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8210)
+    uvicorn.run("main:app", host="0.0.0.0", port=8210, workers=int(os.getenv("UVICORN_WORKERS", "1")))  # SPEC-wave14 §4.6: env-configurable workers (default 1)

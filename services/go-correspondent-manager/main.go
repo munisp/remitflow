@@ -4,23 +4,23 @@
 package main
 
 import (
-	"crypto/subtle"
-	"database/sql"
-	"log/slog"
-	_ "github.com/lib/pq"
 	"bytes"
 	"context"
+	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	_ "github.com/lib/pq"
+	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
-	"sync"
-	"time"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 )
-
 
 var _processStartTime = time.Now()
 
@@ -80,16 +80,46 @@ func publishEvent(topic string, data interface{}) {
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	http.DefaultClient.Do(req)
+	if resp, err := outboundHTTPClient.Do(req); err == nil && resp != nil {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
 }
+
+// outboundHTTPClient is shared (wave-14 perf): per-call client construction
+// disabled keep-alive pooling; DefaultClient had no timeout.
+var outboundHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 func indexOpenSearch(id string, doc interface{}) {
 	body, _ := json.Marshal(doc)
 	url := fmt.Sprintf("%s/correspondents/_doc/%s", osURL, id)
 	req, _ := http.NewRequest("PUT", url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 5 * time.Second}
-	client.Do(req)
+	resp, err := outboundHTTPClient.Do(req)
+	if err == nil && resp != nil {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+}
+
+// Bounded async indexing (wave-14 perf): fixed workers + bounded queue instead of
+// an unbounded goroutine per request. A full queue drops the index update with a
+// log line — search-index lag is acceptable, request-path stability is not.
+type indexJob struct {
+	id  string
+	doc interface{}
+}
+
+var indexQueue = make(chan indexJob, 256)
+
+func startIndexWorkers(n int) {
+	for i := 0; i < n; i++ {
+		go func() {
+			for job := range indexQueue {
+				indexOpenSearch(job.id, job.doc)
+			}
+		}()
+	}
 }
 
 func handleCreateCorrespondent(w http.ResponseWriter, r *http.Request) {
@@ -98,6 +128,7 @@ func handleCreateCorrespondent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var c Correspondent
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -131,7 +162,11 @@ func handleCreateCorrespondent(w http.ResponseWriter, r *http.Request) {
 			"event": "derisking_alert", "correspondent_id": c.ID, "risk_score": c.RiskScore,
 		})
 	}
-	go indexOpenSearch(c.ID, c)
+	select {
+	case indexQueue <- indexJob{id: c.ID, doc: c}:
+	default:
+		log.Printf("[correspondent-manager] index queue full; dropping doc for %s", c.ID)
+	}
 	publishEvent("correspondent-events", map[string]interface{}{"event": "correspondent_created", "id": c.ID, "bank": c.BankName})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -164,6 +199,7 @@ func handleCreateClearingLine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var cl ClearingLine
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&cl); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -189,7 +225,10 @@ func handleCreateClearingLine(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	tbReq, _ := http.NewRequestWithContext(ctx, "POST", tbURL+"/accounts", bytes.NewReader(tbBody))
 	tbReq.Header.Set("Content-Type", "application/json")
-	http.DefaultClient.Do(tbReq)
+	if resp, err := outboundHTTPClient.Do(tbReq); err == nil && resp != nil {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
 	publishEvent("correspondent-events", map[string]interface{}{"event": "clearing_line_created", "id": cl.ID, "limit_usd": cl.LimitUSD})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -202,6 +241,7 @@ func handleDerisikingAlert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var alert DerisikingAlert
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&alert); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -267,7 +307,6 @@ func authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-
 func initDB() error {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -310,11 +349,14 @@ func initDB() error {
 
 // dbUpsert stores or updates a record in the service state table
 func dbUpsert(id string, data interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO correspondent_manager_state (id, data, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
@@ -324,8 +366,11 @@ func dbUpsert(id string, data interface{}) error {
 
 // dbGet retrieves a record from the service state table
 func dbGet(id string, dest interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM correspondent_manager_state WHERE id = $1", id).Scan(&jsonData)
+	err := db.QueryRowContext(ctx, "SELECT data FROM correspondent_manager_state WHERE id = $1", id).Scan(&jsonData)
 	if err != nil {
 		return err
 	}
@@ -334,7 +379,10 @@ func dbGet(id string, dest interface{}) error {
 
 // dbList retrieves all records from the service state table
 func dbList(limit int) ([]json.RawMessage, error) {
-	rows, err := db.Query("SELECT data FROM correspondent_manager_state ORDER BY updated_at DESC LIMIT $1", limit)
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT data FROM correspondent_manager_state ORDER BY updated_at DESC LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -352,22 +400,27 @@ func dbList(limit int) ([]json.RawMessage, error) {
 
 // dbLogEvent stores an event in the events table
 func dbLogEvent(eventType string, payload interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("INSERT INTO correspondent_manager_events (event_type, payload) VALUES ($1, $2)",
+	_, err = db.ExecContext(ctx, "INSERT INTO correspondent_manager_events (event_type, payload) VALUES ($1, $2)",
 		eventType, jsonData)
 	return err
 }
 
-
 // loadFromDB populates in-memory state from database on startup (write-through cache warm)
 func loadFromDB() {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query("SELECT id, data FROM correspondent_manager_state ORDER BY updated_at DESC LIMIT 1000")
+	rows, err := db.QueryContext(ctx, "SELECT id, data FROM correspondent_manager_state ORDER BY updated_at DESC LIMIT 1000")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
@@ -402,6 +455,7 @@ func panicRecoveryMiddleware(next http.Handler) http.Handler {
 }
 
 func main() {
+	startIndexWorkers(4)
 	if err := initDB(); err != nil {
 		slog.Warn("database init failed, using in-memory fallback", "err", err)
 	}
@@ -413,11 +467,12 @@ func main() {
 	mux.HandleFunc("/clearing-line", handleCreateClearingLine)
 	mux.HandleFunc("/derisking-alert", handleDerisikingAlert)
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      panicRecoveryMiddleware(authMiddleware(mux)),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              ":" + port,
+		Handler:           panicRecoveryMiddleware(authMiddleware(mux)),
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	sigCh := make(chan os.Signal, 1)

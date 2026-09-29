@@ -40,6 +40,17 @@ const TRANSFER_STATES = [
   { state: 'COMPLETED', label: 'Completed', icon: '✓', description: 'Transfer complete' },
 ];
 
+// States after which polling stops — nothing further will change.
+const TERMINAL_STATES = new Set([
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+  'REVERSED',
+  'REJECTED',
+  'EXPIRED',
+  'RETURNED',
+]);
+
 const CORRIDOR_LABELS: Record<string, string> = {
   MOJALOOP: 'Mojaloop Network',
   PAPSS: 'PAPSS (Pan-African)',
@@ -82,11 +93,32 @@ const TransferTracking: React.FC = () => {
     }
   }, [transferId]);
 
+  // PERF (wave14): the 10s poll previously ran forever — including after the
+  // transfer reached a terminal state and while the tab was hidden (wasted
+  // authenticated API calls + battery). Now: stop polling at a terminal
+  // state, skip ticks while the document is hidden, and refresh once when
+  // the tab becomes visible again.
+  const currentState = tracking?.current_state;
+  const isTerminal =
+    currentState != null && TERMINAL_STATES.has(currentState.toUpperCase());
+
   useEffect(() => {
+    if (isTerminal) return; // terminal state — no further polling
     fetchTracking();
-    const interval = setInterval(fetchTracking, 10000);
-    return () => clearInterval(interval);
-  }, [fetchTracking]);
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        fetchTracking();
+      }
+    }, 10000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') fetchTracking();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [fetchTracking, isTerminal]);
 
   const updateNotificationPrefs = async (channel: string, enabled: boolean) => {
     if (!transferId) return;

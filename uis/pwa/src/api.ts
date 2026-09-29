@@ -167,8 +167,10 @@ export function merchantApiErrMsg(e: unknown): string {
  *    application was already decided.
  *  - approve returns emailSent honestly — false means the approval email was
  *    NOT delivered and the invite code must be shared manually.
+ *
+ * (Duplicate `trpcClient` import removed — wave14; the one at the top of
+ * this file is the single import now.)
  */
-import { trpcClient } from "./services/trpc";
 
 // ── Shared ───────────────────────────────────────────────────────────────────
 

@@ -32,7 +32,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -44,19 +46,19 @@ import (
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type RateLimitRequest struct {
-	Key        string `json:"key"`        // e.g. "user:123:transfer"
-	Limit      int    `json:"limit"`      // max requests
+	Key        string `json:"key"`         // e.g. "user:123:transfer"
+	Limit      int    `json:"limit"`       // max requests
 	WindowSecs int    `json:"window_secs"` // window size in seconds
-	Algorithm  string `json:"algorithm"`  // "sliding_window" | "token_bucket" | "fixed_window"
-	Cost       int    `json:"cost"`       // tokens to consume (default 1)
+	Algorithm  string `json:"algorithm"`   // "sliding_window" | "token_bucket" | "fixed_window"
+	Cost       int    `json:"cost"`        // tokens to consume (default 1)
 }
 
 type RateLimitResponse struct {
-	Allowed   bool   `json:"allowed"`
-	Remaining int    `json:"remaining"`
-	ResetAt   int64  `json:"reset_at"` // Unix timestamp
-	RetryAfter int   `json:"retry_after_secs,omitempty"`
-	Key       string `json:"key"`
+	Allowed    bool   `json:"allowed"`
+	Remaining  int    `json:"remaining"`
+	ResetAt    int64  `json:"reset_at"` // Unix timestamp
+	RetryAfter int    `json:"retry_after_secs,omitempty"`
+	Key        string `json:"key"`
 }
 
 // ─── Metrics ──────────────────────────────────────────────────────────────────
@@ -155,6 +157,14 @@ type Server struct {
 	logger *slog.Logger
 }
 
+// Preloaded Lua scripts (wave-14 perf): go-redis Script.Run uses EVALSHA with a
+// one-time SCRIPT LOAD fallback (NOSCRIPT), so the Lua source is not shipped
+// to Redis on every rate-limit check.
+var (
+	slidingWindowScriptObj = redis.NewScript(slidingWindowScript)
+	tokenBucketScriptObj   = redis.NewScript(tokenBucketScript)
+)
+
 func (s *Server) checkRateLimit(ctx context.Context, req RateLimitRequest, consume bool) (*RateLimitResponse, error) {
 	start := time.Now()
 	defer func() {
@@ -181,14 +191,14 @@ func (s *Server) checkRateLimit(ctx context.Context, req RateLimitRequest, consu
 	switch algorithm {
 	case "token_bucket":
 		refillRate := float64(req.Limit) / float64(req.WindowSecs)
-		result, err = s.rdb.Eval(ctx, tokenBucketScript,
+		result, err = tokenBucketScriptObj.Run(ctx, s.rdb,
 			[]string{req.Key},
 			now, req.Limit, refillRate, cost,
 		).Slice()
 
 	default: // sliding_window
 		windowMs := int64(req.WindowSecs) * 1000
-		result, err = s.rdb.Eval(ctx, slidingWindowScript,
+		result, err = slidingWindowScriptObj.Run(ctx, s.rdb,
 			[]string{req.Key},
 			now, windowMs, req.Limit, cost,
 		).Slice()
@@ -244,6 +254,7 @@ func toInt64(v interface{}) int64 {
 }
 
 func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB body cap (wave-14)
 	var req RateLimitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
@@ -276,6 +287,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePeek(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB body cap (wave-14)
 	var req RateLimitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
@@ -296,6 +308,7 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Key string `json:"key"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Key == "" {
 		http.Error(w, `{"error":"key is required"}`, http.StatusBadRequest)
 		return
@@ -322,8 +335,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"key":     key,
-		"count":   count,
+		"key":      key,
+		"count":    count,
 		"ttl_secs": ttl.Seconds(),
 	})
 }
@@ -400,15 +413,29 @@ func main() {
 	logger.Info("Rate limiter sidecar listening", "addr", addr)
 
 	server := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 5 * time.Second,
-		IdleTimeout:  30 * time.Second,
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      5 * time.Second,
+		IdleTimeout:       30 * time.Second,
 	}
 
-	if err := server.ListenAndServe(); err != nil {
-		logger.Error("server failed", "error", err)
-		os.Exit(1)
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("server failed", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Graceful shutdown (wave-14 hardening)
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	logger.Info("shutting down")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Error("shutdown error", "error", err)
 	}
 }

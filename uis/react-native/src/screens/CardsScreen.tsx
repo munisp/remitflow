@@ -15,13 +15,13 @@ export default function CardsScreen() {
   const { data, isLoading, refetch } = trpc.cards.list.useQuery();
   const createMutation = trpc.cards.create.useMutation({
     onSuccess: () => { setShowCreate(false); setCardLabel(''); refetch(); },
-    onError: (e) => Alert.alert('Error', e.message),
+    onError: (e: any) => Alert.alert('Error', e.message),
   });
-  const freezeMutation = trpc.cards.freeze.useMutation({ onSuccess: refetch, onError: (e) => Alert.alert('Error', e.message) });
-  const unfreezeMutation = trpc.cards.unfreeze.useMutation({ onSuccess: refetch, onError: (e) => Alert.alert('Error', e.message) });
+  const freezeMutation = trpc.cards.freeze.useMutation({ onSuccess: refetch, onError: (e: any) => Alert.alert('Error', e.message) });
+  const unfreezeMutation = trpc.cards.unfreeze.useMutation({ onSuccess: refetch, onError: (e: any) => Alert.alert('Error', e.message) });
   const deleteMutation = trpc.cards.delete.useMutation({
     onSuccess: refetch,
-    onError: (e) => Alert.alert('Error', e.message),
+    onError: (e: any) => Alert.alert('Error', e.message),
   });
 
   const handleDelete = (id: number) => {

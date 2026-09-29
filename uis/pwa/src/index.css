@@ -1,4 +1,16 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap");
+/* PERF (wave14): Inter is self-hosted (was a render-blocking Google Fonts
+   @import — a cross-origin CSS fetch gated first paint). The served file is
+   the official Inter v4 variable font (wght 100–900, latin subset), covering
+   every weight this app uses (300–800) in one 47 KB woff2.
+   font-display: swap keeps text visible with the system fallback while the
+   font loads. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/inter-latin-var.woff2") format("woff2");
+}
 
 *, ::before, ::after{
   --tw-border-spacing-x: 0;

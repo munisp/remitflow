@@ -41,45 +41,45 @@ import (
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type PayoutRequest struct {
-	PayoutID        string  `json:"payout_id"`
-	Rail            string  `json:"rail"`
-	Amount          float64 `json:"amount"`
-	Currency        string  `json:"currency"`
-	RecipientName   string  `json:"recipient_name"`
-	RecipientBank   string  `json:"recipient_bank,omitempty"`
-	RecipientAccount string `json:"recipient_account,omitempty"`
-	RecipientPhone  string  `json:"recipient_phone,omitempty"`
-	IBAN            string  `json:"iban,omitempty"`
-	SwiftCode       string  `json:"swift_code,omitempty"`
-	IdempotencyKey  string  `json:"idempotency_key"`
-	UserID          int64   `json:"user_id"`
-	CorridorCode    string  `json:"corridor_code,omitempty"`
+	PayoutID         string  `json:"payout_id"`
+	Rail             string  `json:"rail"`
+	Amount           float64 `json:"amount"`
+	Currency         string  `json:"currency"`
+	RecipientName    string  `json:"recipient_name"`
+	RecipientBank    string  `json:"recipient_bank,omitempty"`
+	RecipientAccount string  `json:"recipient_account,omitempty"`
+	RecipientPhone   string  `json:"recipient_phone,omitempty"`
+	IBAN             string  `json:"iban,omitempty"`
+	SwiftCode        string  `json:"swift_code,omitempty"`
+	IdempotencyKey   string  `json:"idempotency_key"`
+	UserID           int64   `json:"user_id"`
+	CorridorCode     string  `json:"corridor_code,omitempty"`
 }
 
 type PayoutResult struct {
-	PayoutID        string  `json:"payout_id"`
-	Rail            string  `json:"rail"`
-	Status          string  `json:"status"`
-	ExternalRef     string  `json:"external_ref,omitempty"`
-	Fee             float64 `json:"fee"`
-	EstimatedArrival string `json:"estimated_arrival"`
-	SubmittedAt     string  `json:"submitted_at"`
+	PayoutID         string  `json:"payout_id"`
+	Rail             string  `json:"rail"`
+	Status           string  `json:"status"`
+	ExternalRef      string  `json:"external_ref,omitempty"`
+	Fee              float64 `json:"fee"`
+	EstimatedArrival string  `json:"estimated_arrival"`
+	SubmittedAt      string  `json:"submitted_at"`
 }
 
 type RailHealth struct {
-	Rail       string `json:"rail"`
-	Status     string `json:"status"`
-	Latency    int64  `json:"latency_ms"`
-	LastCheck  string `json:"last_check"`
-	FailCount  int    `json:"fail_count"`
+	Rail      string `json:"rail"`
+	Status    string `json:"status"`
+	Latency   int64  `json:"latency_ms"`
+	LastCheck string `json:"last_check"`
+	FailCount int    `json:"fail_count"`
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 var (
-	port       = getEnv("PORT", "8125")
-	dbURL      = getEnv("DATABASE_URL", "")
-	redisURL   = getEnv("REDIS_URL", "")
+	port        = getEnv("PORT", "8125")
+	dbURL       = getEnv("DATABASE_URL", "")
+	redisURL    = getEnv("REDIS_URL", "")
 	kafkaBroker = getEnv("KAFKA_BROKERS", "localhost:9092")
 
 	// Rail-specific API keys
@@ -178,20 +178,22 @@ func getRailBreaker(rail string) *CircuitBreaker {
 	}
 	b := NewCircuitBreaker(5, 60*time.Second)
 	breakers[rail] = b
-	if db != nil { go func() { _ = dbUpsert("breaker:"+rail, b) }() }
+	if db != nil {
+		go func() { _ = dbUpsert("breaker:"+rail, b) }()
+	}
 	return b
 }
 
 // ─── Metrics ──────────────────────────────────────────────────────────────────
 
 type Metrics struct {
-	mu                sync.Mutex
-	payoutsSubmitted  int64
-	payoutsCompleted  int64
-	payoutsFailed     int64
-	totalAmountUSD    float64
-	railCounts        map[string]int64
-	railLatencies     map[string][]int64
+	mu               sync.Mutex
+	payoutsSubmitted int64
+	payoutsCompleted int64
+	payoutsFailed    int64
+	totalAmountUSD   float64
+	railCounts       map[string]int64
+	railLatencies    map[string][]int64
 }
 
 var metrics = &Metrics{
@@ -210,7 +212,9 @@ func (m *Metrics) RecordPayout(rail string, latencyMs int64, success bool) {
 		m.payoutsFailed++
 	}
 	m.railLatencies[rail] = append(m.railLatencies[rail], latencyMs)
-	if db != nil { go func() { _ = dbUpsert("latency:"+rail, m.railLatencies[rail]) }() }
+	if db != nil {
+		go func() { _ = dbUpsert("latency:"+rail, m.railLatencies[rail]) }()
+	}
 	if len(m.railLatencies[rail]) > 1000 {
 		m.railLatencies[rail] = m.railLatencies[rail][500:]
 	}
@@ -265,6 +269,9 @@ func initDB() {
 }
 
 func dbUpsert(key string, value interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return fmt.Errorf("fiat rail database is unavailable")
 	}
@@ -272,17 +279,20 @@ func dbUpsert(key string, value interface{}) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`INSERT INTO fiat_rail_state (state_key, state_value, updated_at)
+	_, err = db.ExecContext(ctx, `INSERT INTO fiat_rail_state (state_key, state_value, updated_at)
 		VALUES ($1, $2::jsonb, NOW())
 		ON CONFLICT (state_key) DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = NOW()`, key, string(payload))
 	return err
 }
 
 func persistPayout(p PayoutResult, req PayoutRequest) {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	_, err := db.Exec(
+	_, err := db.ExecContext(ctx,
 		`INSERT INTO fiat_payouts (id, rail, amount, currency, recipient_name, status, external_ref, fee, user_id, corridor_code, idempotency_key)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, external_ref = EXCLUDED.external_ref`,
@@ -409,6 +419,7 @@ func handleSubmitPayout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req PayoutRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", 400)
 		return
@@ -422,13 +433,13 @@ func handleSubmitPayout(w http.ResponseWriter, r *http.Request) {
 	fee := calculateFee(req.Rail, req.Amount)
 
 	result := PayoutResult{
-		PayoutID:        req.PayoutID,
-		Rail:            req.Rail,
-		Status:          status,
-		ExternalRef:     extRef,
-		Fee:             fee,
+		PayoutID:         req.PayoutID,
+		Rail:             req.Rail,
+		Status:           status,
+		ExternalRef:      extRef,
+		Fee:              fee,
 		EstimatedArrival: estimatedArrival(req.Rail),
-		SubmittedAt:     time.Now().UTC().Format(time.RFC3339),
+		SubmittedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
 
 	persistPayout(result, req)
@@ -517,7 +528,7 @@ func main() {
 	mux.HandleFunc("/api/payouts", handleSubmitPayout)
 	mux.HandleFunc("/api/rails/health", handleRailHealth)
 
-	srv := &http.Server{Addr: ":" + port, Handler: mux}
+	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

@@ -13,6 +13,9 @@
 
 import { context as otelContext, propagation, defaultTextMapSetter } from "@opentelemetry/api";
 import { getRequestTenantContext } from "./tenantGuc";
+// W14-C1: hoisted from a per-call dynamic import() in sendAuditLog. No import
+// cycle: db.ts does not import this module.
+import { createAuditLog } from "../db.js";
 
 // ── W3C trace-context + tenant propagation (W12-F) ────────────────────────────
 // The polyglot sidecars already EXTRACT W3C traceparent/tracestate and
@@ -187,7 +190,6 @@ export interface AuditLogResult {
 export async function sendAuditLog(payload: AuditLogPayload): Promise<AuditLogResult | null> {
   try {
     if (typeof payload.userId !== "number") return null; // auditLogs.userId is NOT NULL — skip anonymous events honestly
-    const { createAuditLog } = await import("../db.js");
     await createAuditLog({
       userId: payload.userId,
       action: payload.action,
@@ -209,10 +211,15 @@ export async function sendAuditLog(payload: AuditLogPayload): Promise<AuditLogRe
 
 /**
  * Send a batch of audit events (routed to the local TS audit trail, see sendAuditLog).
+ * W14-C1: was a strictly serial loop (N round trips, one at a time). Now the
+ * batch is written in bounded parallel chunks of 10 via Promise.allSettled —
+ * sendAuditLog never throws (fire-and-forget contract), so a failed event
+ * cannot abort the rest of the batch.
  */
 export async function sendAuditBatch(payloads: AuditLogPayload[]): Promise<void> {
-  for (const payload of payloads) {
-    await sendAuditLog(payload);
+  const CHUNK_SIZE = 10;
+  for (let i = 0; i < payloads.length; i += CHUNK_SIZE) {
+    await Promise.allSettled(payloads.slice(i, i + CHUNK_SIZE).map((p) => sendAuditLog(p)));
   }
 }
 

@@ -531,4 +531,4 @@ async def handle_transaction_event(event: Dict[str, Any], background_tasks: Back
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=config.PORT, log_level="info")
+    uvicorn.run("main:app", host="0.0.0.0", port=config.PORT, log_level="info", workers=int(os.getenv("UVICORN_WORKERS", "1")))  # SPEC-wave14 §4.6: env-configurable workers (default 1)

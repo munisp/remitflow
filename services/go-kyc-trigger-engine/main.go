@@ -34,6 +34,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -114,22 +116,22 @@ type TriggerType string
 
 const (
 	// KYC Triggers
-	TriggerUserRegistration       TriggerType = "user_registration"
-	TriggerFirstTransferAttempt   TriggerType = "first_transfer_attempt"
-	TriggerTransactionOver1000    TriggerType = "transaction_over_1000"
-	TriggerTransactionOver10000   TriggerType = "transaction_over_10000"
-	TriggerPEPMatchDetected       TriggerType = "pep_match_detected"
-	TriggerSanctionsHit           TriggerType = "sanctions_hit"
-	TriggerHighRiskScore          TriggerType = "high_risk_score"
-	TriggerPeriodicReKYC          TriggerType = "periodic_rekyc"
-	TriggerCountryRiskChange      TriggerType = "country_risk_change"
-	TriggerSARFiled               TriggerType = "sar_filed"
+	TriggerUserRegistration     TriggerType = "user_registration"
+	TriggerFirstTransferAttempt TriggerType = "first_transfer_attempt"
+	TriggerTransactionOver1000  TriggerType = "transaction_over_1000"
+	TriggerTransactionOver10000 TriggerType = "transaction_over_10000"
+	TriggerPEPMatchDetected     TriggerType = "pep_match_detected"
+	TriggerSanctionsHit         TriggerType = "sanctions_hit"
+	TriggerHighRiskScore        TriggerType = "high_risk_score"
+	TriggerPeriodicReKYC        TriggerType = "periodic_rekyc"
+	TriggerCountryRiskChange    TriggerType = "country_risk_change"
+	TriggerSARFiled             TriggerType = "sar_filed"
 	// KYB Triggers
-	TriggerBusinessRegistration       TriggerType = "business_registration"
-	TriggerDirectorUBOChange          TriggerType = "director_ubo_change"
+	TriggerBusinessRegistration TriggerType = "business_registration"
+	TriggerDirectorUBOChange    TriggerType = "director_ubo_change"
 	// TriggerMerchantOnboarding deleted (trigger 13 removed — zero callers).
-	TriggerBusinessLicenseExpiry      TriggerType = "business_license_expiry"
-	TriggerBeneficialOwnershipChange  TriggerType = "beneficial_ownership_change"
+	TriggerBusinessLicenseExpiry     TriggerType = "business_license_expiry"
+	TriggerBeneficialOwnershipChange TriggerType = "beneficial_ownership_change"
 )
 
 type EntityType string
@@ -156,15 +158,15 @@ type KYCTriggerEvent struct {
 }
 
 type TriggerResult struct {
-	TriggerType   TriggerType `json:"trigger_type"`
-	EntityID      string      `json:"entity_id"`
-	Action        string      `json:"action"`
-	WorkflowID    string      `json:"workflow_id,omitempty"`
-	RequiredTier  int         `json:"required_tier,omitempty"`
-	Frozen        bool        `json:"frozen"`
-	Message       string      `json:"message"`
-	NextSteps     []string    `json:"next_steps"`
-	Timestamp     time.Time   `json:"timestamp"`
+	TriggerType  TriggerType `json:"trigger_type"`
+	EntityID     string      `json:"entity_id"`
+	Action       string      `json:"action"`
+	WorkflowID   string      `json:"workflow_id,omitempty"`
+	RequiredTier int         `json:"required_tier,omitempty"`
+	Frozen       bool        `json:"frozen"`
+	Message      string      `json:"message"`
+	NextSteps    []string    `json:"next_steps"`
+	Timestamp    time.Time   `json:"timestamp"`
 }
 
 // ── Middleware Clients ────────────────────────────────────────────────────────
@@ -374,10 +376,10 @@ func (e *TriggerEngine) handleUserRegistration(ctx context.Context, event KYCTri
 
 	// Set initial KYC state in Dapr state store
 	_ = e.dapr.SetState("remitflow-state", fmt.Sprintf("kyc-state-%s", event.UserID), map[string]interface{}{
-		"userId":    event.UserID,
-		"kycTier":   0,
-		"kycStatus": "pending",
-		"workflowId": workflowID,
+		"userId":      event.UserID,
+		"kycTier":     0,
+		"kycStatus":   "pending",
+		"workflowId":  workflowID,
 		"triggeredAt": time.Now(),
 	})
 
@@ -402,11 +404,11 @@ func (e *TriggerEngine) handleFirstTransferAttempt(ctx context.Context, event KY
 	workflowID := fmt.Sprintf("kyc-tier1-gate-%s-%d", event.UserID, time.Now().UnixMilli())
 
 	_ = e.dapr.Publish("kyc.tier_upgrade_required", map[string]interface{}{
-		"userId":       event.UserID,
-		"triggerType":  "first_transfer_attempt",
-		"currentTier":  0,
-		"requiredTier": 1,
-		"workflowId":   workflowID,
+		"userId":          event.UserID,
+		"triggerType":     "first_transfer_attempt",
+		"currentTier":     0,
+		"requiredTier":    1,
+		"workflowId":      workflowID,
 		"transferBlocked": true,
 	})
 
@@ -468,12 +470,12 @@ func (e *TriggerEngine) handleTransactionOver10000(ctx context.Context, event KY
 	workflowID := fmt.Sprintf("kyc-ctr-edd-10k-%s-%d", event.UserID, time.Now().UnixMilli())
 
 	_ = e.dapr.Publish("compliance.ctr.mandatory", map[string]interface{}{
-		"userId":     event.UserID,
-		"amount":     event.Amount,
-		"currency":   event.Currency,
-		"workflowId": workflowID,
-		"reportType": "CTR",
-		"threshold":  10000,
+		"userId":      event.UserID,
+		"amount":      event.Amount,
+		"currency":    event.Currency,
+		"workflowId":  workflowID,
+		"reportType":  "CTR",
+		"threshold":   10000,
 		"eddRequired": true,
 	})
 
@@ -509,10 +511,10 @@ func (e *TriggerEngine) handlePEPMatch(ctx context.Context, event KYCTriggerEven
 	workflowID := fmt.Sprintf("kyc-pep-edd-%s-%d", event.UserID, time.Now().UnixMilli())
 
 	_ = e.dapr.Publish("compliance.pep.detected", map[string]interface{}{
-		"userId":     event.UserID,
-		"pepLevel":   event.Metadata["pep_level"],
-		"pepType":    event.Metadata["pep_type"],
-		"workflowId": workflowID,
+		"userId":      event.UserID,
+		"pepLevel":    event.Metadata["pep_level"],
+		"pepType":     event.Metadata["pep_type"],
+		"workflowId":  workflowID,
 		"eddRequired": true,
 	})
 
@@ -537,10 +539,10 @@ func (e *TriggerEngine) handleSanctionsHit(ctx context.Context, event KYCTrigger
 
 	// Freeze the account via Dapr state
 	_ = e.dapr.SetState("remitflow-state", fmt.Sprintf("kyc-freeze-%s", event.UserID), map[string]interface{}{
-		"userId":    event.UserID,
-		"frozen":    true,
-		"reason":    "sanctions_hit",
-		"frozenAt":  time.Now(),
+		"userId":     event.UserID,
+		"frozen":     true,
+		"reason":     "sanctions_hit",
+		"frozenAt":   time.Now(),
 		"workflowId": workflowID,
 	})
 
@@ -639,10 +641,10 @@ func (e *TriggerEngine) handleCountryRiskChange(ctx context.Context, event KYCTr
 	workflowID := fmt.Sprintf("kyc-country-risk-%s-%d", event.Country, time.Now().UnixMilli())
 
 	_ = e.dapr.Publish("kyc.country_risk_change", map[string]interface{}{
-		"country":     event.Country,
-		"newRiskLevel": event.Metadata["new_risk_level"],
-		"oldRiskLevel": event.Metadata["old_risk_level"],
-		"workflowId":  workflowID,
+		"country":       event.Country,
+		"newRiskLevel":  event.Metadata["new_risk_level"],
+		"oldRiskLevel":  event.Metadata["old_risk_level"],
+		"workflowId":    workflowID,
 		"affectedUsers": event.Metadata["affected_user_count"],
 	})
 
@@ -664,10 +666,10 @@ func (e *TriggerEngine) handleSARFiled(ctx context.Context, event KYCTriggerEven
 	workflowID := fmt.Sprintf("kyc-sar-freeze-%s-%d", event.UserID, time.Now().UnixMilli())
 
 	_ = e.dapr.SetState("remitflow-state", fmt.Sprintf("kyc-freeze-%s", event.UserID), map[string]interface{}{
-		"userId":    event.UserID,
-		"frozen":    true,
-		"reason":    "sar_filed",
-		"frozenAt":  time.Now(),
+		"userId":     event.UserID,
+		"frozen":     true,
+		"reason":     "sar_filed",
+		"frozenAt":   time.Now(),
 		"workflowId": workflowID,
 	})
 
@@ -700,10 +702,10 @@ func (e *TriggerEngine) handleBusinessRegistration(ctx context.Context, event KY
 	workflowID := fmt.Sprintf("kyb-onboarding-%s-%d", event.BusinessID, time.Now().UnixMilli())
 
 	_ = e.dapr.Publish("kyb.verification.started", map[string]interface{}{
-		"businessId":  event.BusinessID,
-		"userId":      event.UserID,
-		"workflowId":  workflowID,
-		"triggerType": "business_registration",
+		"businessId":   event.BusinessID,
+		"userId":       event.UserID,
+		"workflowId":   workflowID,
+		"triggerType":  "business_registration",
 		"requiredDocs": []string{"certificate_of_incorporation", "memorandum_of_association", "director_ids", "proof_of_address", "tax_registration"},
 	})
 
@@ -779,11 +781,11 @@ func (e *TriggerEngine) handleBeneficialOwnershipChange(ctx context.Context, eve
 	workflowID := fmt.Sprintf("kyb-ubo-change-%s-%d", event.BusinessID, time.Now().UnixMilli())
 
 	_ = e.dapr.Publish("kyb.ubo_change.detected", map[string]interface{}{
-		"businessId":    event.BusinessID,
-		"newOwnerID":    event.Metadata["new_owner_id"],
-		"ownershipPct":  event.Metadata["ownership_percentage"],
-		"workflowId":    workflowID,
-		"threshold":     25,
+		"businessId":   event.BusinessID,
+		"newOwnerID":   event.Metadata["new_owner_id"],
+		"ownershipPct": event.Metadata["ownership_percentage"],
+		"workflowId":   workflowID,
+		"threshold":    25,
 	})
 
 	_ = e.permify.WriteRelationship("remitflow", "business", event.BusinessID, "ubo_change_pending", event.UserID)
@@ -815,6 +817,7 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var event KYCTriggerEvent
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
 		http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
 		return
@@ -845,6 +848,7 @@ func (s *Server) handleDaprEvent(w http.ResponseWriter, r *http.Request) {
 		Topic string          `json:"topic"`
 		Data  KYCTriggerEvent `json:"data"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&daprEnvelope); err != nil {
 		http.Error(w, fmt.Sprintf("invalid dapr envelope: %v", err), http.StatusBadRequest)
 		return
@@ -872,7 +876,12 @@ func (s *Server) handleDaprSubscriptions(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleUserRegistered(w http.ResponseWriter, r *http.Request) {
-	var payload struct{ Data struct{ UserID string `json:"userId"` } `json:"data"` }
+	var payload struct {
+		Data struct {
+			UserID string `json:"userId"`
+		} `json:"data"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	json.NewDecoder(r.Body).Decode(&payload)
 	event := KYCTriggerEvent{
 		TriggerType:   TriggerUserRegistration,
@@ -896,6 +905,7 @@ func (s *Server) handleTransferInitiated(w http.ResponseWriter, r *http.Request)
 			IsFirst  bool    `json:"isFirstTransfer"`
 		} `json:"data"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	json.NewDecoder(r.Body).Decode(&payload)
 
 	d := payload.Data
@@ -963,7 +973,15 @@ func main() {
 	mux.HandleFunc("/dapr/user-registered", srv.handleUserRegistered)
 	mux.HandleFunc("/dapr/transfer-initiated", srv.handleTransferInitiated)
 	mux.HandleFunc("/dapr/sanctions-hit", func(w http.ResponseWriter, r *http.Request) {
-		var p struct{ Data struct{ UserID string `json:"userId"`; ListName string `json:"listName"`; MatchScore float64 `json:"matchScore"` } `json:"data"` }
+		var p struct {
+			Data struct {
+				UserID     string  `json:"userId"`
+				ListName   string  `json:"listName"`
+				MatchScore float64 `json:"matchScore"`
+			} `json:"data"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 		json.NewDecoder(r.Body).Decode(&p)
 		_ = engine.Process(r.Context(), KYCTriggerEvent{
 			TriggerType: TriggerSanctionsHit, EntityType: EntityUser,
@@ -975,7 +993,14 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "SUCCESS"})
 	})
 	mux.HandleFunc("/dapr/sar-filed", func(w http.ResponseWriter, r *http.Request) {
-		var p struct{ Data struct{ UserID string `json:"userId"`; SARRef string `json:"sarReference"` } `json:"data"` }
+		var p struct {
+			Data struct {
+				UserID string `json:"userId"`
+				SARRef string `json:"sarReference"`
+			} `json:"data"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 		json.NewDecoder(r.Body).Decode(&p)
 		_ = engine.Process(r.Context(), KYCTriggerEvent{
 			TriggerType: TriggerSARFiled, EntityType: EntityUser,
@@ -987,7 +1012,13 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "SUCCESS"})
 	})
 	mux.HandleFunc("/dapr/risk-score-high", func(w http.ResponseWriter, r *http.Request) {
-		var p struct{ Data struct{ UserID string `json:"userId"`; RiskScore float64 `json:"riskScore"` } `json:"data"` }
+		var p struct {
+			Data struct {
+				UserID    string  `json:"userId"`
+				RiskScore float64 `json:"riskScore"`
+			} `json:"data"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 		json.NewDecoder(r.Body).Decode(&p)
 		_ = engine.Process(r.Context(), KYCTriggerEvent{
 			TriggerType: TriggerHighRiskScore, EntityType: EntityUser,
@@ -999,7 +1030,13 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "SUCCESS"})
 	})
 	mux.HandleFunc("/dapr/business-registered", func(w http.ResponseWriter, r *http.Request) {
-		var p struct{ Data struct{ BusinessID string `json:"businessId"`; UserID string `json:"userId"` } `json:"data"` }
+		var p struct {
+			Data struct {
+				BusinessID string `json:"businessId"`
+				UserID     string `json:"userId"`
+			} `json:"data"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 		json.NewDecoder(r.Body).Decode(&p)
 		_ = engine.Process(r.Context(), KYCTriggerEvent{
 			TriggerType: TriggerBusinessRegistration, EntityType: EntityBusiness,
@@ -1010,7 +1047,14 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "SUCCESS"})
 	})
 	mux.HandleFunc("/dapr/director-changed", func(w http.ResponseWriter, r *http.Request) {
-		var p struct{ Data struct{ BusinessID string `json:"businessId"`; ChangeType string `json:"changeType"`; NewDirectorID string `json:"newDirectorId"` } `json:"data"` }
+		var p struct {
+			Data struct {
+				BusinessID    string `json:"businessId"`
+				ChangeType    string `json:"changeType"`
+				NewDirectorID string `json:"newDirectorId"`
+			} `json:"data"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 		json.NewDecoder(r.Body).Decode(&p)
 		_ = engine.Process(r.Context(), KYCTriggerEvent{
 			TriggerType: TriggerDirectorUBOChange, EntityType: EntityBusiness,
@@ -1028,8 +1072,29 @@ func main() {
 		"dapr_port", cfg.DaprHTTPPort,
 	)
 
-	if err := http.ListenAndServe(":"+cfg.Port, mux); err != nil {
-		engine.log.Error("server failed", "error", err)
-		os.Exit(1)
+	httpSrv := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	go func() {
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			engine.log.Error("server failed", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Graceful shutdown (wave-14 hardening)
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	engine.log.Info("shutting down")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		engine.log.Error("shutdown error", "error", err)
 	}
 }

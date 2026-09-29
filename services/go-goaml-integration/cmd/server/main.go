@@ -3,43 +3,47 @@
 // to the Nigerian Financial Intelligence Unit (NFIU) via the goAML XML format.
 //
 // Endpoints:
-//   POST /v1/str/create          — create STR from internal alert
-//   POST /v1/str/submit          — submit STR to NFIU goAML
-//   GET  /v1/str/list            — list all STRs
-//   GET  /v1/str/:id             — get STR details
-//   POST /v1/sar/create          — create SAR
-//   POST /v1/sar/submit          — submit SAR to NFIU goAML
-//   POST /v1/ctr/create          — create CTR (Cash Transaction Report)
-//   GET  /v1/filing-status/:ref  — check filing status with NFIU
-//   GET  /health                 — liveness
+//
+//	POST /v1/str/create          — create STR from internal alert
+//	POST /v1/str/submit          — submit STR to NFIU goAML
+//	GET  /v1/str/list            — list all STRs
+//	GET  /v1/str/:id             — get STR details
+//	POST /v1/sar/create          — create SAR
+//	POST /v1/sar/submit          — submit SAR to NFIU goAML
+//	POST /v1/ctr/create          — create CTR (Cash Transaction Report)
+//	GET  /v1/filing-status/:ref  — check filing status with NFIU
+//	GET  /health                 — liveness
 //
 // Port: 8123
 package main
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"database/sql"
 	"encoding/json"
-	"log/slog"
+	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq"
+	"log/slog"
 )
 
 var (
-	nfiuBaseURL    = envOr("NFIU_GOAML_URL", "https://goaml.nfiu.gov.ng/api")
-	nfiuAPIKey     = os.Getenv("NFIU_API_KEY")
-	nfiuEntityID   = envOr("NFIU_ENTITY_ID", "REMITFLOW-FI-001")
-	port           = envOr("PORT", "8123")
-	environment    = envOr("ENVIRONMENT", "development")
-	daprHTTPPort   = envOr("DAPR_HTTP_PORT", "3500")
+	nfiuBaseURL  = envOr("NFIU_GOAML_URL", "https://goaml.nfiu.gov.ng/api")
+	nfiuAPIKey   = os.Getenv("NFIU_API_KEY")
+	nfiuEntityID = envOr("NFIU_ENTITY_ID", "REMITFLOW-FI-001")
+	port         = envOr("PORT", "8123")
+	environment  = envOr("ENVIRONMENT", "development")
+	daprHTTPPort = envOr("DAPR_HTTP_PORT", "3500")
 )
 
 func envOr(key, fallback string) string {
@@ -52,19 +56,19 @@ func envOr(key, fallback string) string {
 // ─── goAML XML Structures (NFIU-compliant) ────────────────────────────────────
 
 type GoAMLReport struct {
-	XMLName       xml.Name `xml:"goAMLReport"`
-	Version       string   `xml:"version,attr"`
-	ReportType    string   `xml:"report_type"`
-	ReportingEntity ReportingEntity `xml:"reporting_entity"`
-	Transaction   *GoAMLTransaction `xml:"transaction,omitempty"`
-	Activity      *GoAMLActivity    `xml:"activity,omitempty"`
+	XMLName         xml.Name          `xml:"goAMLReport"`
+	Version         string            `xml:"version,attr"`
+	ReportType      string            `xml:"report_type"`
+	ReportingEntity ReportingEntity   `xml:"reporting_entity"`
+	Transaction     *GoAMLTransaction `xml:"transaction,omitempty"`
+	Activity        *GoAMLActivity    `xml:"activity,omitempty"`
 }
 
 type ReportingEntity struct {
-	EntityID      string `xml:"entity_id"`
-	EntityName    string `xml:"entity_name"`
-	EntityType    string `xml:"entity_type"`
-	Country       string `xml:"country"`
+	EntityID       string `xml:"entity_id"`
+	EntityName     string `xml:"entity_name"`
+	EntityType     string `xml:"entity_type"`
+	Country        string `xml:"country"`
 	SubmissionDate string `xml:"submission_date"`
 }
 
@@ -91,24 +95,24 @@ type GoAMLActivity struct {
 // ─── Internal Models ─────────────────────────────────────────────────────────
 
 type STRReport struct {
-	ID              string    `json:"id"`
-	ReferenceNumber string    `json:"reference_number"`
-	Status          string    `json:"status"` // draft, pending_review, submitted, acknowledged, rejected
-	ReportType      string    `json:"report_type"` // STR, SAR, CTR
-	CustomerID      string    `json:"customer_id"`
-	CustomerName    string    `json:"customer_name"`
-	TransactionID   string    `json:"transaction_id,omitempty"`
-	Amount          float64   `json:"amount"`
-	Currency        string    `json:"currency"`
-	SuspicionReason string    `json:"suspicion_reason"`
-	RiskLevel       string    `json:"risk_level"`
-	Narrative       string    `json:"narrative"`
-	FilingOfficer   string    `json:"filing_officer"`
-	CreatedAt       string    `json:"created_at"`
-	SubmittedAt     string    `json:"submitted_at,omitempty"`
-	NFIUReference   string    `json:"nfiu_reference,omitempty"`
-	NFIUStatus      string    `json:"nfiu_status,omitempty"`
-	GoAMLXML        string    `json:"goaml_xml,omitempty"`
+	ID              string  `json:"id"`
+	ReferenceNumber string  `json:"reference_number"`
+	Status          string  `json:"status"`      // draft, pending_review, submitted, acknowledged, rejected
+	ReportType      string  `json:"report_type"` // STR, SAR, CTR
+	CustomerID      string  `json:"customer_id"`
+	CustomerName    string  `json:"customer_name"`
+	TransactionID   string  `json:"transaction_id,omitempty"`
+	Amount          float64 `json:"amount"`
+	Currency        string  `json:"currency"`
+	SuspicionReason string  `json:"suspicion_reason"`
+	RiskLevel       string  `json:"risk_level"`
+	Narrative       string  `json:"narrative"`
+	FilingOfficer   string  `json:"filing_officer"`
+	CreatedAt       string  `json:"created_at"`
+	SubmittedAt     string  `json:"submitted_at,omitempty"`
+	NFIUReference   string  `json:"nfiu_reference,omitempty"`
+	NFIUStatus      string  `json:"nfiu_status,omitempty"`
+	GoAMLXML        string  `json:"goaml_xml,omitempty"`
 }
 
 type CreateSTRRequest struct {
@@ -180,6 +184,13 @@ func generateGoAMLXML(report *STRReport) (string, error) {
 
 // ─── NFIU Submission ─────────────────────────────────────────────────────────
 
+// Shared outbound HTTP clients (wave-14 perf): per-call client construction
+// disabled keep-alive connection pooling.
+var (
+	nfiuHTTPClient = &http.Client{Timeout: 30 * time.Second}
+	daprHTTPClient = &http.Client{Timeout: 5 * time.Second}
+)
+
 func submitToNFIU(report *STRReport) (string, error) {
 	if nfiuAPIKey == "" || environment != "production" {
 		// Sandbox mode: return simulated acknowledgement
@@ -198,8 +209,7 @@ func submitToNFIU(report *STRReport) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+nfiuAPIKey)
 	req.Header.Set("X-Entity-ID", nfiuEntityID)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := nfiuHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("NFIU API call failed: %w", err)
 	}
@@ -214,7 +224,6 @@ func submitToNFIU(report *STRReport) (string, error) {
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
-
 
 // ── PostgreSQL Persistence Layer ─────────────────────────────────────────────
 var db *sql.DB
@@ -259,42 +268,73 @@ func initDB() error {
 }
 
 func dbUpsert(id string, data interface{}) error {
-	if db == nil { return nil }
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if db == nil {
+		return nil
+	}
 	jsonData, err := json.Marshal(data)
-	if err != nil { return err }
-	_, err = db.Exec(`INSERT INTO go_goaml_integration_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`, id, jsonData)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO go_goaml_integration_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`, id, jsonData)
 	return err
 }
 
 func dbGet(id string, dest interface{}) error {
-	if db == nil { return fmt.Errorf("no db") }
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if db == nil {
+		return fmt.Errorf("no db")
+	}
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM go_goaml_integration_state WHERE id = $1", id).Scan(&jsonData)
-	if err != nil { return err }
+	err := db.QueryRowContext(ctx, "SELECT data FROM go_goaml_integration_state WHERE id = $1", id).Scan(&jsonData)
+	if err != nil {
+		return err
+	}
 	return json.Unmarshal(jsonData, dest)
 }
 
 func dbList(limit int) ([]json.RawMessage, error) {
-	if db == nil { return nil, nil }
-	rows, err := db.Query("SELECT data FROM go_goaml_integration_state ORDER BY updated_at DESC LIMIT $1", limit)
-	if err != nil { return nil, err }
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if db == nil {
+		return nil, nil
+	}
+	rows, err := db.QueryContext(ctx, "SELECT data FROM go_goaml_integration_state ORDER BY updated_at DESC LIMIT $1", limit)
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var results []json.RawMessage
 	for rows.Next() {
 		var data json.RawMessage
-		if err := rows.Scan(&data); err != nil { return nil, err }
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
 		results = append(results, data)
 	}
 	return results, rows.Err()
 }
 
 func dbLogEvent(eventType string, payload interface{}) error {
-	if db == nil { return nil }
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if db == nil {
+		return nil
+	}
 	jsonData, err := json.Marshal(payload)
-	if err != nil { return err }
-	_, err = db.Exec("INSERT INTO go_goaml_integration_events (event_type, payload) VALUES ($1, $2)", eventType, jsonData)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, "INSERT INTO go_goaml_integration_events (event_type, payload) VALUES ($1, $2)", eventType, jsonData)
 	return err
 }
+
 // ── End PostgreSQL Layer ─────────────────────────────────────────────────────
 
 func main() {
@@ -307,12 +347,12 @@ func main() {
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
-			"status":           "healthy",
-			"service":          "goaml-integration",
-			"environment":      environment,
-			"nfiu_configured":  nfiuAPIKey != "",
-			"entity_id":        nfiuEntityID,
-			"pending_reports":  countByStatus("pending_review"),
+			"status":            "healthy",
+			"service":           "goaml-integration",
+			"environment":       environment,
+			"nfiu_configured":   nfiuAPIKey != "",
+			"entity_id":         nfiuEntityID,
+			"pending_reports":   countByStatus("pending_review"),
 			"submitted_reports": countByStatus("submitted"),
 		})
 	})
@@ -394,12 +434,12 @@ func main() {
 
 			// Publish audit event
 			go publishDaprEvent("compliance.filing", map[string]interface{}{
-				"reportId":       report.ID,
-				"reportType":     report.ReportType,
-				"nfiuReference":  nfiuRef,
-				"status":         "submitted",
-				"customerId":     report.CustomerID,
-				"timestamp":      report.SubmittedAt,
+				"reportId":      report.ID,
+				"reportType":    report.ReportType,
+				"nfiuReference": nfiuRef,
+				"status":        "submitted",
+				"customerId":    report.CustomerID,
+				"timestamp":     report.SubmittedAt,
 			})
 
 			c.JSON(200, report)
@@ -449,17 +489,38 @@ func main() {
 			ref := c.Param("ref")
 			// In production, query NFIU API for status
 			c.JSON(200, gin.H{
-				"reference": ref,
-				"status":    "acknowledged",
-				"provider":  "nfiu_goaml",
+				"reference":  ref,
+				"status":     "acknowledged",
+				"provider":   "nfiu_goaml",
 				"checked_at": time.Now().UTC().Format(time.RFC3339),
 			})
 		})
 	}
 
-	log.Printf("goAML/NFIU Integration Service starting on :%s (env=%s)", port, environment)
-	if err := r.Run(":" + port); err != nil {
-		log.Fatal(err)
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	go func() {
+		log.Printf("goAML/NFIU Integration Service starting on :%s (env=%s)", port, environment)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	// Graceful shutdown (wave-14 hardening)
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Printf("goAML/NFIU shutting down")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("goAML/NFIU shutdown error: %v", err)
 	}
 }
 
@@ -487,7 +548,9 @@ func createReport(reportType string, req CreateSTRRequest) *STRReport {
 	reportsMu.Unlock()
 	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
 	if db != nil {
-		go func() { _ = dbLogEvent("createReport.state_change", map[string]string{"service": "go-goaml-integration"}) }()
+		go func() {
+			_ = dbLogEvent("createReport.state_change", map[string]string{"service": "go-goaml-integration"})
+		}()
 	}
 
 	go publishDaprEvent("compliance.filing", map[string]interface{}{
@@ -517,7 +580,7 @@ func publishDaprEvent(topic string, data map[string]interface{}) {
 	payload, _ := (&struct{ D interface{} }{data}).D.(interface{})
 	_ = payload
 	// Dapr pubsub publish (non-critical)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := daprHTTPClient
 	body, _ := func() (string, error) {
 		b, e := (&struct {
 			v interface{}

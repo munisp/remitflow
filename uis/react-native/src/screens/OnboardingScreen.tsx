@@ -4,8 +4,13 @@ import {
   Alert, ScrollView, Animated, Dimensions, Platform,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { BiometricService } from '../services/biometricService';
-import { PushNotificationService } from '../services/pushNotificationService';
+import { useNavigation } from '@react-navigation/native';
+// wave14: these modules export standalone functions, not BiometricService /
+// PushNotificationService objects — the old named imports were `undefined`
+// at runtime and every call below would have crashed. Fixed to the real
+// exports (pre-existing bug, surfaced by the new tsc gate).
+import { checkBiometricAvailability, authenticateWithBiometrics } from '../services/biometricService';
+import { requestNotificationPermission } from '../services/pushNotificationService';
 import { PinService, PIN_ENABLED_KEY } from '../services/pinService';
 
 const { width } = Dimensions.get('window');
@@ -13,10 +18,18 @@ const { width } = Dimensions.get('window');
 type Step = 'welcome' | 'pin' | 'biometrics' | 'notifications' | 'done';
 
 interface OnboardingScreenProps {
-  onComplete: () => void;
+  /**
+   * Optional completion callback. RootNavigator registers this screen via
+   * Stack.Screen WITHOUT props (react-navigation supplies only
+   * route/navigation), so when no callback is provided we navigate back to
+   * the Auth screen — previously the missing prop crashed handleComplete
+   * with "onComplete is not a function".
+   */
+  onComplete?: () => void;
 }
 
 export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete }) => {
+  const navigation = useNavigation<any>();
   const [step, setStep] = useState<Step>('welcome');
   const [pin, setPin] = useState('');
   const [confirmPin, setConfirmPin] = useState('');
@@ -57,14 +70,14 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete }
 
   const handleBiometrics = async (enable: boolean) => {
     if (enable) {
-      const available = await BiometricService.isAvailable();
+      const { available } = await checkBiometricAvailability();
       if (!available) {
         Alert.alert('Not Available', 'Biometric authentication is not available on this device.');
         setBiometricEnabled(false);
         animateNext('notifications');
         return;
       }
-      const success = await BiometricService.authenticate('Enable biometric login for RemitFlow');
+      const success = await authenticateWithBiometrics('Enable biometric login for RemitFlow');
       if (success) {
         await AsyncStorage.setItem('biometric_enabled', 'true');
         setBiometricEnabled(true);
@@ -77,7 +90,7 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete }
 
   const handleNotifications = async (enable: boolean) => {
     if (enable) {
-      const granted = await PushNotificationService.requestPermission();
+      const granted = await requestNotificationPermission();
       if (granted) {
         await AsyncStorage.setItem('notifications_enabled', 'true');
         setNotificationsEnabled(true);
@@ -92,7 +105,8 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete }
 
   const handleComplete = async () => {
     await AsyncStorage.setItem('onboarding_completed', 'true');
-    onComplete();
+    if (onComplete) onComplete();
+    else navigation.navigate('Auth');
   };
 
   const renderStep = () => {

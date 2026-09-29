@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -22,7 +23,7 @@ from dataclasses import dataclass, field, asdict
 import hmac
 
 import httpx
-from fastapi import Depends, FastAPI, BackgroundTasks, Header, HTTPException
+from fastapi import Depends, FastAPI, BackgroundTasks, Header, HTTPException, Response
 from pydantic import BaseModel
 
 # ── PostgreSQL persistence ──────────────────────────────────────────────
@@ -49,8 +50,10 @@ _db_pool = None
 
 def _get_db():
     global _db_pool
-    if _db_pool is None:
-        _db_pool = psycopg2.connect(_DB_URL)
+    if _db_pool is None or _db_pool.closed:
+        # statement_timeout 5s (SPEC-wave14 §4.6): a stuck statement fails
+        # loudly instead of pinning the connection forever.
+        _db_pool = psycopg2.connect(_DB_URL, options="-c statement_timeout=5000")
         _db_pool.autocommit = True
         with _db_pool.cursor() as cur:
             cur.execute("""
@@ -113,6 +116,22 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("sanctions-updater")
 
 app = FastAPI(title="RemitFlow Sanctions Updater", version="1.0.0")
+
+# ── Shared HTTP client (SPEC-wave14 §4.5/§4.6) ────────────────────────────────
+# One lazily-created module-level AsyncClient for OpenSearch / list-source /
+# Dapr calls. Default timeout 5s; long-running source fetches and bulk index
+# calls pass explicit per-request overrides. Pool capped at 100 connections.
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(5.0),
+            limits=httpx.Limits(max_connections=100),
+        )
+    return _http_client
 
 # ── Internal auth (fail-closed) ───────────────────────────────────────────────
 # Triggering sanctions-list updates is an administrative operation. No default
@@ -179,7 +198,11 @@ def _emit_lifecycle_event(event_type: str, **kwargs):
 
 @app.on_event("shutdown")
 async def _on_shutdown():
+    global _http_client
     logging.getLogger("python-sanctions-updater").info("FastAPI shutdown event — cleaning up resources")
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
 
 
 # ─── Config ──────────────────────────────────────────────────────────────────
@@ -510,46 +533,46 @@ async def run_update(sources: list[str], dry_run: bool = False) -> UpdateRespons
     errors = []
     all_entities: list[SanctionedEntity] = []
 
-    async with httpx.AsyncClient() as client:
-        # Ensure OpenSearch index exists
-        if not dry_run:
-            await ensure_index(client)
+    client = get_http_client()
+    # Ensure OpenSearch index exists
+    if not dry_run:
+        await ensure_index(client)
 
-        # Fetch from each source
-        fetchers = {
-            "ofac_sdn": fetch_ofac_sdn,
-            "un_consolidated": fetch_un_consolidated,
-        }
+    # Fetch from each source
+    fetchers = {
+        "ofac_sdn": fetch_ofac_sdn,
+        "un_consolidated": fetch_un_consolidated,
+    }
 
-        processed_sources = []
-        for source in sources:
-            if source in fetchers:
-                try:
-                    entities = await fetchers[source](client)
-                    all_entities.extend(entities)
-                    processed_sources.append(source)
-                    logger.info(f"Source {source}: {len(entities)} entities")
-                except Exception as e:
-                    errors.append(f"{source}: {str(e)}")
-                    logger.error(f"Source {source} failed: {e}")
+    processed_sources = []
+    for source in sources:
+        if source in fetchers:
+            try:
+                entities = await fetchers[source](client)
+                all_entities.extend(entities)
+                processed_sources.append(source)
+                logger.info(f"Source {source}: {len(entities)} entities")
+            except Exception as e:
+                errors.append(f"{source}: {str(e)}")
+                logger.error(f"Source {source} failed: {e}")
 
-        # Bulk index
-        indexed = 0
-        if not dry_run and all_entities:
-            # Index in batches of 500
-            batch_size = 500
-            for i in range(0, len(all_entities), batch_size):
-                batch = all_entities[i:i + batch_size]
-                indexed += await bulk_index(client, batch)
+    # Bulk index
+    indexed = 0
+    if not dry_run and all_entities:
+        # Index in batches of 500
+        batch_size = 500
+        for i in range(0, len(all_entities), batch_size):
+            batch = all_entities[i:i + batch_size]
+            indexed += await bulk_index(client, batch)
 
-            # Publish update event
-            await publish_update_event(client, {
-                "sources": processed_sources,
-                "total_entities": len(all_entities),
-                "indexed": indexed,
-            })
-        else:
-            indexed = len(all_entities) if dry_run else 0
+        # Publish update event
+        await publish_update_event(client, {
+            "sources": processed_sources,
+            "total_entities": len(all_entities),
+            "indexed": indexed,
+        })
+    else:
+        indexed = len(all_entities) if dry_run else 0
 
     duration = time.time() - start
     logger.info(f"Update complete: {len(all_entities)} entities, {indexed} indexed, {duration:.1f}s")
@@ -571,11 +594,11 @@ async def health():
     opensearch_ok = False
     total_indexed = 0
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{OPENSEARCH_URL}/{OPENSEARCH_INDEX}/_count", timeout=5.0)
-            if resp.status_code == 200:
-                opensearch_ok = True
-                total_indexed = resp.json().get("count", 0)
+        client = get_http_client()
+        resp = await client.get(f"{OPENSEARCH_URL}/{OPENSEARCH_INDEX}/_count", timeout=5.0)
+        if resp.status_code == 200:
+            opensearch_ok = True
+            total_indexed = resp.json().get("count", 0)
     except Exception:
         pass
 
@@ -587,54 +610,135 @@ async def health():
     )
 
 
-@app.post("/api/update", response_model=UpdateResponse)
+# ─── Background update jobs (SPEC-wave14 §4.5) ────────────────────────────────
+# A full OFAC+UN update downloads/parses multi-MB XML and bulk-indexes tens of
+# thousands of documents — multi-minute work that must NOT be awaited inline on
+# the request path. POST /api/update now returns 202 + job_id immediately and
+# runs the update as a background task; poll GET /api/update/{job_id} for the
+# terminal status/result.
+
+class UpdateJobAccepted(BaseModel):
+    job_id: str
+    status: str  # queued
+    status_url: str
+
+
+class UpdateJobStatus(BaseModel):
+    job_id: str
+    status: str  # queued | running | completed | failed
+    result: Optional[UpdateResponse] = None
+    error: Optional[str] = None
+    queued_at: str
+    completed_at: Optional[str] = None
+
+
+_update_jobs: dict[str, dict] = {}
+_update_jobs_lock = asyncio.Lock()
+
+
+async def _run_update_job(job_id: str, sources: list[str], dry_run: bool) -> None:
+    """Background wrapper around run_update with job-state tracking."""
+    _update_jobs[job_id]["status"] = "running"
+    try:
+        result = await run_update(sources, dry_run)
+        _update_jobs[job_id].update(status="completed", result=result,
+                                    completed_at=datetime.now(timezone.utc).isoformat())
+    except Exception as e:
+        logger.error(f"Update job {job_id} failed: {e}", exc_info=True)
+        _update_jobs[job_id].update(status="failed", error=str(e),
+                                    completed_at=datetime.now(timezone.utc).isoformat())
+    # Durable-ish audit trail: persist terminal job state (sync psycopg2 —
+    # offloaded so the loop is never blocked). Failure to persist is logged,
+    # never raised into the job.
+    try:
+        await asyncio.to_thread(db_log_event, "sanctions.update.job", {
+            "job_id": job_id,
+            "status": _update_jobs[job_id]["status"],
+            "sources": sources,
+            "dry_run": dry_run,
+            "error": _update_jobs[job_id].get("error"),
+        })
+    except Exception as e:
+        logger.warning(f"Failed to persist job event for {job_id} (non-critical): {e}")
+
+
+async def _submit_update_job(background_tasks: BackgroundTasks, sources: list[str],
+                             dry_run: bool) -> UpdateJobAccepted:
+    job_id = f"sunp-{uuid.uuid4().hex[:12]}"
+    async with _update_jobs_lock:
+        _update_jobs[job_id] = {
+            "job_id": job_id,
+            "status": "queued",
+            "result": None,
+            "error": None,
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": None,
+        }
+    background_tasks.add_task(_run_update_job, job_id, sources, dry_run)
+    return UpdateJobAccepted(
+        job_id=job_id, status="queued", status_url=f"/api/update/{job_id}"
+    )
+
+
+@app.post("/api/update", response_model=UpdateJobAccepted, status_code=202)
 async def trigger_update(req: UpdateRequest, background_tasks: BackgroundTasks, _auth: None = Depends(require_internal_auth)):
-    """Trigger a sanctions list update. Runs in background for large lists."""
-    result = await run_update(req.sources, req.dry_run)
-    return result
+    """Trigger a sanctions list update. Returns 202 + job_id immediately; the
+    (multi-minute) update runs as a background task."""
+    return await _submit_update_job(background_tasks, req.sources, req.dry_run)
 
 
-@app.post("/api/update/full")
+@app.post("/api/update/full", response_model=UpdateJobAccepted, status_code=202)
 async def trigger_full_update(background_tasks: BackgroundTasks, _auth: None = Depends(require_internal_auth)):
-    """Trigger a full update of all sanctions sources."""
+    """Trigger a full update of all sanctions sources (202 + job_id)."""
     all_sources = ["ofac_sdn", "un_consolidated"]
-    result = await run_update(all_sources, dry_run=False)
-    return result
+    return await _submit_update_job(background_tasks, all_sources, False)
+
+
+@app.get("/api/update/{job_id}", response_model=UpdateJobStatus)
+async def get_update_job(job_id: str, _auth: None = Depends(require_internal_auth)):
+    """Poll the status/result of a previously submitted update job."""
+    job = _update_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Unknown update job: {job_id}")
+    return UpdateJobStatus(**job)
 
 
 @app.get("/api/stats")
 async def get_stats():
     """Get current sanctions index statistics."""
-    async with httpx.AsyncClient() as client:
-        try:
-            resp = await client.get(
-                f"{OPENSEARCH_URL}/{OPENSEARCH_INDEX}/_search",
-                json={
-                    "size": 0,
-                    "aggs": {
-                        "by_source": {"terms": {"field": "source", "size": 10}},
-                        "by_type": {"terms": {"field": "entity_type", "size": 10}},
-                    }
-                },
-                timeout=10.0
-            )
-            data = resp.json()
-            return {
-                "total": data.get("hits", {}).get("total", {}).get("value", 0),
-                "by_source": {
-                    b["key"]: b["doc_count"]
-                    for b in data.get("aggregations", {}).get("by_source", {}).get("buckets", [])
-                },
-                "by_type": {
-                    b["key"]: b["doc_count"]
-                    for b in data.get("aggregations", {}).get("by_type", {}).get("buckets", [])
-                },
-            }
-        except Exception as e:
-            raise HTTPException(status_code=503, detail=str(e))
+    client = get_http_client()
+    try:
+        resp = await client.get(
+            f"{OPENSEARCH_URL}/{OPENSEARCH_INDEX}/_search",
+            json={
+                "size": 0,
+                "aggs": {
+                    "by_source": {"terms": {"field": "source", "size": 10}},
+                    "by_type": {"terms": {"field": "entity_type", "size": 10}},
+                }
+            },
+            timeout=10.0
+        )
+        data = resp.json()
+        return {
+            "total": data.get("hits", {}).get("total", {}).get("value", 0),
+            "by_source": {
+                b["key"]: b["doc_count"]
+                for b in data.get("aggregations", {}).get("by_source", {}).get("buckets", [])
+            },
+            "by_type": {
+                b["key"]: b["doc_count"]
+                for b in data.get("aggregations", {}).get("by_type", {}).get("buckets", [])
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8093"))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    # SPEC-wave14 §4.6: env-configurable workers (default 1 — in-memory job
+    # registry is per-process; keep 1 unless job state is externalised).
+    workers = int(os.getenv("UVICORN_WORKERS", "1"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info", workers=workers)

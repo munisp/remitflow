@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
-  ScrollView,
+  FlatList,
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
@@ -55,6 +55,56 @@ function formatCountdown(expiresAt: unknown, now: number): string {
   return h > 0 ? `expires in ${h}h ${m}m` : `expires in ${m}m`;
 }
 
+/**
+ * wave14 perf (M3): memoized authorization row that OWNS its countdown
+ * tick. Only rows in `pending` status run a 30s interval; terminal rows
+ * never tick. Previously a single screen-level interval re-rendered the
+ * entire screen — including every form TextInput — every 30 seconds.
+ */
+const PickupRow = React.memo(function PickupRow({
+  row,
+  onRevoke,
+}: {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  row: any;
+  onRevoke: (id: number) => void;
+}) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (row.status !== 'pending') return;
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, [row.status]);
+
+  return (
+    <View style={styles.authCard}>
+      <View style={styles.authHeader}>
+        <Text style={styles.authName}>{row.agentFullName}</Text>
+        <View style={[styles.badge, { backgroundColor: STATUS_COLORS[row.status] ?? '#64748b' }]}>
+          <Text style={styles.badgeText}>{row.status}</Text>
+        </View>
+      </View>
+      <Text style={styles.authMeta}>
+        {row.agentIdType} · {row.relationship}
+        {row.maxAmount ? ` · max ${row.maxAmount}` : ''}
+      </Text>
+      <Text style={styles.authMeta}>
+        {row.status === 'pending'
+          ? formatCountdown(row.expiresAt, now)
+          : row.status === 'used' && row.usedAt
+            ? `used ${new Date(row.usedAt).toLocaleString()}`
+            : `created ${new Date(row.createdAt).toLocaleString()}`}
+      </Text>
+      {row.status === 'pending' && (
+        <TouchableOpacity style={styles.revokeButton} onPress={() => onRevoke(row.id)}>
+          <Text style={styles.revokeButtonText}>Revoke</Text>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+});
+
 export default function BdcPickupAuthorizationScreen() {
   const navigation = useNavigation();
   const [refreshing, setRefreshing] = useState(false);
@@ -72,16 +122,10 @@ export default function BdcPickupAuthorizationScreen() {
 
   // ── list state ─────────────────────────────────────────────────────────
   const [statusFilter, setStatusFilter] = useState<(typeof STATUS_FILTERS)[number] | null>(null);
-  const [now, setNow] = useState(Date.now());
 
   // ── revoke confirm state ───────────────────────────────────────────────
   const [revokeTarget, setRevokeTarget] = useState<number | null>(null);
   const [revokeTotp, setRevokeTotp] = useState('');
-
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(timer);
-  }, []);
 
   const customerId = useMemo(() => {
     const n = Number(customerIdStr);
@@ -108,7 +152,7 @@ export default function BdcPickupAuthorizationScreen() {
   );
 
   const authorizeMutation = trpc.bdc.pickup.authorizePickup.useMutation({
-    onSuccess: (result) => {
+    onSuccess: (result: any) => {
       Alert.alert(
         'Authorization created',
         `Authorization #${result.authorizationId} for ${result.agentFullName} is pending.`,
@@ -121,17 +165,17 @@ export default function BdcPickupAuthorizationScreen() {
       setIdempotencyKey(generateIdempotencyKey());
       refetch();
     },
-    onError: (e) => Alert.alert('Authorization failed', e.message),
+    onError: (e: any) => Alert.alert('Authorization failed', e.message),
   });
 
   const revokeMutation = trpc.bdc.pickup.revokeAuthorization.useMutation({
-    onSuccess: (result) => {
+    onSuccess: (result: any) => {
       Alert.alert('Revoked', `Authorization #${result.authorizationId} has been revoked.`);
       setRevokeTarget(null);
       setRevokeTotp('');
       refetch();
     },
-    onError: (e) => Alert.alert('Revoke failed', e.message),
+    onError: (e: any) => Alert.alert('Revoke failed', e.message),
   });
 
   const onRefresh = async () => {
@@ -185,6 +229,18 @@ export default function BdcPickupAuthorizationScreen() {
   const rows = data?.rows ?? [];
   const screeningBlocked = screening.data?.blocked === true;
 
+  // wave14 perf (M3): stable callbacks so memoized PickupRow rows don't
+  // re-render when unrelated form state changes.
+  const onRevoke = useCallback((id: number) => {
+    setRevokeTotp('');
+    setRevokeTarget(id);
+  }, []);
+  const renderRow = useCallback(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ({ item }: { item: any }) => <PickupRow row={item} onRevoke={onRevoke} />,
+    [onRevoke],
+  );
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
@@ -195,139 +251,153 @@ export default function BdcPickupAuthorizationScreen() {
         <View style={{ width: 50 }} />
       </View>
 
-      <ScrollView
+      {/* wave14 perf (M3): the authorization list is a FlatList (windowed)
+          instead of rows.map inside a ScrollView, which mounted every row
+          plus the entire form on each render. The form + filters live in
+          ListHeaderComponent. Rows sit directly on the screen background
+          now (previously nested in a second card) — same border delineation,
+          one less wrapping view. */}
+      <FlatList
         style={styles.content}
+        data={isLoading || error ? [] : rows}
+        keyExtractor={(row: any) => String(row.id)}
+        renderItem={renderRow}
+        removeClippedSubviews
+        initialNumToRender={10}
+        windowSize={7}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#6366f1" />}
-      >
-        {customerId !== undefined && screeningBlocked && (
-          <View style={styles.blockedBanner}>
-            <Text style={styles.blockedText}>
-              This customer is blocked by rescreening — pickup authorization will be rejected until
-              an MLRO review clears them.
-            </Text>
-          </View>
-        )}
-
-        {/* ── create form ─────────────────────────────────────────── */}
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Authorize an agent</Text>
-
-          <Text style={styles.label}>Customer ID</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. 1234"
-            placeholderTextColor="#64748b"
-            keyboardType="number-pad"
-            value={customerIdStr}
-            onChangeText={setCustomerIdStr}
-          />
-
-          <Text style={styles.label}>Agent full name</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Full legal name"
-            placeholderTextColor="#64748b"
-            value={agentFullName}
-            onChangeText={setAgentFullName}
-          />
-
-          <Text style={styles.label}>Agent ID type</Text>
-          <View style={styles.chipRow}>
-            {AGENT_ID_TYPES.map((t) => (
-              <TouchableOpacity
-                key={t}
-                style={[styles.chip, agentIdType === t && styles.chipActive]}
-                onPress={() => setAgentIdType(t)}
-              >
-                <Text style={[styles.chipText, agentIdType === t && styles.chipTextActive]}>{t}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <Text style={styles.label}>Agent ID number</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="ID number (stored encrypted)"
-            placeholderTextColor="#64748b"
-            value={agentIdNumber}
-            onChangeText={setAgentIdNumber}
-          />
-
-          <Text style={styles.label}>Relationship</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. spouse, sibling, employee"
-            placeholderTextColor="#64748b"
-            value={relationship}
-            onChangeText={setRelationship}
-          />
-
-          <Text style={styles.label}>Max amount (optional, major units)</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. 50000.00"
-            placeholderTextColor="#64748b"
-            keyboardType="decimal-pad"
-            value={maxAmount}
-            onChangeText={setMaxAmount}
-          />
-
-          <Text style={styles.label}>Expires in hours (1–72)</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="24"
-            placeholderTextColor="#64748b"
-            keyboardType="number-pad"
-            value={expiresInHoursStr}
-            onChangeText={setExpiresInHoursStr}
-          />
-
-          <Text style={styles.label}>TOTP code (step-up)</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="6-digit authenticator code"
-            placeholderTextColor="#64748b"
-            keyboardType="number-pad"
-            value={totpCode}
-            onChangeText={setTotpCode}
-            maxLength={8}
-          />
-
-          <TouchableOpacity
-            style={[styles.primaryButton, authorizeMutation.isPending && styles.buttonDisabled]}
-            onPress={submit}
-            disabled={authorizeMutation.isPending}
-          >
-            {authorizeMutation.isPending ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.primaryButtonText}>Authorize pickup</Text>
+        ListHeaderComponent={
+          <>
+            {customerId !== undefined && screeningBlocked && (
+              <View style={styles.blockedBanner}>
+                <Text style={styles.blockedText}>
+                  This customer is blocked by rescreening — pickup authorization will be rejected until
+                  an MLRO review clears them.
+                </Text>
+              </View>
             )}
-          </TouchableOpacity>
-        </View>
 
-        {/* ── my authorizations ───────────────────────────────────── */}
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>My authorizations</Text>
-          <View style={styles.chipRow}>
-            <TouchableOpacity
-              style={[styles.chip, statusFilter === null && styles.chipActive]}
-              onPress={() => setStatusFilter(null)}
-            >
-              <Text style={[styles.chipText, statusFilter === null && styles.chipTextActive]}>all</Text>
-            </TouchableOpacity>
-            {STATUS_FILTERS.map((s) => (
+            {/* ── create form ─────────────────────────────────────── */}
+            <View style={styles.card}>
+              <Text style={styles.sectionTitle}>Authorize an agent</Text>
+
+              <Text style={styles.label}>Customer ID</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="e.g. 1234"
+                placeholderTextColor="#64748b"
+                keyboardType="number-pad"
+                value={customerIdStr}
+                onChangeText={setCustomerIdStr}
+              />
+
+              <Text style={styles.label}>Agent full name</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Full legal name"
+                placeholderTextColor="#64748b"
+                value={agentFullName}
+                onChangeText={setAgentFullName}
+              />
+
+              <Text style={styles.label}>Agent ID type</Text>
+              <View style={styles.chipRow}>
+                {AGENT_ID_TYPES.map((t) => (
+                  <TouchableOpacity
+                    key={t}
+                    style={[styles.chip, agentIdType === t && styles.chipActive]}
+                    onPress={() => setAgentIdType(t)}
+                  >
+                    <Text style={[styles.chipText, agentIdType === t && styles.chipTextActive]}>{t}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <Text style={styles.label}>Agent ID number</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="ID number (stored encrypted)"
+                placeholderTextColor="#64748b"
+                value={agentIdNumber}
+                onChangeText={setAgentIdNumber}
+              />
+
+              <Text style={styles.label}>Relationship</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="e.g. spouse, sibling, employee"
+                placeholderTextColor="#64748b"
+                value={relationship}
+                onChangeText={setRelationship}
+              />
+
+              <Text style={styles.label}>Max amount (optional, major units)</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="e.g. 50000.00"
+                placeholderTextColor="#64748b"
+                keyboardType="decimal-pad"
+                value={maxAmount}
+                onChangeText={setMaxAmount}
+              />
+
+              <Text style={styles.label}>Expires in hours (1–72)</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="24"
+                placeholderTextColor="#64748b"
+                keyboardType="number-pad"
+                value={expiresInHoursStr}
+                onChangeText={setExpiresInHoursStr}
+              />
+
+              <Text style={styles.label}>TOTP code (step-up)</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="6-digit authenticator code"
+                placeholderTextColor="#64748b"
+                keyboardType="number-pad"
+                value={totpCode}
+                onChangeText={setTotpCode}
+                maxLength={8}
+              />
+
               <TouchableOpacity
-                key={s}
-                style={[styles.chip, statusFilter === s && styles.chipActive]}
-                onPress={() => setStatusFilter(statusFilter === s ? null : s)}
+                style={[styles.primaryButton, authorizeMutation.isPending && styles.buttonDisabled]}
+                onPress={submit}
+                disabled={authorizeMutation.isPending}
               >
-                <Text style={[styles.chipText, statusFilter === s && styles.chipTextActive]}>{s}</Text>
+                {authorizeMutation.isPending ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.primaryButtonText}>Authorize pickup</Text>
+                )}
               </TouchableOpacity>
-            ))}
-          </View>
+            </View>
 
-          {isLoading ? (
+            {/* ── my authorizations (header: title + status filters) ── */}
+            <Text style={[styles.sectionTitle, styles.listTitle]}>My authorizations</Text>
+            <View style={styles.chipRow}>
+              <TouchableOpacity
+                style={[styles.chip, statusFilter === null && styles.chipActive]}
+                onPress={() => setStatusFilter(null)}
+              >
+                <Text style={[styles.chipText, statusFilter === null && styles.chipTextActive]}>all</Text>
+              </TouchableOpacity>
+              {STATUS_FILTERS.map((s) => (
+                <TouchableOpacity
+                  key={s}
+                  style={[styles.chip, statusFilter === s && styles.chipActive]}
+                  onPress={() => setStatusFilter(statusFilter === s ? null : s)}
+                >
+                  <Text style={[styles.chipText, statusFilter === s && styles.chipTextActive]}>{s}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </>
+        }
+        ListEmptyComponent={
+          isLoading ? (
             <ActivityIndicator size="large" color="#6366f1" style={{ marginTop: 24 }} />
           ) : error ? (
             <View style={styles.errorContainer}>
@@ -336,49 +406,16 @@ export default function BdcPickupAuthorizationScreen() {
                 <Text style={styles.retryText}>Retry</Text>
               </TouchableOpacity>
             </View>
-          ) : rows.length === 0 ? (
+          ) : (
             <View style={styles.emptyContainer}>
               <Text style={styles.emptyEmoji}>📋</Text>
               <Text style={styles.emptyText}>
                 {statusFilter ? `No ${statusFilter} authorizations.` : 'No pickup authorizations yet.'}
               </Text>
             </View>
-          ) : (
-            rows.map((row: any) => (
-              <View key={row.id} style={styles.authCard}>
-                <View style={styles.authHeader}>
-                  <Text style={styles.authName}>{row.agentFullName}</Text>
-                  <View style={[styles.badge, { backgroundColor: STATUS_COLORS[row.status] ?? '#64748b' }]}>
-                    <Text style={styles.badgeText}>{row.status}</Text>
-                  </View>
-                </View>
-                <Text style={styles.authMeta}>
-                  {row.agentIdType} · {row.relationship}
-                  {row.maxAmount ? ` · max ${row.maxAmount}` : ''}
-                </Text>
-                <Text style={styles.authMeta}>
-                  {row.status === 'pending'
-                    ? formatCountdown(row.expiresAt, now)
-                    : row.status === 'used' && row.usedAt
-                      ? `used ${new Date(row.usedAt).toLocaleString()}`
-                      : `created ${new Date(row.createdAt).toLocaleString()}`}
-                </Text>
-                {row.status === 'pending' && (
-                  <TouchableOpacity
-                    style={styles.revokeButton}
-                    onPress={() => {
-                      setRevokeTotp('');
-                      setRevokeTarget(row.id);
-                    }}
-                  >
-                    <Text style={styles.revokeButtonText}>Revoke</Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-            ))
-          )}
-        </View>
-      </ScrollView>
+          )
+        }
+      />
 
       {/* ── revoke TOTP confirm dialog ────────────────────────────── */}
       <Modal visible={revokeTarget !== null} transparent animationType="fade">
@@ -449,6 +486,7 @@ const styles = StyleSheet.create({
   primaryButtonText: { color: '#fff', fontWeight: '700', fontSize: 14 },
   buttonDisabled: { opacity: 0.6 },
   authCard: { backgroundColor: '#0f172a', borderRadius: 8, padding: 12, marginTop: 10, borderWidth: 1, borderColor: '#334155' },
+  listTitle: { marginTop: 4 },
   authHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
   authName: { fontSize: 14, fontWeight: '600', color: '#f1f5f9', flex: 1 },
   badge: { borderRadius: 10, paddingVertical: 2, paddingHorizontal: 8 },

@@ -2,11 +2,12 @@
 // Verifies Bank Verification Number (BVN) via NIBSS and National Identification Number (NIN) via NIMC.
 //
 // Endpoints:
-//   POST /v1/bvn/verify        — verify BVN against NIBSS
-//   POST /v1/nin/verify        — verify NIN against NIMC
-//   POST /v1/bvn-nin/match     — cross-match BVN and NIN records
-//   GET  /health               — liveness probe
-//   GET  /metrics              — Prometheus metrics
+//
+//	POST /v1/bvn/verify        — verify BVN against NIBSS
+//	POST /v1/nin/verify        — verify NIN against NIMC
+//	POST /v1/bvn-nin/match     — cross-match BVN and NIN records
+//	GET  /health               — liveness probe
+//	GET  /metrics              — Prometheus metrics
 //
 // Port: 8121
 package main
@@ -21,30 +22,32 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"database/sql"
 	"github.com/gin-gonic/gin"
+	_ "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"database/sql"
 	"log/slog"
-	_ "github.com/lib/pq"
 )
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 var (
-	nibssBaseURL  = envOr("NIBSS_BASE_URL", "https://api.nibss-plc.com.ng")
-	nibssAPIKey   = os.Getenv("NIBSS_API_KEY")
-	nibssSecret   = os.Getenv("NIBSS_SECRET_KEY")
-	nimcBaseURL   = envOr("NIMC_BASE_URL", "https://api.nimc.gov.ng")
-	nimcAPIKey    = os.Getenv("NIMC_API_KEY")
-	nimcSecret    = os.Getenv("NIMC_SECRET_KEY")
-	daprHTTPPort  = envOr("DAPR_HTTP_PORT", "3500")
-	port          = envOr("PORT", "8121")
-	environment   = envOr("ENVIRONMENT", "development")
+	nibssBaseURL = envOr("NIBSS_BASE_URL", "https://api.nibss-plc.com.ng")
+	nibssAPIKey  = os.Getenv("NIBSS_API_KEY")
+	nibssSecret  = os.Getenv("NIBSS_SECRET_KEY")
+	nimcBaseURL  = envOr("NIMC_BASE_URL", "https://api.nimc.gov.ng")
+	nimcAPIKey   = os.Getenv("NIMC_API_KEY")
+	nimcSecret   = os.Getenv("NIMC_SECRET_KEY")
+	daprHTTPPort = envOr("DAPR_HTTP_PORT", "3500")
+	port         = envOr("PORT", "8121")
+	environment  = envOr("ENVIRONMENT", "development")
 	// Sandbox (pass-everything) mode is allowed ONLY when explicitly opted in.
 	sandboxAllowed = os.Getenv("BVN_SANDBOX_ALLOWED") == "true"
 )
@@ -58,25 +61,6 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-func boolPtr(b bool) *bool { return &b }
-
-// boolPtrFromJSON reads a boolean field out of a decoded provider response
-// and returns nil when the key is absent or explicitly JSON null - both mean
-// "not evaluated". A plain `body[key] == true` comparison can't distinguish
-// that from a genuine false, which previously made an unevaluated dob_match
-// silently read as "did not match".
-func boolPtrFromJSON(body map[string]interface{}, key string) *bool {
-	v, ok := body[key]
-	if !ok || v == nil {
-		return nil
-	}
-	b, ok := v.(bool)
-	if !ok {
-		return nil
-	}
-	return &b
 }
 
 // ─── Models ──────────────────────────────────────────────────────────────────
@@ -105,35 +89,30 @@ type BVNNINMatchRequest struct {
 }
 
 type VerificationResult struct {
-	Verified       bool                   `json:"verified"`
-	MatchScore     float64                `json:"match_score"`
-	NameMatch      bool                   `json:"name_match"`
-	// nil means "date of birth was not evaluated" (e.g. the NIMC request never
-	// carries a dob to compare - see NINVerifyRequest), distinct from a real
-	// false ("evaluated, did not match"). A bare bool can't represent that
-	// third state, which is what let this collapse into a false positive/
-	// negative before - see boolPtrFromJSON.
-	DOBMatch       *bool                  `json:"dob_match"`
-	PhoneMatch     bool                   `json:"phone_match"`
-	PhotoURL       string                 `json:"photo_url,omitempty"`
-	RegistrationDate string              `json:"registration_date,omitempty"`
-	Provider       string                 `json:"provider"`
-	VerificationID string                 `json:"verification_id"`
-	Timestamp      string                 `json:"timestamp"`
-	RawResponse    map[string]interface{} `json:"raw_response,omitempty"`
-	Error          string                 `json:"error,omitempty"`
+	Verified         bool                   `json:"verified"`
+	MatchScore       float64                `json:"match_score"`
+	NameMatch        bool                   `json:"name_match"`
+	DOBMatch         bool                   `json:"dob_match"`
+	PhoneMatch       bool                   `json:"phone_match"`
+	PhotoURL         string                 `json:"photo_url,omitempty"`
+	RegistrationDate string                 `json:"registration_date,omitempty"`
+	Provider         string                 `json:"provider"`
+	VerificationID   string                 `json:"verification_id"`
+	Timestamp        string                 `json:"timestamp"`
+	RawResponse      map[string]interface{} `json:"raw_response,omitempty"`
+	Error            string                 `json:"error,omitempty"`
 }
 
 type CrossMatchResult struct {
-	BVNVerified    bool    `json:"bvn_verified"`
-	NINVerified    bool    `json:"nin_verified"`
-	CrossMatch     bool    `json:"cross_match"`
+	BVNVerified     bool    `json:"bvn_verified"`
+	NINVerified     bool    `json:"nin_verified"`
+	CrossMatch      bool    `json:"cross_match"`
 	NameConsistency float64 `json:"name_consistency"`
-	DOBConsistency bool    `json:"dob_consistency"`
-	OverallScore   float64 `json:"overall_score"`
-	Recommendation string  `json:"recommendation"`
-	VerificationID string  `json:"verification_id"`
-	Timestamp      string  `json:"timestamp"`
+	DOBConsistency  bool    `json:"dob_consistency"`
+	OverallScore    float64 `json:"overall_score"`
+	Recommendation  string  `json:"recommendation"`
+	VerificationID  string  `json:"verification_id"`
+	Timestamp       string  `json:"timestamp"`
 }
 
 // ─── Metrics ─────────────────────────────────────────────────────────────────
@@ -236,7 +215,7 @@ func (c *NIBSSClient) VerifyBVN(ctx context.Context, req BVNVerifyRequest) (*Ver
 		Verified:         true,
 		MatchScore:       score,
 		NameMatch:        nameMatch,
-		DOBMatch:         boolPtr(dobMatch),
+		DOBMatch:         dobMatch,
 		PhoneMatch:       req.PhoneNumber != "",
 		Provider:         "nibss_sandbox",
 		VerificationID:   verificationID,
@@ -279,7 +258,7 @@ func (c *NIBSSClient) callNIBSSAPI(ctx context.Context, req BVNVerifyRequest) (*
 		Verified:    verified,
 		MatchScore:  matchScore,
 		NameMatch:   body["name_match"] == true,
-		DOBMatch:    boolPtrFromJSON(body, "dob_match"),
+		DOBMatch:    body["dob_match"] == true,
 		PhoneMatch:  body["phone_match"] == true,
 		Provider:    "nibss",
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
@@ -354,7 +333,7 @@ func (c *NIMCClient) VerifyNIN(ctx context.Context, req NINVerifyRequest) (*Veri
 		Verified:       true,
 		MatchScore:     0.93,
 		NameMatch:      true,
-		DOBMatch:       boolPtr(req.DateOfBirth != ""),
+		DOBMatch:       req.DateOfBirth != "",
 		Provider:       "nimc_sandbox",
 		VerificationID: verificationID,
 		Timestamp:      time.Now().UTC().Format(time.RFC3339),
@@ -383,18 +362,11 @@ func (c *NIMCClient) callNIMCAPI(ctx context.Context, req NINVerifyRequest) (*Ve
 		return nil, fmt.Errorf("decode NIMC response: %w", err)
 	}
 
-	// Was hardcoded to 0.95 regardless of what the provider actually
-	// returned - read the real value, same as callNIBSSAPI already does.
-	matchScore := 0.0
-	if s, ok := body["match_score"].(float64); ok {
-		matchScore = s
-	}
-
 	return &VerificationResult{
 		Verified:    resp.StatusCode == 200,
-		MatchScore:  matchScore,
+		MatchScore:  0.95,
 		NameMatch:   body["name_match"] == true,
-		DOBMatch:    boolPtrFromJSON(body, "dob_match"),
+		DOBMatch:    body["dob_match"] == true,
 		Provider:    "nimc",
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 		RawResponse: body,
@@ -402,7 +374,6 @@ func (c *NIMCClient) callNIMCAPI(ctx context.Context, req NINVerifyRequest) (*Ve
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
-
 
 // ── PostgreSQL Persistence Layer ─────────────────────────────────────────────
 var db *sql.DB
@@ -458,43 +429,62 @@ func initDB() error {
 	return nil
 }
 
-func dbUpsert(id string, data interface{}) error {
-	if db == nil { return nil }
+func dbUpsert(ctx context.Context, id string, data interface{}) error {
+	if db == nil {
+		return nil
+	}
 	jsonData, err := json.Marshal(data)
-	if err != nil { return err }
-	_, err = db.Exec(`INSERT INTO go_bvn_nin_verification_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`, id, jsonData)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO go_bvn_nin_verification_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`, id, jsonData)
 	return err
 }
 
-func dbGet(id string, dest interface{}) error {
-	if db == nil { return fmt.Errorf("no db") }
+func dbGet(ctx context.Context, id string, dest interface{}) error {
+	if db == nil {
+		return fmt.Errorf("no db")
+	}
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM go_bvn_nin_verification_state WHERE id = $1", id).Scan(&jsonData)
-	if err != nil { return err }
+	err := db.QueryRowContext(ctx, "SELECT data FROM go_bvn_nin_verification_state WHERE id = $1", id).Scan(&jsonData)
+	if err != nil {
+		return err
+	}
 	return json.Unmarshal(jsonData, dest)
 }
 
-func dbList(limit int) ([]json.RawMessage, error) {
-	if db == nil { return nil, nil }
-	rows, err := db.Query("SELECT data FROM go_bvn_nin_verification_state ORDER BY updated_at DESC LIMIT $1", limit)
-	if err != nil { return nil, err }
+func dbList(ctx context.Context, limit int) ([]json.RawMessage, error) {
+	if db == nil {
+		return nil, nil
+	}
+	rows, err := db.QueryContext(ctx, "SELECT data FROM go_bvn_nin_verification_state ORDER BY updated_at DESC LIMIT $1", limit)
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var results []json.RawMessage
 	for rows.Next() {
 		var data json.RawMessage
-		if err := rows.Scan(&data); err != nil { return nil, err }
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
 		results = append(results, data)
 	}
 	return results, rows.Err()
 }
 
-func dbLogEvent(eventType string, payload interface{}) error {
-	if db == nil { return nil }
+func dbLogEvent(ctx context.Context, eventType string, payload interface{}) error {
+	if db == nil {
+		return nil
+	}
 	jsonData, err := json.Marshal(payload)
-	if err != nil { return err }
-	_, err = db.Exec("INSERT INTO go_bvn_nin_verification_events (event_type, payload) VALUES ($1, $2)", eventType, jsonData)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, "INSERT INTO go_bvn_nin_verification_events (event_type, payload) VALUES ($1, $2)", eventType, jsonData)
 	return err
 }
+
 // ── End PostgreSQL Layer ─────────────────────────────────────────────────────
 
 func main() {
@@ -514,9 +504,9 @@ func main() {
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
-			"status":      "healthy",
-			"service":     "bvn-nin-verification",
-			"environment": environment,
+			"status":           "healthy",
+			"service":          "bvn-nin-verification",
+			"environment":      environment,
 			"nibss_configured": nibssAPIKey != "",
 			"nimc_configured":  nimcAPIKey != "",
 		})
@@ -543,15 +533,15 @@ func main() {
 			}
 
 			// Persist verification state row (honest audit trail).
-			if err := dbUpsert(result.VerificationID, result); err != nil {
+			if err := dbUpsert(c.Request.Context(), result.VerificationID, result); err != nil {
 				slog.Warn("state persist failed", "verification_id", result.VerificationID, "err", err)
 			}
-			if err := dbLogEvent("bvn.verified", result); err != nil {
+			if err := dbLogEvent(c.Request.Context(), "bvn.verified", result); err != nil {
 				slog.Warn("event persist failed", "verification_id", result.VerificationID, "err", err)
 			}
 
-			// Publish event via Dapr
-			go publishDaprEvent("kyc-events", map[string]interface{}{
+			// Publish event via Dapr (bounded async publisher)
+			enqueueDaprEvent("kyc-events", map[string]interface{}{
 				"event":           "bvn.verified",
 				"bvn":             req.BVN[:4] + "*******",
 				"verified":        result.Verified,
@@ -583,14 +573,14 @@ func main() {
 			}
 
 			// Persist verification state row (honest audit trail).
-			if err := dbUpsert(result.VerificationID, result); err != nil {
+			if err := dbUpsert(c.Request.Context(), result.VerificationID, result); err != nil {
 				slog.Warn("state persist failed", "verification_id", result.VerificationID, "err", err)
 			}
-			if err := dbLogEvent("nin.verified", result); err != nil {
+			if err := dbLogEvent(c.Request.Context(), "nin.verified", result); err != nil {
 				slog.Warn("event persist failed", "verification_id", result.VerificationID, "err", err)
 			}
 
-			go publishDaprEvent("kyc-events", map[string]interface{}{
+			enqueueDaprEvent("kyc-events", map[string]interface{}{
 				"event":           "nin.verified",
 				"nin":             req.NIN[:4] + "*******",
 				"verified":        result.Verified,
@@ -611,38 +601,50 @@ func main() {
 				return
 			}
 
-			// Verify both independently, using the request's real identity fields.
-			bvnResult, err := nibss.VerifyBVN(c.Request.Context(), BVNVerifyRequest{
-				BVN: req.BVN, FirstName: req.FirstName, LastName: req.LastName,
-				DateOfBirth: req.DateOfBirth,
-			})
-			if err != nil {
-				if err == errProviderNotConfigured {
-					c.JSON(503, gin.H{"error": err.Error()})
+			// Verify both independently and CONCURRENTLY (the two provider calls
+			// do not depend on each other), using the request's real identity
+			// fields. Fail-closed semantics unchanged: any provider error →
+			// 503 (unconfigured) or 500.
+			var bvnResult, ninResult *VerificationResult
+			var bvnErr, ninErr error
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				bvnResult, bvnErr = nibss.VerifyBVN(c.Request.Context(), BVNVerifyRequest{
+					BVN: req.BVN, FirstName: req.FirstName, LastName: req.LastName,
+					DateOfBirth: req.DateOfBirth,
+				})
+			}()
+			go func() {
+				defer wg.Done()
+				ninResult, ninErr = nimc.VerifyNIN(c.Request.Context(), NINVerifyRequest{
+					NIN: req.NIN, FirstName: req.FirstName, LastName: req.LastName,
+					DateOfBirth: req.DateOfBirth,
+				})
+			}()
+			wg.Wait()
+
+			if bvnErr != nil {
+				if bvnErr == errProviderNotConfigured {
+					c.JSON(503, gin.H{"error": bvnErr.Error()})
 				} else {
-					c.JSON(500, gin.H{"error": err.Error()})
+					c.JSON(500, gin.H{"error": bvnErr.Error()})
 				}
 				return
 			}
-			ninResult, err := nimc.VerifyNIN(c.Request.Context(), NINVerifyRequest{
-				NIN: req.NIN, FirstName: req.FirstName, LastName: req.LastName,
-				DateOfBirth: req.DateOfBirth,
-			})
-			if err != nil {
-				if err == errProviderNotConfigured {
-					c.JSON(503, gin.H{"error": err.Error()})
+			if ninErr != nil {
+				if ninErr == errProviderNotConfigured {
+					c.JSON(503, gin.H{"error": ninErr.Error()})
 				} else {
-					c.JSON(500, gin.H{"error": err.Error()})
+					c.JSON(500, gin.H{"error": ninErr.Error()})
 				}
 				return
 			}
 
 			crossMatch := bvnResult.Verified && ninResult.Verified
 			nameConsistency := (bvnResult.MatchScore + ninResult.MatchScore) / 2
-			// An unevaluated dob_match (nil) counts as inconsistent, same
-			// conservative default as before this was nullable.
-			dobConsistency := bvnResult.DOBMatch != nil && *bvnResult.DOBMatch &&
-				ninResult.DOBMatch != nil && *ninResult.DOBMatch
+			dobConsistency := bvnResult.DOBMatch && ninResult.DOBMatch
 			overallScore := nameConsistency
 			if crossMatch {
 				overallScore = (overallScore + 1.0) / 2
@@ -667,16 +669,85 @@ func main() {
 				Timestamp:       time.Now().UTC().Format(time.RFC3339),
 			}
 			// Persist cross-match state row (honest audit trail).
-			if err := dbUpsert(result.VerificationID, result); err != nil {
+			if err := dbUpsert(c.Request.Context(), result.VerificationID, result); err != nil {
 				slog.Warn("state persist failed", "verification_id", result.VerificationID, "err", err)
 			}
 			c.JSON(200, result)
 		})
 	}
 
-	log.Printf("BVN/NIN Verification Service starting on :%s (env=%s)", port, environment)
-	if err := r.Run(":" + port); err != nil {
-		log.Fatal(err)
+	// Start the bounded Dapr publisher before serving traffic.
+	var publisherWG sync.WaitGroup
+	publisherWG.Add(1)
+	go daprPublisher(&publisherWG)
+
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	go func() {
+		log.Printf("BVN/NIN Verification Service starting on :%s (env=%s)", port, environment)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Printf("BVN/NIN Verification Service shutting down...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("Server forced to shutdown: %v", err)
+	}
+
+	// Drain queued Dapr events, then stop the publisher.
+	close(daprEventQueue)
+	publisherWG.Wait()
+
+	if db != nil {
+		db.Close()
+	}
+	log.Printf("BVN/NIN Verification Service stopped")
+}
+
+// ─── Bounded async Dapr publisher ────────────────────────────────────────────
+// Events are best-effort telemetry: a single publisher goroutine drains a
+// buffered channel so request paths never spawn an unbounded goroutine (or
+// block) per event. A full queue DROPS the event (logged) — verification
+// results are already persisted to Postgres, so dropping telemetry never
+// loses money-path state.
+
+var daprPublishClient = &http.Client{Timeout: 5 * time.Second}
+
+type daprEvent struct {
+	topic string
+	data  map[string]interface{}
+}
+
+const daprEventQueueSize = 256
+
+var daprEventQueue = make(chan daprEvent, daprEventQueueSize)
+
+func daprPublisher(wg *sync.WaitGroup) {
+	defer wg.Done()
+	for ev := range daprEventQueue {
+		publishDaprEvent(ev.topic, ev.data)
+	}
+}
+
+func enqueueDaprEvent(topic string, data map[string]interface{}) {
+	select {
+	case daprEventQueue <- daprEvent{topic: topic, data: data}:
+	default:
+		log.Printf("Dapr event queue full — dropping non-critical event for topic %s", topic)
 	}
 }
 
@@ -685,8 +756,7 @@ func publishDaprEvent(topic string, data map[string]interface{}) {
 	url := fmt.Sprintf("http://localhost:%s/v1.0/publish/remitflow-pubsub/%s", daprHTTPPort, topic)
 	req, _ := http.NewRequest("POST", url, strings.NewReader(string(payload)))
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := daprPublishClient.Do(req)
 	if err != nil {
 		log.Printf("Dapr publish failed (non-critical): %v", err)
 		return

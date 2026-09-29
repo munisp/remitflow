@@ -8,16 +8,19 @@
 // with an explicit reason), never fabricated.
 //
 // Endpoints (main server, PORT — default 8109):
-//   POST /check               permission check facade
-//   GET  /health              liveness (process up)
-//   GET  /readyz              readiness (Permify reachable)
+//
+//	POST /check               permission check facade
+//	GET  /health              liveness (process up)
+//	GET  /readyz              readiness (Permify reachable)
 //
 // Metrics server (METRICS_PORT — default 9109, see cmd/metrics.go):
-//   GET /metrics, /healthz, /readyz
+//
+//	GET /metrics, /healthz, /readyz
 //
 // Required env:
-//   PERMIFY_URL        e.g. http://permify:3476   (or PERMIFY_ENDPOINT host:port)
-//   PERMIFY_TENANT_ID  e.g. remitflow             (or PERMIFY_TENANT)
+//
+//	PERMIFY_URL        e.g. http://permify:3476   (or PERMIFY_ENDPOINT host:port)
+//	PERMIFY_TENANT_ID  e.g. remitflow             (or PERMIFY_TENANT)
 package main
 
 import (
@@ -302,11 +305,12 @@ func main() {
 	mux.HandleFunc("/readyz", cfg.handleReadyz)
 
 	server := &http.Server{
-		Addr:         ":" + cfg.port,
-		Handler:      mux,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              ":" + cfg.port,
+		Handler:           mux,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {

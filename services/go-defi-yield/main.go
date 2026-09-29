@@ -37,10 +37,10 @@ func getEnv(k, d string) string {
 }
 
 var (
-	port             = getEnv("PORT", "8131")
-	priceOracleURL   = getEnv("PRICE_ORACLE_URL", "http://rust-price-oracle:8130")
-	tigerBeetleURL   = getEnv("TIGERBEETLE_BRIDGE_URL", "http://rust-tigerbeetle-bridge:8112")
-	coreAPIURL       = getEnv("CORE_API_URL", "http://server:5000")
+	port           = getEnv("PORT", "8131")
+	priceOracleURL = getEnv("PRICE_ORACLE_URL", "http://rust-price-oracle:8130")
+	tigerBeetleURL = getEnv("TIGERBEETLE_BRIDGE_URL", "http://rust-tigerbeetle-bridge:8112")
+	coreAPIURL     = getEnv("CORE_API_URL", "http://server:5000")
 )
 
 // ── Metrics ───────────────────────────────────────────────────────────────────
@@ -53,17 +53,17 @@ var (
 
 // ── Protocol Definitions ──────────────────────────────────────────────────────
 type Protocol struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Chain         string   `json:"chain"`
-	Category      string   `json:"category"` // lending | vault | amm
-	TVLMillions   float64  `json:"tvl_millions"`
-	AuditScore    float64  `json:"audit_score"`    // 0-100
-	AgeMonths     int      `json:"age_months"`
-	Stablecoins   []string `json:"stablecoins"`
-	ContractAddr  string   `json:"contract_address"`
-	APIEndpoint   string   `json:"api_endpoint,omitempty"`
-	Active        bool     `json:"active"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Chain        string   `json:"chain"`
+	Category     string   `json:"category"` // lending | vault | amm
+	TVLMillions  float64  `json:"tvl_millions"`
+	AuditScore   float64  `json:"audit_score"` // 0-100
+	AgeMonths    int      `json:"age_months"`
+	Stablecoins  []string `json:"stablecoins"`
+	ContractAddr string   `json:"contract_address"`
+	APIEndpoint  string   `json:"api_endpoint,omitempty"`
+	Active       bool     `json:"active"`
 }
 
 type YieldRate struct {
@@ -72,7 +72,7 @@ type YieldRate struct {
 	APY            float64 `json:"apy"`
 	BaseAPY        float64 `json:"base_apy"`
 	RewardAPY      float64 `json:"reward_apy"`
-	RiskScore      float64 `json:"risk_score"`      // 0-100 (lower = safer)
+	RiskScore      float64 `json:"risk_score"` // 0-100 (lower = safer)
 	RiskAdjAPY     float64 `json:"risk_adj_apy"`
 	TVLMillions    float64 `json:"tvl_millions"`
 	UtilizationPct float64 `json:"utilization_pct"`
@@ -80,19 +80,19 @@ type YieldRate struct {
 }
 
 type Position struct {
-	ID              string  `json:"id"`
-	UserID          int64   `json:"user_id"`
-	ProtocolID      string  `json:"protocol_id"`
-	Symbol          string  `json:"symbol"`
-	Chain           string  `json:"chain"`
-	Principal       float64 `json:"principal"`
-	CurrentValue    float64 `json:"current_value"`
-	AccruedYield    float64 `json:"accrued_yield"`
-	APY             float64 `json:"apy"`
-	AutoCompound    bool    `json:"auto_compound"`
-	LastCompoundAt  int64   `json:"last_compound_at"`
-	EnteredAt       int64   `json:"entered_at"`
-	Status          string  `json:"status"` // active | withdrawn | emergency_exit
+	ID             string  `json:"id"`
+	UserID         int64   `json:"user_id"`
+	ProtocolID     string  `json:"protocol_id"`
+	Symbol         string  `json:"symbol"`
+	Chain          string  `json:"chain"`
+	Principal      float64 `json:"principal"`
+	CurrentValue   float64 `json:"current_value"`
+	AccruedYield   float64 `json:"accrued_yield"`
+	APY            float64 `json:"apy"`
+	AutoCompound   bool    `json:"auto_compound"`
+	LastCompoundAt int64   `json:"last_compound_at"`
+	EnteredAt      int64   `json:"entered_at"`
+	Status         string  `json:"status"` // active | withdrawn | emergency_exit
 }
 
 type DepositRequest struct {
@@ -121,14 +121,14 @@ var (
 
 func init() {
 	protocols = []Protocol{
-		{ID: "aave-v3-eth",      Name: "Aave v3",          Chain: "ethereum",  Category: "lending", TVLMillions: 12500, AuditScore: 95, AgeMonths: 36, Stablecoins: []string{"USDC","USDT","DAI","PYUSD"}, ContractAddr: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2", Active: true},
-		{ID: "compound-v3-eth",  Name: "Compound v3",      Chain: "ethereum",  Category: "lending", TVLMillions: 3200,  AuditScore: 93, AgeMonths: 48, Stablecoins: []string{"USDC","USDT"}, ContractAddr: "0xc3d688B66703497DAA19211EEdff47f25384cdc3", Active: true},
-		{ID: "yearn-eth",        Name: "Yearn Finance",    Chain: "ethereum",  Category: "vault",   TVLMillions: 450,   AuditScore: 88, AgeMonths: 54, Stablecoins: []string{"USDC","USDT","DAI"}, ContractAddr: "0xa354F35829Ae975e850e23e9615b11Da1B3dC4DE", Active: true},
-		{ID: "morpho-eth",       Name: "Morpho Blue",      Chain: "ethereum",  Category: "lending", TVLMillions: 1800,  AuditScore: 91, AgeMonths: 18, Stablecoins: []string{"USDC","USDT","DAI"}, ContractAddr: "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb", Active: true},
-		{ID: "spark-eth",        Name: "Spark Protocol",   Chain: "ethereum",  Category: "lending", TVLMillions: 2100,  AuditScore: 90, AgeMonths: 20, Stablecoins: []string{"DAI","USDC"}, ContractAddr: "0xC13e21B648A5Ee794902342038FF3aDAB66BE987", Active: true},
-		{ID: "aave-v3-poly",     Name: "Aave v3 Polygon",  Chain: "polygon",   Category: "lending", TVLMillions: 850,   AuditScore: 94, AgeMonths: 30, Stablecoins: []string{"USDC","USDT","DAI"}, ContractAddr: "0x794a61358D6845594F94dc1DB02A252b5b4814aD", Active: true},
-		{ID: "aave-v3-arb",      Name: "Aave v3 Arbitrum", Chain: "arbitrum",  Category: "lending", TVLMillions: 1100,  AuditScore: 94, AgeMonths: 28, Stablecoins: []string{"USDC","USDT","DAI"}, ContractAddr: "0x794a61358D6845594F94dc1DB02A252b5b4814aD", Active: true},
-		{ID: "compound-v3-base", Name: "Compound v3 Base", Chain: "base",      Category: "lending", TVLMillions: 620,   AuditScore: 92, AgeMonths: 14, Stablecoins: []string{"USDC"}, ContractAddr: "0xb125E6687d4313864e53df431d5425969c15Eb2", Active: true},
+		{ID: "aave-v3-eth", Name: "Aave v3", Chain: "ethereum", Category: "lending", TVLMillions: 12500, AuditScore: 95, AgeMonths: 36, Stablecoins: []string{"USDC", "USDT", "DAI", "PYUSD"}, ContractAddr: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2", Active: true},
+		{ID: "compound-v3-eth", Name: "Compound v3", Chain: "ethereum", Category: "lending", TVLMillions: 3200, AuditScore: 93, AgeMonths: 48, Stablecoins: []string{"USDC", "USDT"}, ContractAddr: "0xc3d688B66703497DAA19211EEdff47f25384cdc3", Active: true},
+		{ID: "yearn-eth", Name: "Yearn Finance", Chain: "ethereum", Category: "vault", TVLMillions: 450, AuditScore: 88, AgeMonths: 54, Stablecoins: []string{"USDC", "USDT", "DAI"}, ContractAddr: "0xa354F35829Ae975e850e23e9615b11Da1B3dC4DE", Active: true},
+		{ID: "morpho-eth", Name: "Morpho Blue", Chain: "ethereum", Category: "lending", TVLMillions: 1800, AuditScore: 91, AgeMonths: 18, Stablecoins: []string{"USDC", "USDT", "DAI"}, ContractAddr: "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb", Active: true},
+		{ID: "spark-eth", Name: "Spark Protocol", Chain: "ethereum", Category: "lending", TVLMillions: 2100, AuditScore: 90, AgeMonths: 20, Stablecoins: []string{"DAI", "USDC"}, ContractAddr: "0xC13e21B648A5Ee794902342038FF3aDAB66BE987", Active: true},
+		{ID: "aave-v3-poly", Name: "Aave v3 Polygon", Chain: "polygon", Category: "lending", TVLMillions: 850, AuditScore: 94, AgeMonths: 30, Stablecoins: []string{"USDC", "USDT", "DAI"}, ContractAddr: "0x794a61358D6845594F94dc1DB02A252b5b4814aD", Active: true},
+		{ID: "aave-v3-arb", Name: "Aave v3 Arbitrum", Chain: "arbitrum", Category: "lending", TVLMillions: 1100, AuditScore: 94, AgeMonths: 28, Stablecoins: []string{"USDC", "USDT", "DAI"}, ContractAddr: "0x794a61358D6845594F94dc1DB02A252b5b4814aD", Active: true},
+		{ID: "compound-v3-base", Name: "Compound v3 Base", Chain: "base", Category: "lending", TVLMillions: 620, AuditScore: 92, AgeMonths: 14, Stablecoins: []string{"USDC"}, ContractAddr: "0xb125E6687d4313864e53df431d5425969c15Eb2", Active: true},
 	}
 
 	yields = make(map[string][]YieldRate)
@@ -226,6 +226,7 @@ func depositHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req DepositRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", 400)
 		return
@@ -295,15 +296,15 @@ func depositHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"position_id": pos.ID,
-		"protocol_id": protocolID,
-		"symbol":      req.Symbol,
-		"amount":      req.Amount,
-		"apy":         pos.APY,
+		"position_id":   pos.ID,
+		"protocol_id":   protocolID,
+		"symbol":        req.Symbol,
+		"amount":        req.Amount,
+		"apy":           pos.APY,
 		"auto_compound": req.AutoCompound,
-		"chain":       chain,
-		"status":      "active",
-		"entered_at":  pos.EnteredAt,
+		"chain":         chain,
+		"status":        "active",
+		"entered_at":    pos.EnteredAt,
 	})
 }
 
@@ -314,6 +315,7 @@ func withdrawHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req WithdrawRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", 400)
 		return
@@ -343,11 +345,11 @@ func withdrawHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"position_id":     req.PositionID,
+		"position_id":      req.PositionID,
 		"withdrawn_amount": withdrawAmount,
-		"accrued_yield":   pos.AccruedYield,
-		"status":          "withdrawn",
-		"emergency":       req.Emergency,
+		"accrued_yield":    pos.AccruedYield,
+		"status":           "withdrawn",
+		"emergency":        req.Emergency,
 	})
 }
 
@@ -401,7 +403,12 @@ func yieldRatesHandler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"symbol": symbol,
 			"rates":  rates,
-			"best":   func() interface{} { if len(rates) > 0 { return rates[0] }; return nil }(),
+			"best": func() interface{} {
+				if len(rates) > 0 {
+					return rates[0]
+				}
+				return nil
+			}(),
 		})
 	} else {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -450,13 +457,13 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":             "healthy",
-		"service":            "go-defi-yield",
-		"protocols":          len(protocols),
-		"positions":          posCount,
-		"deposits_total":     depositsTotal.Load(),
-		"withdrawals_total":  withdrawalsTotal.Load(),
-		"compounds_total":    compoundsTotal.Load(),
+		"status":            "healthy",
+		"service":           "go-defi-yield",
+		"protocols":         len(protocols),
+		"positions":         posCount,
+		"deposits_total":    depositsTotal.Load(),
+		"withdrawals_total": withdrawalsTotal.Load(),
+		"compounds_total":   compoundsTotal.Load(),
 	})
 }
 
@@ -478,25 +485,33 @@ func main() {
 	go func() {
 		t := time.NewTicker(5 * time.Minute)
 		defer t.Stop()
-		for { select { case <-ctx.Done(): return; case <-t.C: refreshYields() } }
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				refreshYields()
+			}
+		}
 	}()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health",          healthHandler)
-	mux.HandleFunc("/livez",           func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/readyz",          func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/metrics",         metricsHandler)
-	mux.HandleFunc("/yield/rates",     yieldRatesHandler)
-	mux.HandleFunc("/yield/deposit",   depositHandler)
-	mux.HandleFunc("/yield/withdraw",  withdrawHandler)
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/metrics", metricsHandler)
+	mux.HandleFunc("/yield/rates", yieldRatesHandler)
+	mux.HandleFunc("/yield/deposit", depositHandler)
+	mux.HandleFunc("/yield/withdraw", withdrawHandler)
 	mux.HandleFunc("/yield/positions", positionsHandler)
 
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	slog.Info("[DeFiYield] Ready", "addr", srv.Addr)
 	if err := srv.ListenAndServe(); err != nil {

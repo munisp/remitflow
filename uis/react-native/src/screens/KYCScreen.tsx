@@ -64,20 +64,27 @@ export default function KYCScreen() {
 
   const { data: kycStatus, refetch: refetchStatus } = trpc.kyc.status.useQuery();
   const uploadMutation = trpc.kyc.uploadDocument.useMutation({
-    onError: (e) => Alert.alert('Upload failed', e.message),
+    onError: (e: any) => Alert.alert('Upload failed', e.message),
   });
   const profileMutation = trpc.profile.update.useMutation();
 
   const currentTier = kycStatus?.currentTier ?? 'tier0';
   const documents = kycStatus?.documents ?? [];
   const uploadedIdDoc = documents.find(
-    (d) => d.docType === form.idType && (d.status === 'pending' || d.status === 'under_review' || d.status === 'approved'),
+    (d: any) => d.docType === form.idType && (d.status === 'pending' || d.status === 'under_review' || d.status === 'approved'),
   );
 
   const handlePickAndUpload = async () => {
     try {
+      // wave14 perf (M4): images only. The PDF path base64-encoded entire
+      // multi-MB documents into memory and through the tRPC JSON payload;
+      // identity documents are photos in practice, so PDF support is dropped.
+      // NOTE: client-side downscale/compression before base64 would cut
+      // upload payloads further but requires an image-manipulation native dep
+      // (e.g. react-native-image-resizer) — wave14 forbids new deps, so that
+      // optimization is DEFERRED, not silently skipped.
       const [file] = await DocumentPicker.pick({
-        type: [DocumentPicker.types.images, DocumentPicker.types.pdf],
+        type: [DocumentPicker.types.images],
       });
       if (!file?.uri) return;
       const fileBase64 = await readUriAsBase64(file.uri);

@@ -7,6 +7,10 @@ import { resolveTenantContext, type TenantContext } from "../tenantMiddleware";
 import { runWithTenantContext, getRequestTenantContext } from "./tenantGuc";
 import { setTenantSpanAttributes, recordTenantRequest } from "../telemetry/tenantContext";
 import { logger } from "./logger";
+// W14-C1: hoisted to module scope — dynamic import() per request forced a
+// module-registry lookup on every audited/rate-limited call. No import cycle:
+// polyglotClient depends on tenantGuc/db, neither of which imports trpc.
+import { sendAuditLog, checkRateLimit } from "./polyglotClient";
 
 const trpcTracer = trace.getTracer("remitflow-trpc", "2.0.0");
 
@@ -187,21 +191,17 @@ const auditMiddleware = t.middleware(async opts => {
   } finally {
     // Fire-and-forget — never block the response
     if (ctx.user) {
-      import("./polyglotClient")
-        .then(({ sendAuditLog }) =>
-          sendAuditLog({
-            userId: ctx.user!.id,
-            action: `${type.toUpperCase()}:${path}`,
-            resource: path.split(".")[0],
-            resourceId: undefined,
-            ipAddress: (ctx.req as any)?.ip ?? undefined,
-            severity: success ? "info" : "warning",
-            success,
-            errorMessage,
-            details: { durationMs: Date.now() - start },
-          })
-        )
-        .catch(() => {});
+      void sendAuditLog({
+        userId: ctx.user.id,
+        action: `${type.toUpperCase()}:${path}`,
+        resource: path.split(".")[0],
+        resourceId: undefined,
+        ipAddress: (ctx.req as any)?.ip ?? undefined,
+        severity: success ? "info" : "warning",
+        success,
+        errorMessage,
+        details: { durationMs: Date.now() - start },
+      }).catch(() => {});
     }
   }
 });
@@ -268,8 +268,7 @@ function makeRateLimitMiddleware(limit: number, windowSecs: number) {
     const { ctx, next, path } = opts;
     if (ctx.user) {
       const key = `trpc:${path}:user:${ctx.user.id}`;
-      const result = await import("./polyglotClient")
-        .then(({ checkRateLimit }) => checkRateLimit(key, limit, windowSecs))
+      const result = await checkRateLimit(key, limit, windowSecs)
         .catch(() => null);
       if (result === null) {
         // Sidecar unavailable — fail closed into an in-process sliding window

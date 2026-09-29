@@ -41,12 +41,19 @@ global_rules:
         sampler:
           name: trace_id_ratio
           options:
-            fraction: 0.5        # gateway layer samples 50%; TS core re-samples
+            # wave14 (SPEC-wave14 §7.2): 50% gateway sampling generates far more
+            # span volume than is useful for latency tuning and adds export
+            # overhead on the request path. 2% keeps tail/percentile visibility
+            # at a fraction of the cost; raise temporarily for incident debug.
+            fraction: 0.02       # gateway layer samples 2%; TS core re-samples
         collector:
           address: otel-collector:4318   # OTLP/HTTP receiver (docker-compose.observability.yml)
           request_timeout: 3
         batch_span_processor:
-          drop_on_queue_full: false
+          # wave14 (SPEC-wave14 §7.2): drop spans when the export queue is full
+          # instead of applying backpressure into the request path — telemetry
+          # must never slow money paths (SPEC §0.2 fail-closed constraint).
+          drop_on_queue_full: true
           max_queue_size: 2048
           batch_timeout: 5
           inactive_timeout: 2

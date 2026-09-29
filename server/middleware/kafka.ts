@@ -218,10 +218,11 @@ export async function getKafkaProducer(): Promise<Producer | null> {
   try {
     _producer = getRealKafka().producer({
       allowAutoTopicCreation: true,
-      // Idempotent producer: exactly-once per partition. Requires
-      // maxInFlightRequests=1 so retries cannot reorder batches.
+      // Idempotent producer: exactly-once per partition. kafkajs >=2.2 keeps
+      // per-partition sequencing safe up to maxInFlightRequests=5 with the
+      // idempotent producer (broker-enforced sequence numbers).
       idempotent: true,
-      maxInFlightRequests: 1,
+      maxInFlightRequests: 5,
     } as Parameters<Kafka['producer']>[0]);
     await _producer.connect();
     _isConnected = true;
@@ -324,14 +325,12 @@ export async function publishEvent<T>(topic: KafkaTopic | string, key: string, p
     };
     // W11-C2: W3C traceparent/tracestate (+ x-tenant-id) for cross-service traces
     injectTraceContext(headers);
+    const value = JSON.stringify({ ...(payload as object), _publishedAt: new Date().toISOString() });
     await p.send({
       topic,
-      compression: CompressionTypes.GZIP,
-      messages: [{
-        key,
-        value: JSON.stringify({ ...(payload as object), _publishedAt: new Date().toISOString() }),
-        headers,
-      }],
+      // W14: GZIP costs more than it saves below ~1KB — skip it for small payloads.
+      compression: Buffer.byteLength(value) < 1024 ? CompressionTypes.None : CompressionTypes.GZIP,
+      messages: [{ key, value, headers }],
     });
     return true;
   } catch (err) {
@@ -341,6 +340,56 @@ export async function publishEvent<T>(topic: KafkaTopic | string, key: string, p
       await sendToDLQ(topic, key, JSON.stringify(payload), (err as Error).message).catch(() => {});
     }
     return false;
+  }
+}
+
+/**
+ * W14: batch publish — one sendBatch round trip for many messages.
+ * Each entry carries its own key/payload; the deterministic idempotency header
+ * is per-message (topic:key), identical to publishEvent semantics. GZIP is
+ * applied per batch only when the combined payload exceeds ~1KB.
+ * Returns the number of messages accepted by the producer (0 when unavailable).
+ */
+export async function publishBatch<T>(
+  topic: KafkaTopic | string,
+  msgs: Array<{ key: string; payload: T }>,
+): Promise<number> {
+  if (msgs.length === 0) return 0;
+  const p = await getKafkaProducer();
+  if (!p) {
+    if (process.env.NODE_ENV !== "production") {
+      logger.info(`[Kafka:DEV] batch ${topic} x${msgs.length}`);
+    }
+    return 0;
+  }
+  const now = new Date().toISOString();
+  let totalBytes = 0;
+  const messages = msgs.map(({ key, payload }) => {
+    if (typeof payload === 'object' && payload !== null) {
+      validateEventSchema(topic, payload as Record<string, unknown>);
+    }
+    const value = JSON.stringify({ ...(payload as object), _publishedAt: now });
+    totalBytes += Buffer.byteLength(value);
+    const headers: Record<string, Buffer> = {
+      'x-schema-version': Buffer.from('v1'),
+      'x-source': Buffer.from('remitflow-app'),
+      'x-idempotency-key': Buffer.from(`${topic}:${key}`),
+    };
+    injectTraceContext(headers);
+    return { key, value, headers };
+  });
+  try {
+    await p.sendBatch({
+      topicMessages: [{
+        topic,
+        messages,
+        compression: totalBytes < 1024 ? CompressionTypes.None : CompressionTypes.GZIP,
+      }],
+    });
+    return messages.length;
+  } catch (err) {
+    logger.error("[Kafka] Batch publish failed:", topic, (err as Error).message);
+    return 0;
   }
 }
 

@@ -75,14 +75,14 @@ type TransferResponse struct {
 
 // ─── ISO 20022 pacs.002 Status Report ─────────────────────────────────────────
 type TransferStatus struct {
-	TransactionID     string    `json:"transaction_id"`
-	MsgID             string    `json:"msg_id"`
-	Status            string    `json:"status"`
-	StatusDescription string    `json:"status_description"`
+	TransactionID     string     `json:"transaction_id"`
+	MsgID             string     `json:"msg_id"`
+	Status            string     `json:"status"`
+	StatusDescription string     `json:"status_description"`
 	SettledAt         *time.Time `json:"settled_at,omitempty"`
-	ErrorCode         string    `json:"error_code,omitempty"`
-	ErrorDescription  string    `json:"error_description,omitempty"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ErrorCode         string     `json:"error_code,omitempty"`
+	ErrorDescription  string     `json:"error_description,omitempty"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 // ─── ISO 20022 camt.056 Cancellation ──────────────────────────────────────────

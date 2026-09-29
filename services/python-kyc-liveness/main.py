@@ -23,6 +23,26 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
+
+# ── Shared HTTP clients (SPEC-wave14 §4.6) ────────────────────────────────────
+# Timeout-keyed pool of module-level AsyncClients: outbound calls previously
+# constructed a fresh client per request (TCP/TLS + pool setup each time).
+# Clients live for the process lifetime; pools are capped at 100 connections.
+_http_clients: dict = {}
+
+
+def get_http_client(timeout: float = 5.0, **kwargs) -> httpx.AsyncClient:
+    key = (float(timeout), tuple(sorted(kwargs.items())))
+    client = _http_clients.get(key)
+    if client is None:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout),
+            limits=httpx.Limits(max_connections=100),
+            **kwargs,
+        )
+        _http_clients[key] = client
+    return client
+
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 
@@ -51,7 +71,7 @@ _db_pool = None
 def _get_db():
     global _db_pool
     if _db_pool is None:
-        _db_pool = psycopg2.connect(_DB_URL)
+        _db_pool = psycopg2.connect(_DB_URL, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
         _db_pool.autocommit = True
         with _db_pool.cursor() as cur:
             cur.execute("""
@@ -824,9 +844,9 @@ async def health():
         pass
 
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            r = await client.get(f"http://localhost:{DAPR_HTTP_PORT}/v1.0/healthz")
-            dapr_ok = r.status_code == 204
+        client = get_http_client(timeout=2.0)  # shared client (SPEC-wave14 §4.6)
+        r = await client.get(f"http://localhost:{DAPR_HTTP_PORT}/v1.0/healthz")
+        dapr_ok = r.status_code == 204
     except Exception:
         pass
 
@@ -1027,15 +1047,15 @@ async def match_faces(body: dict):
 async def _publish_result(response: LivenessResponse):
     """Publish liveness result to Dapr pub/sub (non-blocking fire-and-forget)."""
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(
-                f"http://localhost:{DAPR_HTTP_PORT}/v1.0/publish/{DAPR_PUBSUB}/kyc.liveness.result",
-                json=response.model_dump(),
-            )
+        client = get_http_client(timeout=5.0)  # shared client (SPEC-wave14 §4.6)
+        await client.post(
+            f"http://localhost:{DAPR_HTTP_PORT}/v1.0/publish/{DAPR_PUBSUB}/kyc.liveness.result",
+            json=response.model_dump(),
+        )
     except Exception as e:
         logger.warning(f"[Dapr] Publish failed (non-critical): {e}")
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8095")))
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8095")), workers=int(os.getenv("UVICORN_WORKERS", "1")))  # SPEC-wave14 §4.6: env-configurable workers (default 1)

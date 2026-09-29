@@ -77,32 +77,32 @@ type FXRate struct {
 }
 
 type CompositeQuote struct {
-	QuoteID          string    `json:"quoteId"`
-	FromCurrency     string    `json:"fromCurrency"`
-	ToCurrency       string    `json:"toCurrency"`
-	SendAmount       float64   `json:"sendAmount"`
-	ReceiveAmount    float64   `json:"receiveAmount"`
-	MarkLaneRate     float64   `json:"markLaneRate"`
-	RemitFlowRate    float64   `json:"remitFlowRate"`
-	CompositeRate    float64   `json:"compositeRate"`
-	MarkLaneFee      float64   `json:"markLaneFee"`
-	RemitFlowFee     float64   `json:"remitFlowFee"`
-	TotalFee         float64   `json:"totalFee"`
-	MarkLaneSpread   float64   `json:"markLaneSpread"`
-	RemitFlowSpread  float64   `json:"remitFlowSpread"`
-	BestRoute        string    `json:"bestRoute"`
-	ExpiresAt        time.Time `json:"expiresAt"`
-	CreatedAt        time.Time `json:"createdAt"`
+	QuoteID         string    `json:"quoteId"`
+	FromCurrency    string    `json:"fromCurrency"`
+	ToCurrency      string    `json:"toCurrency"`
+	SendAmount      float64   `json:"sendAmount"`
+	ReceiveAmount   float64   `json:"receiveAmount"`
+	MarkLaneRate    float64   `json:"markLaneRate"`
+	RemitFlowRate   float64   `json:"remitFlowRate"`
+	CompositeRate   float64   `json:"compositeRate"`
+	MarkLaneFee     float64   `json:"markLaneFee"`
+	RemitFlowFee    float64   `json:"remitFlowFee"`
+	TotalFee        float64   `json:"totalFee"`
+	MarkLaneSpread  float64   `json:"markLaneSpread"`
+	RemitFlowSpread float64   `json:"remitFlowSpread"`
+	BestRoute       string    `json:"bestRoute"`
+	ExpiresAt       time.Time `json:"expiresAt"`
+	CreatedAt       time.Time `json:"createdAt"`
 }
 
 type CorridorRoute struct {
-	CorridorID    string  `json:"corridorId"`
-	FromCurrency  string  `json:"fromCurrency"`
-	ToCurrency    string  `json:"toCurrency"`
-	IntermediateFX string `json:"intermediateFx"`
-	Rail          string  `json:"rail"`
-	DeliveryTime  string  `json:"deliveryTime"`
-	EstimatedFee  float64 `json:"estimatedFee"`
+	CorridorID     string  `json:"corridorId"`
+	FromCurrency   string  `json:"fromCurrency"`
+	ToCurrency     string  `json:"toCurrency"`
+	IntermediateFX string  `json:"intermediateFx"`
+	Rail           string  `json:"rail"`
+	DeliveryTime   string  `json:"deliveryTime"`
+	EstimatedFee   float64 `json:"estimatedFee"`
 }
 
 type NostroPosition struct {
@@ -263,13 +263,13 @@ func (rc *RateCache) GetAll() map[string]FXRate {
 // ─── FX Bridge Service ───────────────────────────────────────────────────────
 
 type FXBridgeService struct {
-	config    Config
-	cache     *RateCache
-	mlCB      *CircuitBreaker
-	rfCB      *CircuitBreaker
-	routes    []CorridorRoute
-	positions map[string]NostroPosition
-	posMu     sync.RWMutex
+	config      Config
+	cache       *RateCache
+	mlCB        *CircuitBreaker
+	rfCB        *CircuitBreaker
+	routes      []CorridorRoute
+	positions   map[string]NostroPosition
+	posMu       sync.RWMutex
 	settlements []SettlementInstruction
 	settleMu    sync.RWMutex
 }
@@ -521,10 +521,10 @@ func (s *FXBridgeService) emitKafkaEvent(topic string, data map[string]interface
 
 func (s *FXBridgeService) handleHealth(w http.ResponseWriter, r *http.Request) {
 	jsonResp(w, 200, map[string]interface{}{
-		"status":  "healthy",
-		"service": "go-marklane-fx-bridge",
-		"version": "1.0.0",
-		"uptime":  time.Since(startTime).String(),
+		"status":       "healthy",
+		"service":      "go-marklane-fx-bridge",
+		"version":      "1.0.0",
+		"uptime":       time.Since(startTime).String(),
 		"rates_cached": len(s.cache.GetAll()),
 	})
 }
@@ -539,6 +539,7 @@ func (s *FXBridgeService) handleQuote(w http.ResponseWriter, r *http.Request) {
 		Corridor string  `json:"corridor"`
 		Amount   float64 `json:"amount"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResp(w, 400, map[string]string{"error": "invalid request body"})
 		return
@@ -609,10 +610,11 @@ func (s *FXBridgeService) handleUpdatePosition(w http.ResponseWriter, r *http.Re
 	}
 
 	var req struct {
-		Currency        string  `json:"currency"`
-		MarkLaneDelta   float64 `json:"markLaneDelta"`
-		RemitFlowDelta  float64 `json:"remitFlowDelta"`
+		Currency       string  `json:"currency"`
+		MarkLaneDelta  float64 `json:"markLaneDelta"`
+		RemitFlowDelta float64 `json:"remitFlowDelta"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResp(w, 400, map[string]string{"error": "invalid request body"})
 		return
@@ -793,11 +795,12 @@ func main() {
 
 	port, _ := strconv.Atoi(cfg.Port)
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", port),
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              fmt.Sprintf(":%d", port),
+		Handler:           mux,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -85,7 +85,7 @@ db_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 def get_db_pool() -> psycopg2.pool.ThreadedConnectionPool:
     global db_pool
     if db_pool is None:
-        db_pool = psycopg2.pool.ThreadedConnectionPool(2, 10, DATABASE_URL)
+        db_pool = psycopg2.pool.ThreadedConnectionPool(2, 10, DATABASE_URL, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
         _init_tables()
     return db_pool
 

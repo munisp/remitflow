@@ -112,9 +112,9 @@ func TestCallCirclePayout_FailClosed(t *testing.T) {
 
 // Refund against an unknown original operation is NOT_FOUND, never success.
 func TestExecuteRefund_UnknownOperationRejected(t *testing.T) {
-	mu.Lock()
+	settlementsMu.Lock()
 	settlements = make(map[string]*SettlementResult)
-	mu.Unlock()
+	settlementsMu.Unlock()
 	_, err := executeRefund(SettlementRequest{
 		OperationID: "ref-1",
 		Provider:    "circle",
@@ -133,10 +133,10 @@ func TestExecuteRefund_UnknownOperationRejected(t *testing.T) {
 // Refund of a known operation is an honest NOT_SUPPORTED (no provider client
 // wires a refund path) — never a fabricated successful refund.
 func TestExecuteRefund_HonestNotSupported(t *testing.T) {
-	mu.Lock()
+	settlementsMu.Lock()
 	settlements = make(map[string]*SettlementResult)
 	settlements["op-9"] = &SettlementResult{OperationID: "op-9", Provider: "circle", Status: "submitted"}
-	mu.Unlock()
+	settlementsMu.Unlock()
 	_, err := executeRefund(SettlementRequest{
 		OperationID: "ref-2",
 		Provider:    "circle",

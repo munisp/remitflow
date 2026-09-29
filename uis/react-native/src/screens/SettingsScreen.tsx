@@ -9,7 +9,7 @@ export default function SettingsScreen() {
   const [editMode, setEditMode] = useState(false);
   const { data: profile, isLoading, refetch } = trpc.profile.get.useQuery();
   const [form, setForm] = useState({ name: '', phone: '', email: '' });
-  const updateMutation = trpc.profile.update.useMutation({ onSuccess: () => { setEditMode(false); refetch(); }, onError: (e) => Alert.alert('Error', e.message) });
+  const updateMutation = trpc.profile.update.useMutation({ onSuccess: () => { setEditMode(false); refetch(); }, onError: (e: any) => Alert.alert('Error', e.message) });
   const { data: security } = trpc.security.settings.useQuery();
   React.useEffect(() => { if (profile) setForm({ name: profile.name ?? '', phone: profile.phone ?? '', email: profile.email ?? '' }); }, [profile]);
   return (

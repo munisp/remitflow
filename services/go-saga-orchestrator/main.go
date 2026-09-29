@@ -69,17 +69,17 @@ type SagaStep struct {
 }
 
 type Saga struct {
-	ID           string         `json:"id"`
-	SagaType     string         `json:"saga_type"`
-	Status       SagaStatus     `json:"status"`
-	Steps        []SagaStep     `json:"steps"`
-	Input        map[string]any `json:"input"`
-	CorrelationID string        `json:"correlation_id"`
-	UserID       string         `json:"user_id"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
-	CompletedAt  *time.Time     `json:"completed_at,omitempty"`
-	FailedAt     *time.Time     `json:"failed_at,omitempty"`
+	ID            string         `json:"id"`
+	SagaType      string         `json:"saga_type"`
+	Status        SagaStatus     `json:"status"`
+	Steps         []SagaStep     `json:"steps"`
+	Input         map[string]any `json:"input"`
+	CorrelationID string         `json:"correlation_id"`
+	UserID        string         `json:"user_id"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	CompletedAt   *time.Time     `json:"completed_at,omitempty"`
+	FailedAt      *time.Time     `json:"failed_at,omitempty"`
 }
 
 // ─── Saga Definitions ─────────────────────────────────────────────────────────
@@ -191,6 +191,7 @@ func (s *Server) handleStartSaga(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var input map[string]any
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		http.Error(w, `{"error":"invalid_body"}`, http.StatusBadRequest)
 		return
@@ -253,9 +254,9 @@ func (s *Server) handleGetSaga(w http.ResponseWriter, r *http.Request) {
 
 	var (
 		id, sagaType, status, correlationID, userID string
-		stepsJSON, inputJSON                         []byte
-		createdAt, updatedAt                         time.Time
-		completedAt, failedAt                        *time.Time
+		stepsJSON, inputJSON                        []byte
+		createdAt, updatedAt                        time.Time
+		completedAt, failedAt                       *time.Time
 	)
 
 	err := s.db.QueryRowContext(r.Context(),
@@ -346,10 +347,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"status":   status,
-		"service":  "go-saga-orchestrator",
-		"db_ok":    dbOK,
-		"time":     time.Now().UTC(),
+		"status":  status,
+		"service": "go-saga-orchestrator",
+		"db_ok":   dbOK,
+		"time":    time.Now().UTC(),
 	})
 }
 
@@ -525,11 +526,12 @@ func main() {
 	mux.Handle("GET /metrics", promhttp.Handler())
 
 	httpSrv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {

@@ -28,7 +28,7 @@ export default function PaymentRailsScreen() {
 
       <View style={styles.railsGrid}>
         {RAILS.map((rail) => {
-          const status = railStatus?.find(r => r.id === rail.id);
+          const status = railStatus?.find((r: any) => r.id === rail.id);
           const isActive = status?.active !== false;
           return (
             <TouchableOpacity

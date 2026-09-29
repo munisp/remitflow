@@ -16,13 +16,13 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	_ "github.com/lib/pq"
-	"context"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -34,11 +34,9 @@ import (
 	"github.com/remitflow/cips-adapter/internal/middleware"
 )
 
-
 var _processStartTime = time.Now()
 
 var db *sql.DB
-
 
 func initDB() error {
 	dbURL := os.Getenv("DATABASE_URL")
@@ -82,11 +80,14 @@ func initDB() error {
 
 // dbUpsert stores or updates a record in the service state table
 func dbUpsert(id string, data interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO cips_adapter_state (id, data, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
@@ -96,8 +97,11 @@ func dbUpsert(id string, data interface{}) error {
 
 // dbGet retrieves a record from the service state table
 func dbGet(id string, dest interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM cips_adapter_state WHERE id = $1", id).Scan(&jsonData)
+	err := db.QueryRowContext(ctx, "SELECT data FROM cips_adapter_state WHERE id = $1", id).Scan(&jsonData)
 	if err != nil {
 		return err
 	}
@@ -106,7 +110,10 @@ func dbGet(id string, dest interface{}) error {
 
 // dbList retrieves all records from the service state table
 func dbList(limit int) ([]json.RawMessage, error) {
-	rows, err := db.Query("SELECT data FROM cips_adapter_state ORDER BY updated_at DESC LIMIT $1", limit)
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT data FROM cips_adapter_state ORDER BY updated_at DESC LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -124,22 +131,27 @@ func dbList(limit int) ([]json.RawMessage, error) {
 
 // dbLogEvent stores an event in the events table
 func dbLogEvent(eventType string, payload interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("INSERT INTO cips_adapter_events (event_type, payload) VALUES ($1, $2)",
+	_, err = db.ExecContext(ctx, "INSERT INTO cips_adapter_events (event_type, payload) VALUES ($1, $2)",
 		eventType, jsonData)
 	return err
 }
 
-
 // loadFromDB populates in-memory state from database on startup (write-through cache warm)
 func loadFromDB() {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query("SELECT id, data FROM cips_adapter_state ORDER BY updated_at DESC LIMIT 1000")
+	rows, err := db.QueryContext(ctx, "SELECT id, data FROM cips_adapter_state ORDER BY updated_at DESC LIMIT 1000")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
@@ -217,22 +229,22 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      r,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {
 		log.Printf("[CIPS] Adapter listening on :%s", port)
-	fmt.Fprintf(os.Stderr, "{\"event\":\"pod.startup.complete\",\"service\":\"%s\",\"startup_ms\":%d,\"timestamp\":\"%s\"}\n", "go-cips-adapter", time.Since(_processStartTime).Milliseconds(), time.Now().Format(time.RFC3339))
+		fmt.Fprintf(os.Stderr, "{\"event\":\"pod.startup.complete\",\"service\":\"%s\",\"startup_ms\":%d,\"timestamp\":\"%s\"}\n", "go-cips-adapter", time.Since(_processStartTime).Milliseconds(), time.Now().Format(time.RFC3339))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("[CIPS] Server error: %v", err)
 		}
 	}()
 
-	
 	// Periodic state persistence to PostgreSQL (write-through cache)
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)

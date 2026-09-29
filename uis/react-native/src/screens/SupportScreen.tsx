@@ -9,8 +9,8 @@ export default function SupportScreen() {
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({ subject: '', message: '', category: 'general' });
   const { data, isLoading, refetch } = trpc.support.tickets.useQuery();
-  const createMutation = trpc.support.createTicket.useMutation({ onSuccess: () => { setShowCreate(false); refetch(); }, onError: (e) => Alert.alert('Error', e.message) });
-  const closeMutation = trpc.support.closeTicket.useMutation({ onSuccess: refetch, onError: (e) => Alert.alert('Error', e.message) });
+  const createMutation = trpc.support.createTicket.useMutation({ onSuccess: () => { setShowCreate(false); refetch(); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const closeMutation = trpc.support.closeTicket.useMutation({ onSuccess: refetch, onError: (e: any) => Alert.alert('Error', e.message) });
   const STATUS_COLOR: Record<string, string> = { open: '#f59e0b', resolved: '#10b981', closed: '#6b7280', pending: '#6366f1' };
   return (
     <View style={s.container}>

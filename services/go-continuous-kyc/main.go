@@ -36,16 +36,16 @@ import (
 // ── Config ──────────────────────────────────────────────────────────────────
 
 var (
-	pgDSN          = getEnv("DATABASE_URL", "postgres://localhost:5432/remitflow?sslmode=disable")
-	kafkaBrokers   = getEnv("KAFKA_BROKERS", "localhost:9092")
-	redisAddr      = getEnv("REDIS_URL", "localhost:6379")
-	daprPort       = getEnv("DAPR_HTTP_PORT", "3500")
-	listenAddr     = getEnv("LISTEN_ADDR", ":8310")
-	checkInterval  = 15 * time.Minute
-	batchSize      = 100
-	openSearchURL  = getEnv("OPENSEARCH_URL", "http://localhost:9200")
-	keycloakURL    = getEnv("KEYCLOAK_URL", "http://localhost:8080")
-	temporalAddr   = getEnv("TEMPORAL_ADDRESS", "localhost:7233")
+	pgDSN         = getEnv("DATABASE_URL", "postgres://localhost:5432/remitflow?sslmode=disable")
+	kafkaBrokers  = getEnv("KAFKA_BROKERS", "localhost:9092")
+	redisAddr     = getEnv("REDIS_URL", "localhost:6379")
+	daprPort      = getEnv("DAPR_HTTP_PORT", "3500")
+	listenAddr    = getEnv("LISTEN_ADDR", ":8310")
+	checkInterval = 15 * time.Minute
+	batchSize     = 100
+	openSearchURL = getEnv("OPENSEARCH_URL", "http://localhost:9200")
+	keycloakURL   = getEnv("KEYCLOAK_URL", "http://localhost:8080")
+	temporalAddr  = getEnv("TEMPORAL_ADDRESS", "localhost:7233")
 )
 
 func getEnv(key, fallback string) string {
@@ -58,24 +58,24 @@ func getEnv(key, fallback string) string {
 // ── Types ───────────────────────────────────────────────────────────────────
 
 type MonitoringEntry struct {
-	ID              string    `json:"id"`
-	UserID          string    `json:"user_id"`
-	MonitoringType  string    `json:"monitoring_type"`
-	Frequency       string    `json:"frequency"`
-	Status          string    `json:"status"`
-	NextCheckAt     time.Time `json:"next_check_at"`
-	LastCheckedAt   *time.Time `json:"last_checked_at"`
-	RiskLevel       string    `json:"risk_level"`
+	ID             string     `json:"id"`
+	UserID         string     `json:"user_id"`
+	MonitoringType string     `json:"monitoring_type"`
+	Frequency      string     `json:"frequency"`
+	Status         string     `json:"status"`
+	NextCheckAt    time.Time  `json:"next_check_at"`
+	LastCheckedAt  *time.Time `json:"last_checked_at"`
+	RiskLevel      string     `json:"risk_level"`
 }
 
 type RescreenResult struct {
-	UserID       string `json:"user_id"`
-	CheckType    string `json:"check_type"`
-	Result       string `json:"result"` // "clear", "flagged", "blocked"
-	RiskDelta    int    `json:"risk_delta"`
-	Details      string `json:"details"`
-	ScreenedAt   string `json:"screened_at"`
-	Source       string `json:"source"`
+	UserID     string `json:"user_id"`
+	CheckType  string `json:"check_type"`
+	Result     string `json:"result"` // "clear", "flagged", "blocked"
+	RiskDelta  int    `json:"risk_delta"`
+	Details    string `json:"details"`
+	ScreenedAt string `json:"screened_at"`
+	Source     string `json:"source"`
 }
 
 // ── Database ────────────────────────────────────────────────────────────────
@@ -182,33 +182,45 @@ func publishRescreenEvent(result RescreenResult) {
 
 func auditLog(action string, details map[string]interface{}) {
 	entry := map[string]interface{}{
-		"service":    "go-continuous-kyc",
-		"action":     action,
-		"details":    details,
-		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"service":   "go-continuous-kyc",
+		"action":    action,
+		"details":   details,
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	}
 	payload, _ := json.Marshal(entry)
 	url := fmt.Sprintf("%s/audit-kyc-continuous/_doc", openSearchURL)
 	req, _ := http.NewRequest("POST", url, strings.NewReader(string(payload)))
 	req.Header.Set("Content-Type", "application/json")
-	// TLS verification is ON by default. InsecureSkipVerify is a dev-only
-	// escape hatch (KYC_AUDIT_INSECURE_TLS=true) and is REJECTED in production:
-	// KYC audit events must never be MITM-able in transit.
+	// FAIL-CLOSED preserved: nil client means the dev-only TLS escape hatch was
+	// requested in production — refuse to ship the audit entry.
+	if auditHTTPClient == nil {
+		log.Printf("[ContinuousKYC] FAIL-CLOSED: KYC_AUDIT_INSECURE_TLS rejected in production — audit entry not shipped")
+		return
+	}
+	resp, err := auditHTTPClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+}
+
+// auditHTTPClient is built once at startup (wave-14 perf): avoids constructing a
+// fresh Transport (and losing connection reuse) on every audit write.
+// TLS verification is ON by default. InsecureSkipVerify is a dev-only
+// escape hatch (KYC_AUDIT_INSECURE_TLS=true) and is REJECTED in production:
+// KYC audit events must never be MITM-able in transit.
+var auditHTTPClient = newAuditHTTPClient()
+
+func newAuditHTTPClient() *http.Client {
 	transport := &http.Transport{}
 	if os.Getenv("KYC_AUDIT_INSECURE_TLS") == "true" {
 		if os.Getenv("NODE_ENV") == "production" || os.Getenv("GO_ENV") == "production" {
-			log.Printf("[ContinuousKYC] FAIL-CLOSED: KYC_AUDIT_INSECURE_TLS rejected in production — audit entry not shipped")
-			return
+			return nil // fail closed — caller skips shipping
 		}
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // dev only
 	}
-	client := &http.Client{
+	return &http.Client{
 		Timeout:   5 * time.Second,
 		Transport: transport,
-	}
-	resp, err := client.Do(req)
-	if err == nil {
-		resp.Body.Close()
 	}
 }
 
@@ -236,12 +248,12 @@ func performRescreen(ctx context.Context, entry MonitoringEntry) RescreenResult 
 	var result RescreenResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return RescreenResult{
-			UserID:    entry.UserID,
-			CheckType: entry.MonitoringType,
-			Result:    "error",
-			Details:   fmt.Sprintf("decode error: %v", err),
+			UserID:     entry.UserID,
+			CheckType:  entry.MonitoringType,
+			Result:     "error",
+			Details:    fmt.Sprintf("decode error: %v", err),
 			ScreenedAt: time.Now().UTC().Format(time.RFC3339),
-			Source:    "automated",
+			Source:     "automated",
 		}
 	}
 	return result
@@ -255,23 +267,23 @@ func performDirectSanctionsCheck(entry MonitoringEntry) RescreenResult {
 		if os.Getenv("NODE_ENV") == "production" || os.Getenv("GO_ENV") == "production" {
 			log.Printf("[ContinuousKYC] FAIL-CLOSED: No OFAC_API_KEY for user %s", entry.UserID)
 			return RescreenResult{
-				UserID:    entry.UserID,
-				CheckType: entry.MonitoringType,
-				Result:    "blocked",
-				RiskDelta: 50,
-				Details:   "FAIL-CLOSED: sanctions screening unavailable",
+				UserID:     entry.UserID,
+				CheckType:  entry.MonitoringType,
+				Result:     "blocked",
+				RiskDelta:  50,
+				Details:    "FAIL-CLOSED: sanctions screening unavailable",
 				ScreenedAt: time.Now().UTC().Format(time.RFC3339),
-				Source:    "fail-closed",
+				Source:     "fail-closed",
 			}
 		}
 		return RescreenResult{
-			UserID:    entry.UserID,
-			CheckType: entry.MonitoringType,
-			Result:    "clear",
-			RiskDelta: 0,
-			Details:   "development mode — no screening",
+			UserID:     entry.UserID,
+			CheckType:  entry.MonitoringType,
+			Result:     "clear",
+			RiskDelta:  0,
+			Details:    "development mode — no screening",
 			ScreenedAt: time.Now().UTC().Format(time.RFC3339),
-			Source:    "dev-mode",
+			Source:     "dev-mode",
 		}
 	}
 
@@ -286,35 +298,35 @@ func performDirectSanctionsCheck(entry MonitoringEntry) RescreenResult {
 	resp, err := client.Do(req)
 	if err != nil {
 		return RescreenResult{
-			UserID:    entry.UserID,
-			CheckType: entry.MonitoringType,
-			Result:    "error",
-			Details:   fmt.Sprintf("OFAC API error: %v", err),
+			UserID:     entry.UserID,
+			CheckType:  entry.MonitoringType,
+			Result:     "error",
+			Details:    fmt.Sprintf("OFAC API error: %v", err),
 			ScreenedAt: time.Now().UTC().Format(time.RFC3339),
-			Source:    "ofac-api-error",
+			Source:     "ofac-api-error",
 		}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		return RescreenResult{
-			UserID:    entry.UserID,
-			CheckType: entry.MonitoringType,
-			Result:    "error",
-			Details:   fmt.Sprintf("OFAC API status %d", resp.StatusCode),
+			UserID:     entry.UserID,
+			CheckType:  entry.MonitoringType,
+			Result:     "error",
+			Details:    fmt.Sprintf("OFAC API status %d", resp.StatusCode),
 			ScreenedAt: time.Now().UTC().Format(time.RFC3339),
-			Source:    "ofac-api-error",
+			Source:     "ofac-api-error",
 		}
 	}
 
 	return RescreenResult{
-		UserID:    entry.UserID,
-		CheckType: entry.MonitoringType,
-		Result:    "clear",
-		RiskDelta: 0,
-		Details:   "OFAC screening passed",
+		UserID:     entry.UserID,
+		CheckType:  entry.MonitoringType,
+		Result:     "clear",
+		RiskDelta:  0,
+		Details:    "OFAC screening passed",
 		ScreenedAt: time.Now().UTC().Format(time.RFC3339),
-		Source:    "ofac-api",
+		Source:     "ofac-api",
 	}
 }
 
@@ -419,8 +431,12 @@ func runSchedulerCycle(ctx context.Context) {
 	flagged := 0
 	blocked := 0
 	for _, r := range results {
-		if r.Result == "flagged" { flagged++ }
-		if r.Result == "blocked" { blocked++ }
+		if r.Result == "flagged" {
+			flagged++
+		}
+		if r.Result == "blocked" {
+			blocked++
+		}
 	}
 	auditLog("scheduler_cycle_completed", map[string]interface{}{
 		"total": len(results), "flagged": flagged, "blocked": blocked,
@@ -484,10 +500,10 @@ func escalateResult(ctx context.Context, result RescreenResult) {
 
 // ── HTTP Health + Metrics ───────────────────────────────────────────────────
 
-func startHTTPServer() {
+func startHTTPServer() *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		if err := db.Ping(); err != nil {
+		if err := db.PingContext(r.Context()); err != nil {
 			http.Error(w, "unhealthy", 503)
 			return
 		}
@@ -496,9 +512,9 @@ func startHTTPServer() {
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		var count int
-		db.QueryRow("SELECT COUNT(*) FROM continuous_monitoring WHERE status = 'active'").Scan(&count)
+		db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM continuous_monitoring WHERE status = 'active'").Scan(&count)
 		var dueCount int
-		db.QueryRow("SELECT COUNT(*) FROM continuous_monitoring WHERE status = 'active' AND next_check_at <= NOW()").Scan(&dueCount)
+		db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM continuous_monitoring WHERE status = 'active' AND next_check_at <= NOW()").Scan(&dueCount)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"active_monitors":%d,"due_now":%d}`, count, dueCount)
 	})
@@ -512,10 +528,21 @@ func startHTTPServer() {
 		w.Write([]byte(`{"status":"triggered"}`))
 	})
 
-	log.Printf("[ContinuousKYC] HTTP server starting on %s", listenAddr)
-	if err := http.ListenAndServe(listenAddr, mux); err != nil {
-		log.Fatalf("[ContinuousKYC] HTTP server failed: %v", err)
+	srv := &http.Server{
+		Addr:              listenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
+	go func() {
+		log.Printf("[ContinuousKYC] HTTP server starting on %s", listenAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("[ContinuousKYC] HTTP server failed: %v", err)
+		}
+	}()
+	return srv
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
@@ -528,7 +555,7 @@ func main() {
 	defer cancel()
 
 	// Start HTTP server
-	go startHTTPServer()
+	httpSrv := startHTTPServer()
 
 	// Run scheduler loop
 	ticker := time.NewTicker(checkInterval)
@@ -548,6 +575,11 @@ func main() {
 		case sig := <-sigCh:
 			log.Printf("[ContinuousKYC] Received %v, shutting down", sig)
 			cancel()
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+				log.Printf("[ContinuousKYC] HTTP shutdown error: %v", err)
+			}
+			shutdownCancel()
 			db.Close()
 			return
 		}

@@ -3,21 +3,22 @@
 // Port: 8095
 //
 // Endpoints:
-//   GET  /health
-//   POST /export/transactions   — Export transactions in requested format
-//   POST /export/statement      — Generate account statement (PDF-ready JSON)
-//   POST /export/batch-status   — Export batch payment status report
+//
+//	GET  /health
+//	POST /export/transactions   — Export transactions in requested format
+//	POST /export/statement      — Generate account statement (PDF-ready JSON)
+//	POST /export/batch-status   — Export batch payment status report
 package main
 
 import (
 	"crypto/subtle"
 	"database/sql"
-	"log/slog"
-	_ "github.com/lib/pq"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	_ "github.com/lib/pq"
 	"log"
+	"log/slog"
 	"math"
 	"net/http"
 	"os"
@@ -26,38 +27,37 @@ import (
 	"strings"
 	"time"
 
+	"context"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"os/signal"
 	"syscall"
-	"context"
 )
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
 
 var _processStartTime = time.Now()
 
 var db *sql.DB
 
 type Transaction struct {
-	ID              int64   `json:"id"`
-	UserID          int64   `json:"userId"`
-	Type            string  `json:"type"`
-	Status          string  `json:"status"`
-	FromAmount      float64 `json:"fromAmount"`
-	Currency        string  `json:"currency"`
-	ToAmount        *float64 `json:"toAmount,omitempty"`
-	ToCurrency      *string  `json:"toCurrency,omitempty"`
-	FxRate          *float64 `json:"fxRate,omitempty"`
-	Fee             float64  `json:"fee"`
-	RecipientName   *string  `json:"recipientName,omitempty"`
-	RecipientBank   *string  `json:"recipientBank,omitempty"`
-	RecipientAccount *string `json:"recipientAccount,omitempty"`
-	Reference       *string  `json:"reference,omitempty"`
-	Description     *string  `json:"description,omitempty"`
-	CreatedAt       string   `json:"createdAt"`
-	UpdatedAt       string   `json:"updatedAt"`
+	ID               int64    `json:"id"`
+	UserID           int64    `json:"userId"`
+	Type             string   `json:"type"`
+	Status           string   `json:"status"`
+	FromAmount       float64  `json:"fromAmount"`
+	Currency         string   `json:"currency"`
+	ToAmount         *float64 `json:"toAmount,omitempty"`
+	ToCurrency       *string  `json:"toCurrency,omitempty"`
+	FxRate           *float64 `json:"fxRate,omitempty"`
+	Fee              float64  `json:"fee"`
+	RecipientName    *string  `json:"recipientName,omitempty"`
+	RecipientBank    *string  `json:"recipientBank,omitempty"`
+	RecipientAccount *string  `json:"recipientAccount,omitempty"`
+	Reference        *string  `json:"reference,omitempty"`
+	Description      *string  `json:"description,omitempty"`
+	CreatedAt        string   `json:"createdAt"`
+	UpdatedAt        string   `json:"updatedAt"`
 }
 
 type ExportRequest struct {
@@ -71,27 +71,27 @@ type ExportRequest struct {
 }
 
 type ExportResponse struct {
-	Format      string `json:"format"`
-	Count       int    `json:"count"`
-	Data        string `json:"data,omitempty"` // CSV or JSON string
-	Summary     *StatementSummary `json:"summary,omitempty"`
-	ExportedAt  string `json:"exportedAt"`
-	FileName    string `json:"fileName"`
+	Format     string            `json:"format"`
+	Count      int               `json:"count"`
+	Data       string            `json:"data,omitempty"` // CSV or JSON string
+	Summary    *StatementSummary `json:"summary,omitempty"`
+	ExportedAt string            `json:"exportedAt"`
+	FileName   string            `json:"fileName"`
 }
 
 type StatementSummary struct {
-	TotalTransactions int                    `json:"totalTransactions"`
-	TotalSent         float64                `json:"totalSent"`
-	TotalReceived     float64                `json:"totalReceived"`
-	TotalFees         float64                `json:"totalFees"`
-	NetFlow           float64                `json:"netFlow"`
-	ByCurrency        map[string]CurrencyStat `json:"byCurrency"`
-	ByType            map[string]int         `json:"byType"`
-	ByStatus          map[string]int         `json:"byStatus"`
-	TopRecipients     []RecipientStat        `json:"topRecipients"`
-	MonthlyBreakdown  []MonthlyBreakdown     `json:"monthlyBreakdown"`
-	AverageAmount     float64                `json:"averageAmount"`
-	LargestTransaction float64              `json:"largestTransaction"`
+	TotalTransactions  int                     `json:"totalTransactions"`
+	TotalSent          float64                 `json:"totalSent"`
+	TotalReceived      float64                 `json:"totalReceived"`
+	TotalFees          float64                 `json:"totalFees"`
+	NetFlow            float64                 `json:"netFlow"`
+	ByCurrency         map[string]CurrencyStat `json:"byCurrency"`
+	ByType             map[string]int          `json:"byType"`
+	ByStatus           map[string]int          `json:"byStatus"`
+	TopRecipients      []RecipientStat         `json:"topRecipients"`
+	MonthlyBreakdown   []MonthlyBreakdown      `json:"monthlyBreakdown"`
+	AverageAmount      float64                 `json:"averageAmount"`
+	LargestTransaction float64                 `json:"largestTransaction"`
 }
 
 type CurrencyStat struct {
@@ -102,9 +102,9 @@ type CurrencyStat struct {
 }
 
 type RecipientStat struct {
-	Name   string  `json:"name"`
-	Count  int     `json:"count"`
-	Total  float64 `json:"total"`
+	Name  string  `json:"name"`
+	Count int     `json:"count"`
+	Total float64 `json:"total"`
 }
 
 type MonthlyBreakdown struct {
@@ -116,9 +116,9 @@ type MonthlyBreakdown struct {
 }
 
 type BatchStatusRequest struct {
-	BatchID     string        `json:"batchId"`
-	Payments    []BatchPayment `json:"payments" binding:"required"`
-	Format      string        `json:"format"`
+	BatchID  string         `json:"batchId"`
+	Payments []BatchPayment `json:"payments" binding:"required"`
+	Format   string         `json:"format"`
 }
 
 type BatchPayment struct {
@@ -505,19 +505,18 @@ func buildStatementData(req ExportRequest, summary *StatementSummary) map[string
 		"summary":      summary,
 		"transactions": req.Transactions,
 		"branding": map[string]string{
-			"company":  "RemitFlow Financial Services Ltd",
-			"address":  "1 Canada Square, Canary Wharf, London E14 5AB",
-			"phone":    "+44 20 7946 0958",
-			"email":    "support@remitflow.app",
-			"website":  "https://remitflow.app",
-			"regNo":    "FCA Authorised: 900001",
-			"emi":      "EMI Licence: EMI-2024-001",
+			"company": "RemitFlow Financial Services Ltd",
+			"address": "1 Canada Square, Canary Wharf, London E14 5AB",
+			"phone":   "+44 20 7946 0958",
+			"email":   "support@remitflow.app",
+			"website": "https://remitflow.app",
+			"regNo":   "FCA Authorised: 900001",
+			"emi":     "EMI Licence: EMI-2024-001",
 		},
 	}
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
-
 
 func initDB() error {
 	dbURL := os.Getenv("DATABASE_URL")
@@ -561,11 +560,14 @@ func initDB() error {
 
 // dbUpsert stores or updates a record in the service state table
 func dbUpsert(id string, data interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO export_service_state (id, data, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
@@ -575,8 +577,11 @@ func dbUpsert(id string, data interface{}) error {
 
 // dbGet retrieves a record from the service state table
 func dbGet(id string, dest interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM export_service_state WHERE id = $1", id).Scan(&jsonData)
+	err := db.QueryRowContext(ctx, "SELECT data FROM export_service_state WHERE id = $1", id).Scan(&jsonData)
 	if err != nil {
 		return err
 	}
@@ -585,7 +590,10 @@ func dbGet(id string, dest interface{}) error {
 
 // dbList retrieves all records from the service state table
 func dbList(limit int) ([]json.RawMessage, error) {
-	rows, err := db.Query("SELECT data FROM export_service_state ORDER BY updated_at DESC LIMIT $1", limit)
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT data FROM export_service_state ORDER BY updated_at DESC LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -603,22 +611,27 @@ func dbList(limit int) ([]json.RawMessage, error) {
 
 // dbLogEvent stores an event in the events table
 func dbLogEvent(eventType string, payload interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("INSERT INTO export_service_events (event_type, payload) VALUES ($1, $2)",
+	_, err = db.ExecContext(ctx, "INSERT INTO export_service_events (event_type, payload) VALUES ($1, $2)",
 		eventType, jsonData)
 	return err
 }
 
-
 // loadFromDB populates in-memory state from database on startup (write-through cache warm)
 func loadFromDB() {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query("SELECT id, data FROM export_service_state ORDER BY updated_at DESC LIMIT 1000")
+	rows, err := db.QueryContext(ctx, "SELECT id, data FROM export_service_state ORDER BY updated_at DESC LIMIT 1000")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
@@ -688,11 +701,12 @@ func main() {
 	r.POST("/export/batch-status", exportBatchStatusHandler)
 
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      r,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	sigCh := make(chan os.Signal, 1)

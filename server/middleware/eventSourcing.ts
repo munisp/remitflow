@@ -253,17 +253,28 @@ export async function replayEvents(
   const db = await getDb();
   if (!db) return { processed: 0, errors: 0 };
 
-  let offset = 0;
   let processed = 0;
   let errors = 0;
 
+  // W14: keyset pagination instead of OFFSET (OFFSET scans get linearly slower
+  // over a large event_store). Deviation from the SPEC's (created_at, version)
+  // cursor: event_id is added as the final tiebreaker because (created_at,
+  // version) is NOT unique across aggregates — without it, same-timestamp rows
+  // of different aggregates could be skipped by the strict `>` comparison.
+  let cursorCreatedAt: string | null = fromTimestamp ? fromTimestamp.toISOString() : null;
+  let cursorVersion = -1;
+  let cursorEventId = "00000000-0000-0000-0000-000000000000";
+
   while (true) {
-    const condition = fromTimestamp
+    const baseCondition = fromTimestamp
       ? sql`aggregate_type = ${aggregateType} AND created_at >= ${fromTimestamp.toISOString()}`
       : sql`aggregate_type = ${aggregateType}`;
+    const keyset = cursorCreatedAt === null
+      ? sql``
+      : sql`AND (created_at, version, event_id) > (${cursorCreatedAt}, ${cursorVersion}, ${cursorEventId}::uuid)`;
 
     const rows = await db.execute(
-      sql`SELECT * FROM event_store WHERE ${condition} ORDER BY created_at ASC, version ASC LIMIT ${batchSize} OFFSET ${offset}`
+      sql`SELECT * FROM event_store WHERE ${baseCondition} ${keyset} ORDER BY created_at ASC, version ASC, event_id ASC LIMIT ${batchSize}`
     ) as any[];
 
     if (!rows || (rows as any[]).length === 0) break;
@@ -287,7 +298,10 @@ export async function replayEvents(
       }
     }
 
-    offset += batchSize;
+    const last = (rows as any[])[(rows as any[]).length - 1];
+    cursorCreatedAt = new Date(last.created_at).toISOString();
+    cursorVersion = Number(last.version);
+    cursorEventId = String(last.event_id);
     if ((rows as any[]).length < batchSize) break;
   }
 

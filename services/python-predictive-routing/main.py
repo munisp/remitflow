@@ -47,7 +47,7 @@ pool: Optional[ThreadedConnectionPool] = None
 def init_db():
     global pool
     try:
-        pool = ThreadedConnectionPool(2, 15, PG_DSN)
+        pool = ThreadedConnectionPool(2, 15, PG_DSN, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
         conn = pool.getconn()
         cur = conn.cursor()
         cur.execute("""

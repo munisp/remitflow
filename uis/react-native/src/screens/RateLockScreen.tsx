@@ -9,7 +9,7 @@ export default function RateLockScreen() {
   const [showLock, setShowLock] = useState(false);
   const [form, setForm] = useState({ fromCurrency: 'USD', toCurrency: 'NGN', amount: '', durationHours: '24' });
   const { data: locks, isLoading, refetch } = trpc.fx.locks.useQuery();
-  const lockMutation = trpc.fx.lockRate.useMutation({ onSuccess: () => { setShowLock(false); refetch(); }, onError: (e) => Alert.alert('Error', e.message) });
+  const lockMutation = trpc.fx.lockRate.useMutation({ onSuccess: () => { setShowLock(false); refetch(); }, onError: (e: any) => Alert.alert('Error', e.message) });
   const STATUS_COLOR: Record<string, string> = { active: '#10b981', expired: '#6b7280', used: '#6366f1' };
   return (
     <View style={s.container}>

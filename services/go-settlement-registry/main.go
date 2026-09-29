@@ -4,7 +4,8 @@
 // and file an updated list with the CBN Trade & Exchange Department.
 //
 // Integrations: Kafka (events), Dapr (state/pubsub), Temporal (workflows),
-//               PostgreSQL (persistence), Redis (cache), OpenSearch (audit)
+//
+//	PostgreSQL (persistence), Redis (cache), OpenSearch (audit)
 package main
 
 import (
@@ -48,21 +49,21 @@ func getEnv(key, fallback string) string {
 
 // ─── Models ───────────────────────────────────────────────────────────────────
 type SettlementAccount struct {
-	ID                  int        `json:"id" db:"id"`
-	Corridor            string     `json:"corridor" db:"corridor"`
-	ADBName             string     `json:"adb_name" db:"adb_name"`
-	ADBCode             *string    `json:"adb_code,omitempty" db:"adb_code"`
-	AccountNumber       string     `json:"account_number" db:"account_number"`
-	AccountName         string     `json:"account_name" db:"account_name"`
-	Currency            string     `json:"currency" db:"currency"`
-	Status              string     `json:"status" db:"status"`
-	IsPrimary           bool       `json:"is_primary" db:"is_primary"`
-	CBNFiledAt          *time.Time `json:"cbn_filed_at,omitempty" db:"cbn_filed_at"`
-	CBNReferenceNumber  *string    `json:"cbn_reference_number,omitempty" db:"cbn_reference_number"`
-	Notes               *string    `json:"notes,omitempty" db:"notes"`
-	CreatedBy           *int       `json:"created_by,omitempty" db:"created_by"`
-	CreatedAt           time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at" db:"updated_at"`
+	ID                 int        `json:"id" db:"id"`
+	Corridor           string     `json:"corridor" db:"corridor"`
+	ADBName            string     `json:"adb_name" db:"adb_name"`
+	ADBCode            *string    `json:"adb_code,omitempty" db:"adb_code"`
+	AccountNumber      string     `json:"account_number" db:"account_number"`
+	AccountName        string     `json:"account_name" db:"account_name"`
+	Currency           string     `json:"currency" db:"currency"`
+	Status             string     `json:"status" db:"status"`
+	IsPrimary          bool       `json:"is_primary" db:"is_primary"`
+	CBNFiledAt         *time.Time `json:"cbn_filed_at,omitempty" db:"cbn_filed_at"`
+	CBNReferenceNumber *string    `json:"cbn_reference_number,omitempty" db:"cbn_reference_number"`
+	Notes              *string    `json:"notes,omitempty" db:"notes"`
+	CreatedBy          *int       `json:"created_by,omitempty" db:"created_by"`
+	CreatedAt          time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at" db:"updated_at"`
 }
 
 type CreateAccountRequest struct {
@@ -78,8 +79,8 @@ type CreateAccountRequest struct {
 }
 
 type FileCBNRequest struct {
-	AccountIDs          []int   `json:"account_ids" binding:"required"`
-	CBNReferenceNumber  string  `json:"cbn_reference_number" binding:"required"`
+	AccountIDs         []int  `json:"account_ids" binding:"required"`
+	CBNReferenceNumber string `json:"cbn_reference_number" binding:"required"`
 }
 
 type CBNFilingExport struct {
@@ -414,11 +415,11 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		dbOK := db.Ping() == nil
 		c.JSON(http.StatusOK, gin.H{
-			"status":  "ok",
-			"service": "go-settlement-registry",
-			"version": "v187",
-			"db":      dbOK,
-			"kafka_published": kafkaPublished.Load(),
+			"status":               "ok",
+			"service":              "go-settlement-registry",
+			"version":              "v187",
+			"db":                   dbOK,
+			"kafka_published":      kafkaPublished.Load(),
 			"kafka_publish_errors": kafkaPublishErrors.Load(),
 		})
 	})
@@ -435,11 +436,12 @@ func main() {
 
 	addr := ":" + PORT
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      r,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              addr,
+		Handler:           r,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	sigCh := make(chan os.Signal, 1)

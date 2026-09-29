@@ -21,8 +21,8 @@ import (
 
 // ─── In-memory store (replace with PostgreSQL in production) ──────────────────
 var (
-	mu           sync.RWMutex
-	transfersDB  = map[string]*models.TransferStatus{}
+	mu          sync.RWMutex
+	transfersDB = map[string]*models.TransferStatus{}
 )
 
 var cipsParticipants = []models.CIPSParticipant{
@@ -96,9 +96,9 @@ func Metrics(c *gin.Context) {
 	count := len(transfersDB)
 	mu.RUnlock()
 	c.JSON(http.StatusOK, gin.H{
-		"total_transfers":    count,
-		"service":            "cips-adapter",
-		"uptime_seconds":     time.Since(startTime).Seconds(),
+		"total_transfers": count,
+		"service":         "cips-adapter",
+		"uptime_seconds":  time.Since(startTime).Seconds(),
 	})
 }
 
@@ -208,7 +208,7 @@ func InitiateTransfer(c *gin.Context) {
 				"finInstnId": map[string]string{"bicfi": req.PayeeBIC},
 			},
 			"cdtr": map[string]interface{}{
-				"nm":     req.PayeeName,
+				"nm":      req.PayeeName,
 				"pstlAdr": map[string]string{"ctry": req.PayeeCountry},
 			},
 			"cdtrAcct": map[string]interface{}{
@@ -216,7 +216,7 @@ func InitiateTransfer(c *gin.Context) {
 					"othr": map[string]string{"id": req.PayeeAccount},
 				},
 			},
-			"purp": map[string]string{"cd": req.Purpose},
+			"purp":   map[string]string{"cd": req.Purpose},
 			"rmtInf": map[string]string{"ustrd": req.Note},
 		},
 	}

@@ -9,8 +9,8 @@ export default function DirectDebitScreen() {
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({ bankName: '', accountNumber: '', sortCode: '', amount: '', reference: '' });
   const { data, isLoading, refetch } = trpc.directDebit.mandates.useQuery();
-  const createMutation = trpc.directDebit.create.useMutation({ onSuccess: () => { setShowCreate(false); refetch(); }, onError: (e) => Alert.alert('Error', e.message) });
-  const cancelMutation = trpc.directDebit.cancel.useMutation({ onSuccess: refetch, onError: (e) => Alert.alert('Error', e.message) });
+  const createMutation = trpc.directDebit.create.useMutation({ onSuccess: () => { setShowCreate(false); refetch(); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const cancelMutation = trpc.directDebit.cancel.useMutation({ onSuccess: refetch, onError: (e: any) => Alert.alert('Error', e.message) });
   const STATUS_COLOR: Record<string, string> = { active: '#10b981', cancelled: '#6b7280', pending: '#f59e0b' };
   return (
     <View style={s.container}>

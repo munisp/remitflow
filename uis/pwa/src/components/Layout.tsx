@@ -1,7 +1,8 @@
-import React, { useState } from "react";
+import React, { Suspense, useCallback, useState } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuthStore } from "../stores/authStore";
 import { LanguageSwitcher } from "./LanguageSwitcher";
+import LoadingSpinner from "./LoadingSpinner";
 
 const navItems = [
   {
@@ -225,23 +226,37 @@ const NavIcon: React.FC<{ path: string; className?: string }> = ({
   </svg>
 );
 
-const Layout: React.FC = () => {
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const location = useLocation();
-  const navigate = useNavigate();
-  const { user, logout } = useAuthStore();
+const isActivePath = (pathname: string, href: string) => {
+  if (href === "/") return pathname === "/";
+  return pathname.startsWith(href);
+};
 
-  const handleLogout = () => {
-    logout();
-    navigate("/login");
-  };
+// PERF (wave14): SidebarContent and Logo were defined inside Layout, so each
+// Layout render produced brand-new component types and React unmounted and
+// remounted the entire sidebar subtree (including the language switcher and
+// every nav link). Both are hoisted to module scope and memoized;
+// SidebarContent subscribes to the auth store with selectors so it only
+// re-renders when the user object or logout identity actually changes.
+interface SidebarContentProps {
+  /** Called after any nav action so the mobile drawer can close. */
+  onNavigate: () => void;
+}
 
-  const isActive = (href: string) => {
-    if (href === "/") return location.pathname === "/";
-    return location.pathname.startsWith(href);
-  };
+const SidebarContent: React.FC<SidebarContentProps> = React.memo(
+  function SidebarContent({ onNavigate }) {
+    const location = useLocation();
+    const navigate = useNavigate();
+    const user = useAuthStore((s) => s.user);
+    const logout = useAuthStore((s) => s.logout);
 
-  const SidebarContent = () => (
+    const handleLogout = () => {
+      logout();
+      navigate("/login");
+    };
+
+    const isActive = (href: string) => isActivePath(location.pathname, href);
+
+    return (
     <div className="flex flex-col flex-1 min-h-0">
       <nav className="flex-1 overflow-y-auto py-3 px-3">
         {sidebarSections.map((section) => (
@@ -257,7 +272,7 @@ const Layout: React.FC = () => {
                     key={item.name}
                     onClick={() => {
                       handleLogout();
-                      setSidebarOpen(false);
+                      onNavigate();
                     }}
                     type="button"
                     className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 mb-0.5 w-full text-left text-red-600 hover:bg-red-50"
@@ -275,7 +290,7 @@ const Layout: React.FC = () => {
                 <Link
                   key={item.name}
                   to={item.href}
-                  onClick={() => setSidebarOpen(false)}
+                  onClick={onNavigate}
                   className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 mb-0.5 ${
                     isActive(item.href)
                       ? "bg-indigo-50 text-indigo-600"
@@ -328,9 +343,14 @@ const Layout: React.FC = () => {
         </button>
       </div>
     </div>
-  );
+    );
+  },
+);
 
-  const Logo = ({ size = "md" }: { size?: "sm" | "md" }) => (
+const Logo: React.FC<{ size?: "sm" | "md" }> = React.memo(function Logo({
+  size = "md",
+}) {
+  return (
     <div className="flex items-center gap-2.5">
       <div
         className={`${size === "sm" ? "w-7 h-7" : "w-8 h-8"} rounded-lg flex items-center justify-center bg-gradient-to-br from-indigo-600 to-violet-600`}
@@ -356,6 +376,14 @@ const Layout: React.FC = () => {
       </span>
     </div>
   );
+});
+
+const Layout: React.FC = () => {
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const location = useLocation();
+  const closeSidebar = useCallback(() => setSidebarOpen(false), []);
+
+  const isActive = (href: string) => isActivePath(location.pathname, href);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -363,13 +391,13 @@ const Layout: React.FC = () => {
         <div className="fixed inset-0 z-40 lg:hidden">
           <div
             className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm"
-            onClick={() => setSidebarOpen(false)}
+            onClick={closeSidebar}
           />
           <div className="fixed inset-y-0 left-0 flex w-72 flex-col bg-white shadow-2xl animate-in h-full">
             <div className="flex h-16 items-center justify-between px-5 border-b border-slate-100 flex-shrink-0">
               <Logo />
               <button
-                onClick={() => setSidebarOpen(false)}
+                onClick={closeSidebar}
                 className="p-2 rounded-lg hover:bg-slate-100 text-slate-400"
               >
                 <svg
@@ -387,7 +415,7 @@ const Layout: React.FC = () => {
                 </svg>
               </button>
             </div>
-            <SidebarContent />
+            <SidebarContent onNavigate={closeSidebar} />
           </div>
         </div>
       )}
@@ -396,7 +424,7 @@ const Layout: React.FC = () => {
           <div className="flex h-16 items-center px-5 border-b border-slate-100 flex-shrink-0">
             <Logo />
           </div>
-          <SidebarContent />
+          <SidebarContent onNavigate={closeSidebar} />
         </div>
       </div>
       <div className="lg:pl-64">
@@ -448,7 +476,13 @@ const Layout: React.FC = () => {
         </div>
         <main className="pb-20 lg:pb-6">
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6">
-            <Outlet />
+            {/* PERF (wave14): Suspense boundary moved inside Layout (was at
+                the App root) so a lazy route chunk suspending only replaces
+                the content area — the shell (sidebar/header/bottom-nav)
+                stays painted. */}
+            <Suspense fallback={<LoadingSpinner />}>
+              <Outlet />
+            </Suspense>
           </div>
         </main>
         <nav

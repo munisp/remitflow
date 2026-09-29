@@ -29,14 +29,14 @@ export default function StablecoinScreen() {
   const { data: balances, isLoading, refetch } = trpc.stablecoin.balances.useQuery();
 
   // Mutations
-  const buyMutation = trpc.stablecoin.buyWithFiat.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'On-ramp complete!'); }, onError: (e) => Alert.alert('Error', e.message) });
-  const sellMutation = trpc.stablecoin.sellToFiat.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Off-ramp complete!'); }, onError: (e) => Alert.alert('Error', e.message) });
-  const swapMutation = trpc.stablecoin.swap.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Swap complete!'); }, onError: (e) => Alert.alert('Error', e.message) });
-  const sendMutation = trpc.stablecoin.send.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Sent!'); }, onError: (e) => Alert.alert('Error', e.message) });
-  const stakeMutation = trpc.stablecoin.stakeForYield.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Staked!'); }, onError: (e) => Alert.alert('Error', e.message) });
-  const unstakeMutation = trpc.stablecoin.unstake.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Unstaked!'); }, onError: (e) => Alert.alert('Error', e.message) });
-  const bridgeMutation = trpc.stablecoin.bridgeChain.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Bridge initiated!'); }, onError: (e) => Alert.alert('Error', e.message) });
-  const billMutation = trpc.stablecoin.payBill.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Bill paid!'); }, onError: (e) => Alert.alert('Error', e.message) });
+  const buyMutation = trpc.stablecoin.buyWithFiat.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'On-ramp complete!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const sellMutation = trpc.stablecoin.sellToFiat.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Off-ramp complete!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const swapMutation = trpc.stablecoin.swap.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Swap complete!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const sendMutation = trpc.stablecoin.send.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Sent!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const stakeMutation = trpc.stablecoin.stakeForYield.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Staked!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const unstakeMutation = trpc.stablecoin.unstake.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Unstaked!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const bridgeMutation = trpc.stablecoin.bridgeChain.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Bridge initiated!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const billMutation = trpc.stablecoin.payBill.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Bill paid!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
 
   // Form state
   const [buyFiat, setBuyFiat] = useState('USD');

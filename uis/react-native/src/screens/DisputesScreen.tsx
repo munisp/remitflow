@@ -11,7 +11,7 @@ export default function DisputesScreen() {
   const { data, isLoading, refetch } = trpc.disputes.list.useQuery();
   const createMutation = trpc.disputes.create.useMutation({
     onSuccess: () => { setShowCreate(false); refetch(); },
-    onError: (e) => Alert.alert('Error', e.message),
+    onError: (e: any) => Alert.alert('Error', e.message),
   });
   const STATUS_COLOR: Record<string, string> = { open: '#f59e0b', resolved: '#10b981', closed: '#6b7280', pending: '#6366f1' };
   return (

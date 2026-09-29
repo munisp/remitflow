@@ -26,7 +26,9 @@ import (
 )
 
 func getEnv(k, d string) string {
-	if v := os.Getenv(k); v != "" { return v }
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
 	return d
 }
 
@@ -34,43 +36,43 @@ var port = getEnv("PORT", "8146")
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type CorridorConfig struct {
-	Code           string   `json:"code"`            // e.g. "GB→NG"
-	FromCurrency   string   `json:"from_currency"`   // GBP
-	ToCurrency     string   `json:"to_currency"`     // NGN
-	BaseFeeUSD     float64  `json:"base_fee_usd"`
-	SpreadPct      float64  `json:"spread_pct"`      // e.g. 0.015 = 1.5%
-	FxMarkupPct    float64  `json:"fx_markup_pct"`   // e.g. 0.005 = 0.5%
-	MinAmountUSD   float64  `json:"min_amount_usd"`
-	MaxAmountUSD   float64  `json:"max_amount_usd"`
-	RegulatoryLimit float64 `json:"regulatory_limit_usd"`
-	SupportedRails []string `json:"supported_rails"` // swift, sepa, papss, etc.
-	SLASeconds     int      `json:"sla_seconds"`
-	Active         bool     `json:"active"`
+	Code            string   `json:"code"`          // e.g. "GB→NG"
+	FromCurrency    string   `json:"from_currency"` // GBP
+	ToCurrency      string   `json:"to_currency"`   // NGN
+	BaseFeeUSD      float64  `json:"base_fee_usd"`
+	SpreadPct       float64  `json:"spread_pct"`    // e.g. 0.015 = 1.5%
+	FxMarkupPct     float64  `json:"fx_markup_pct"` // e.g. 0.005 = 0.5%
+	MinAmountUSD    float64  `json:"min_amount_usd"`
+	MaxAmountUSD    float64  `json:"max_amount_usd"`
+	RegulatoryLimit float64  `json:"regulatory_limit_usd"`
+	SupportedRails  []string `json:"supported_rails"` // swift, sepa, papss, etc.
+	SLASeconds      int      `json:"sla_seconds"`
+	Active          bool     `json:"active"`
 }
 
 type CorridorHealth struct {
-	Code           string  `json:"code"`
-	HealthScore    float64 `json:"health_score"`    // 0–100
-	AvgLatencyMs   float64 `json:"avg_latency_ms"`
-	SuccessRate    float64 `json:"success_rate"`
-	ActiveRails    int     `json:"active_rails"`
-	LastCheckedAt  int64   `json:"last_checked_at"`
+	Code          string  `json:"code"`
+	HealthScore   float64 `json:"health_score"` // 0–100
+	AvgLatencyMs  float64 `json:"avg_latency_ms"`
+	SuccessRate   float64 `json:"success_rate"`
+	ActiveRails   int     `json:"active_rails"`
+	LastCheckedAt int64   `json:"last_checked_at"`
 }
 
 type SpreadQuote struct {
-	CorridorCode   string  `json:"corridor_code"`
-	FromCurrency   string  `json:"from_currency"`
-	ToCurrency     string  `json:"to_currency"`
-	SendAmountUSD  float64 `json:"send_amount_usd"`
-	BaseFeeUSD     float64 `json:"base_fee_usd"`
-	SpreadFeeUSD   float64 `json:"spread_fee_usd"`
-	FxMarkupUSD    float64 `json:"fx_markup_usd"`
-	TotalFeeUSD    float64 `json:"total_fee_usd"`
-	EffectiveRate  float64 `json:"effective_rate"`
-	MarketRate     float64 `json:"market_rate"`
-	ReceiveAmount  float64 `json:"receive_amount"`
-	ExpiresAt      int64   `json:"expires_at"`
-	RecommendedRail string `json:"recommended_rail"`
+	CorridorCode    string  `json:"corridor_code"`
+	FromCurrency    string  `json:"from_currency"`
+	ToCurrency      string  `json:"to_currency"`
+	SendAmountUSD   float64 `json:"send_amount_usd"`
+	BaseFeeUSD      float64 `json:"base_fee_usd"`
+	SpreadFeeUSD    float64 `json:"spread_fee_usd"`
+	FxMarkupUSD     float64 `json:"fx_markup_usd"`
+	TotalFeeUSD     float64 `json:"total_fee_usd"`
+	EffectiveRate   float64 `json:"effective_rate"`
+	MarketRate      float64 `json:"market_rate"`
+	ReceiveAmount   float64 `json:"receive_amount"`
+	ExpiresAt       int64   `json:"expires_at"`
+	RecommendedRail string  `json:"recommended_rail"`
 }
 
 type CorridorAnalytics struct {
@@ -85,10 +87,10 @@ type CorridorAnalytics struct {
 
 // ── State ─────────────────────────────────────────────────────────────────────
 type State struct {
-	mu         sync.RWMutex
-	corridors  map[string]*CorridorConfig
-	health     map[string]*CorridorHealth
-	analytics  map[string]*CorridorAnalytics
+	mu        sync.RWMutex
+	corridors map[string]*CorridorConfig
+	health    map[string]*CorridorHealth
+	analytics map[string]*CorridorAnalytics
 }
 
 var state = &State{
@@ -128,13 +130,17 @@ func init() {
 func calculateSpread(corridor *CorridorConfig, amountUSD float64, marketRate float64) *SpreadQuote {
 	// Dynamic spread: widen slightly for large amounts (liquidity premium)
 	dynamicSpread := corridor.SpreadPct
-	if amountUSD > 10000 { dynamicSpread += 0.002 }
-	if amountUSD > 25000 { dynamicSpread += 0.003 }
+	if amountUSD > 10000 {
+		dynamicSpread += 0.002
+	}
+	if amountUSD > 25000 {
+		dynamicSpread += 0.003
+	}
 
-	baseFee    := corridor.BaseFeeUSD
-	spreadFee  := amountUSD * dynamicSpread
-	fxMarkup   := amountUSD * corridor.FxMarkupPct
-	totalFee   := baseFee + spreadFee + fxMarkup
+	baseFee := corridor.BaseFeeUSD
+	spreadFee := amountUSD * dynamicSpread
+	fxMarkup := amountUSD * corridor.FxMarkupPct
+	totalFee := baseFee + spreadFee + fxMarkup
 
 	// Effective rate includes markup
 	effectiveRate := marketRate * (1 - corridor.FxMarkupPct)
@@ -142,7 +148,9 @@ func calculateSpread(corridor *CorridorConfig, amountUSD float64, marketRate flo
 
 	// Recommend cheapest active rail
 	recommendedRail := "swift"
-	if len(corridor.SupportedRails) > 0 { recommendedRail = corridor.SupportedRails[0] }
+	if len(corridor.SupportedRails) > 0 {
+		recommendedRail = corridor.SupportedRails[0]
+	}
 
 	return &SpreadQuote{
 		CorridorCode:    corridor.Code,
@@ -165,7 +173,11 @@ func calculateSpread(corridor *CorridorConfig, amountUSD float64, marketRate flo
 func listCorridorsHandler(w http.ResponseWriter, r *http.Request) {
 	state.mu.RLock()
 	list := make([]*CorridorConfig, 0, len(state.corridors))
-	for _, c := range state.corridors { if c.Active { list = append(list, c) } }
+	for _, c := range state.corridors {
+		if c.Active {
+			list = append(list, c)
+		}
+	}
 	state.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"corridors": list, "total": len(list)})
@@ -173,23 +185,39 @@ func listCorridorsHandler(w http.ResponseWriter, r *http.Request) {
 
 func getQuoteHandler(w http.ResponseWriter, r *http.Request) {
 	corridorCode := r.URL.Query().Get("corridor")
-	amountStr    := r.URL.Query().Get("amount")
+	amountStr := r.URL.Query().Get("amount")
 	marketRateStr := r.URL.Query().Get("market_rate")
 
 	var amount, marketRate float64
 	fmt.Sscanf(amountStr, "%f", &amount)
 	fmt.Sscanf(marketRateStr, "%f", &marketRate)
-	if amount <= 0 { amount = 100 }
-	if marketRate <= 0 { marketRate = 1.0 }
+	if amount <= 0 {
+		amount = 100
+	}
+	if marketRate <= 0 {
+		marketRate = 1.0
+	}
 
 	state.mu.RLock()
 	corridor, ok := state.corridors[corridorCode]
 	state.mu.RUnlock()
 
-	if !ok { http.Error(w, "Corridor not found", 404); return }
-	if !corridor.Active { http.Error(w, "Corridor inactive", 409); return }
-	if amount < corridor.MinAmountUSD { http.Error(w, fmt.Sprintf("Amount below minimum %.2f", corridor.MinAmountUSD), 400); return }
-	if amount > corridor.MaxAmountUSD { http.Error(w, fmt.Sprintf("Amount above maximum %.2f", corridor.MaxAmountUSD), 400); return }
+	if !ok {
+		http.Error(w, "Corridor not found", 404)
+		return
+	}
+	if !corridor.Active {
+		http.Error(w, "Corridor inactive", 409)
+		return
+	}
+	if amount < corridor.MinAmountUSD {
+		http.Error(w, fmt.Sprintf("Amount below minimum %.2f", corridor.MinAmountUSD), 400)
+		return
+	}
+	if amount > corridor.MaxAmountUSD {
+		http.Error(w, fmt.Sprintf("Amount above maximum %.2f", corridor.MaxAmountUSD), 400)
+		return
+	}
 
 	quote := calculateSpread(corridor, amount, marketRate)
 	quotesGenerated.Add(1)
@@ -198,10 +226,12 @@ func getQuoteHandler(w http.ResponseWriter, r *http.Request) {
 	// Update analytics
 	state.mu.Lock()
 	if a, ok := state.analytics[corridorCode]; ok {
-		a.Volume30dUSD  += amount
+		a.Volume30dUSD += amount
 		a.Revenue30dUSD += quote.TotalFeeUSD
 		a.TxCount30d++
-		if a.TxCount30d > 0 { a.AvgTxUSD = a.Volume30dUSD / float64(a.TxCount30d) }
+		if a.TxCount30d > 0 {
+			a.AvgTxUSD = a.Volume30dUSD / float64(a.TxCount30d)
+		}
 	}
 	state.mu.Unlock()
 
@@ -212,7 +242,9 @@ func getQuoteHandler(w http.ResponseWriter, r *http.Request) {
 func getHealthHandler(w http.ResponseWriter, r *http.Request) {
 	state.mu.RLock()
 	health := make([]*CorridorHealth, 0, len(state.health))
-	for _, h := range state.health { health = append(health, h) }
+	for _, h := range state.health {
+		health = append(health, h)
+	}
 	state.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"corridors": health})
@@ -221,17 +253,29 @@ func getHealthHandler(w http.ResponseWriter, r *http.Request) {
 func getAnalyticsHandler(w http.ResponseWriter, r *http.Request) {
 	state.mu.RLock()
 	analytics := make([]*CorridorAnalytics, 0, len(state.analytics))
-	for _, a := range state.analytics { analytics = append(analytics, a) }
+	for _, a := range state.analytics {
+		analytics = append(analytics, a)
+	}
 	state.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"corridors": analytics})
 }
 
 func upsertCorridorHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", 405); return }
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
 	var cfg CorridorConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil { http.Error(w, "Invalid body", 400); return }
-	if cfg.Code == "" { http.Error(w, "code required", 400); return }
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		http.Error(w, "Invalid body", 400)
+		return
+	}
+	if cfg.Code == "" {
+		http.Error(w, "code required", 400)
+		return
+	}
 
 	state.mu.Lock()
 	state.corridors[cfg.Code] = &cfg
@@ -268,17 +312,20 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	slog.Info("[CorridorEngine] Starting", "port", port)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health",              healthHandler)
-	mux.HandleFunc("/livez",               func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/readyz",              func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/metrics",             metricsHandler)
-	mux.HandleFunc("/corridors",           listCorridorsHandler)
-	mux.HandleFunc("/corridors/upsert",    upsertCorridorHandler)
-	mux.HandleFunc("/corridors/quote",     getQuoteHandler)
-	mux.HandleFunc("/corridors/health",    getHealthHandler)
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/metrics", metricsHandler)
+	mux.HandleFunc("/corridors", listCorridorsHandler)
+	mux.HandleFunc("/corridors/upsert", upsertCorridorHandler)
+	mux.HandleFunc("/corridors/quote", getQuoteHandler)
+	mux.HandleFunc("/corridors/health", getHealthHandler)
 	mux.HandleFunc("/corridors/analytics", getAnalyticsHandler)
 
-	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second}
+	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Addr: ":" + port, Handler: mux, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second}
 	slog.Info("[CorridorEngine] Ready", "addr", srv.Addr)
-	if err := srv.ListenAndServe(); err != nil { slog.Error("Fatal", "err", err); os.Exit(1) }
+	if err := srv.ListenAndServe(); err != nil {
+		slog.Error("Fatal", "err", err)
+		os.Exit(1)
+	}
 }

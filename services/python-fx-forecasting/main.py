@@ -60,7 +60,7 @@ _db_pool = None
 def _get_db():
     global _db_pool
     if _db_pool is None:
-        _db_pool = psycopg2.connect(_DB_URL)
+        _db_pool = psycopg2.connect(_DB_URL, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
         _db_pool.autocommit = True
         with _db_pool.cursor() as cur:
             cur.execute("""
@@ -899,7 +899,7 @@ def _get_db_conn():
     """Get PostgreSQL connection (middleware-ready: swap to TigerBeetle in production)."""
     try:
         db_url = _require_env("DATABASE_URL")
-        conn = psycopg2.connect(db_url)
+        conn = psycopg2.connect(db_url, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
         conn.autocommit = True
         return conn
     except Exception:
@@ -994,4 +994,4 @@ def _db_log_event(table_prefix, event_type, payload):
         except Exception:
             pass
 
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, log_level="info", workers=int(os.getenv("UVICORN_WORKERS", "1")))  # SPEC-wave14 §4.6: env-configurable workers (default 1)

@@ -3,7 +3,7 @@ import { kycOrchestrationRouter } from "./routers/kycOrchestration";
 import { billCaptureRouter } from "./routers/billCapture"; // W10-C3
 import { developerExperienceRouter } from "./routers/developerExperience";
 import { and, asc, desc, eq, inArray, sql, gte, lte, count, lt, isNotNull, sum } from "drizzle-orm";
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from "crypto";
+import { createHash, randomBytes, scrypt, timingSafeEqual } from "crypto";
 import { z } from "zod";
 import { COOKIE_NAME, SESSION_EXPIRY_MS } from "../shared/const";
 import {
@@ -20,6 +20,7 @@ import {
   getNotificationsByUserId, getRecurringPaymentsByUserId, getReferralsByUserId,
   getSavingsGoalsByUserId, getTransactionsByUserId, getUnreadNotificationCount,
   getUserByOpenId, getVirtualAccountsByUserId, getWalletsByUserId, saveFxRates,
+  invalidateUserByOpenIdCache,
   upsertUser,
 } from "./db";
 import { storagePut } from "./storage";
@@ -508,20 +509,28 @@ const PIN_SCRYPT_PARAMS = { N: 16384, r: 8, p: 1 } as const;
 const PIN_SCRYPT_KEYLEN = 32;
 const PIN_SCRYPT_SALT_BYTES = 16;
 
-function pinHashScrypt(pin: string): string {
+// W14: async crypto.scrypt (off the event loop) with IDENTICAL params to the
+// former scryptSync calls — stored hash format and values are unchanged.
+function scryptAsync(pin: string, salt: Buffer): Promise<Buffer> {
+  return new Promise((resolve, reject) =>
+    scrypt(pin, salt, PIN_SCRYPT_KEYLEN, PIN_SCRYPT_PARAMS, (err, key) =>
+      err ? reject(err) : resolve(key as Buffer)));
+}
+
+async function pinHashScrypt(pin: string): Promise<string> {
   const salt = randomBytes(PIN_SCRYPT_SALT_BYTES);
-  const key = scryptSync(pin, salt, PIN_SCRYPT_KEYLEN, PIN_SCRYPT_PARAMS);
+  const key = await scryptAsync(pin, salt);
   return `scrypt:v1:${salt.toString("hex")}:${key.toString("hex")}`;
 }
 
-function pinVerifyScrypt(pin: string, stored: string): boolean {
+async function pinVerifyScrypt(pin: string, stored: string): Promise<boolean> {
   const parts = stored.split(":");
   if (parts.length !== 4 || parts[0] !== "scrypt" || parts[1] !== "v1") return false; // fail closed on corrupt format
   if (!/^[0-9a-f]+$/i.test(parts[2]) || !/^[0-9a-f]+$/i.test(parts[3])) return false;
   const salt = Buffer.from(parts[2], "hex");
   const expected = Buffer.from(parts[3], "hex");
   if (salt.length !== PIN_SCRYPT_SALT_BYTES || expected.length !== PIN_SCRYPT_KEYLEN) return false;
-  const actual = scryptSync(pin, salt, PIN_SCRYPT_KEYLEN, PIN_SCRYPT_PARAMS);
+  const actual = await scryptAsync(pin, salt);
   return timingSafeEqual(actual, expected);
 }
 
@@ -723,11 +732,13 @@ export const appRouter = router({
   dashboard: router({
     summary: protectedProcedure.query(async ({ ctx }) => {
       const userId = ctx.user.id;
-      const [userWallets, recentTxns, unreadCount, dbUser] = await Promise.all([
+      // W14: all independent reads fire in parallel (was: rates + savings goals
+      // serialized after the first Promise.all).
+      const [userWallets, recentTxns, unreadCount, dbUser, rates, savingsGoalsList] = await Promise.all([
         getWalletsByUserId(userId), getTransactionsByUserId(userId, { limit: 5 }),
         getUnreadNotificationCount(userId), getUserByOpenId(ctx.user.openId),
+        getLiveRates("USD"), getSavingsGoalsByUserId(userId),
       ]);
-      const rates = await getLiveRates("USD");
       const ngnRate = rates["NGN"] ?? 1538.46;
       let totalUSD = 0;
       for (const w of userWallets) { const bal = Number(w.balance); const rate = rates[w.currency] ?? 1; totalUSD += bal / rate; }
@@ -741,31 +752,26 @@ export const appRouter = router({
           const now = new Date();
           const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
           const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-          const [sentRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
-          const [recvRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, monthStart)));
-          sentThisMonth = Number(sentRow?.total ?? 0);
-          receivedThisMonth = Number(recvRow?.total ?? 0);
-          // Last month totals for real monthly change calculation
-          const [sentLastRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, lastMonthStart), lte(transactions.createdAt, monthStart)));
-          const [recvLastRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, lastMonthStart), lte(transactions.createdAt, monthStart)));
-          sentLastMonth = Number(sentLastRow?.total ?? 0);
-          receivedLastMonth = Number(recvLastRow?.total ?? 0);
-          // Spend by category — query actual transaction types
-          const categoryTypes = ["bill", "airtime", "exchange", "topup"] as const;
-          for (const cType of categoryTypes) {
-            try {
-              const [row] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, cType), gte(transactions.createdAt, monthStart)));
-              const val = Number(row?.total ?? 0);
-              if (cType === "bill" || cType === "airtime") billsThisMonth += val;
-              else if (cType === "exchange") exchangeThisMonth = val;
-              else otherThisMonth += val;
-            } catch { /* skip */ }
-          }
-          // Savings contributions this month
-          try {
-            const [savRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "savings"), gte(transactions.createdAt, monthStart)));
-            savingsThisMonth = Number(savRow?.total ?? 0);
-          } catch { /* skip */ }
+          // W14: one round trip — all monthly/last-month/category sums via
+          // SUM(...) FILTER (WHERE ...) instead of 8 serial aggregate queries.
+          const [agg] = await db.select({
+            sentThis: sql<string>`COALESCE(SUM("fromAmount") FILTER (WHERE type = 'send' AND "createdAt" >= ${monthStart}), 0)`,
+            recvThis: sql<string>`COALESCE(SUM("fromAmount") FILTER (WHERE type = 'receive' AND "createdAt" >= ${monthStart}), 0)`,
+            sentLast: sql<string>`COALESCE(SUM("fromAmount") FILTER (WHERE type = 'send' AND "createdAt" < ${monthStart}), 0)`,
+            recvLast: sql<string>`COALESCE(SUM("fromAmount") FILTER (WHERE type = 'receive' AND "createdAt" < ${monthStart}), 0)`,
+            bills: sql<string>`COALESCE(SUM("fromAmount") FILTER (WHERE type IN ('bill', 'airtime') AND "createdAt" >= ${monthStart}), 0)`,
+            exchange: sql<string>`COALESCE(SUM("fromAmount") FILTER (WHERE type = 'exchange' AND "createdAt" >= ${monthStart}), 0)`,
+            savings: sql<string>`COALESCE(SUM("fromAmount") FILTER (WHERE type = 'savings' AND "createdAt" >= ${monthStart}), 0)`,
+            other: sql<string>`COALESCE(SUM("fromAmount") FILTER (WHERE type = 'topup' AND "createdAt" >= ${monthStart}), 0)`,
+          }).from(transactions).where(and(eq(transactions.userId, userId), gte(transactions.createdAt, lastMonthStart)));
+          sentThisMonth = Number(agg?.sentThis ?? 0);
+          receivedThisMonth = Number(agg?.recvThis ?? 0);
+          sentLastMonth = Number(agg?.sentLast ?? 0);
+          receivedLastMonth = Number(agg?.recvLast ?? 0);
+          billsThisMonth = Number(agg?.bills ?? 0);
+          exchangeThisMonth = Number(agg?.exchange ?? 0);
+          savingsThisMonth = Number(agg?.savings ?? 0);
+          otherThisMonth = Number(agg?.other ?? 0);
         } catch { /* ignore monthly query errors in test env */ }
       }
       // Calculate real monthly change: (this month net) vs (last month net), as % of total balance
@@ -775,7 +781,6 @@ export const appRouter = router({
       if (totalNGN > 0) {
         monthlyChange = Math.round(((thisMonthNet - lastMonthNet) / totalNGN) * 10000) / 100;
       }
-      const savingsGoalsList = await getSavingsGoalsByUserId(userId);
       const activeSavings = savingsGoalsList.filter((g: any) => g.status === "active").length;
       // Build spend by category with real data
       const spendByCategory = [
@@ -3165,7 +3170,7 @@ export const appRouter = router({
         const stored = String(storedPinHash);
         let currentMatches: boolean;
         if (stored.startsWith("scrypt:")) {
-          currentMatches = pinVerifyScrypt(input.currentPin, stored);
+          currentMatches = await pinVerifyScrypt(input.currentPin, stored);
         } else if (/^[0-9a-f]{64}$/i.test(stored)) {
           // Legacy dual-read: unsalted sha256(pin + userId).
           currentMatches = pinVerifyLegacySha256(input.currentPin, ctx.user.id, stored);
@@ -3178,7 +3183,7 @@ export const appRouter = router({
         }
       }
       // No stored PIN => treat as initial setup (allowed). Always write scrypt format.
-      const hashedPin = pinHashScrypt(input.newPin);
+      const hashedPin = await pinHashScrypt(input.newPin);
       await db.execute(sql`UPDATE users SET transaction_pin = ${hashedPin}, pin_changed_at = NOW() WHERE id = ${ctx.user.id}`);
       await createAuditLog({ userId: ctx.user.id, action: "PIN_CHANGED", description: "Transaction PIN changed" });
       return { success: true, changedAt: new Date().toISOString() };
@@ -4864,7 +4869,9 @@ export const appRouter = router({
           const valid = await verifyTOTP(input.totpCode, enrollment.secret);
           if (!valid) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
         }
-        await db.update(users).set({ role: input.role }).where(eq(users.id, input.userId)).returning();
+        const [promoted] = await db.update(users).set({ role: input.role }).where(eq(users.id, input.userId)).returning();
+        // W14: invalidate user:byOpenId cache-aside after direct role mutation
+        if (promoted?.openId) await invalidateUserByOpenIdCache(promoted.openId);
         // Audit trail
         logAdminAction({
           actorId: ctx.user.id,
@@ -4912,7 +4919,9 @@ export const appRouter = router({
           const [user] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, doc.userId)).limit(1);
           const tierMap: Record<string, string> = { tier0: "tier1", tier1: "tier2", tier2: "tier3", tier3: "tier3" };
           const nextTier = tierMap[user?.kycTier ?? "tier0"] ?? "tier1";
-          await db.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId)).returning();
+          const [tierUpd] = await db.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId)).returning();
+          // W14: invalidate user:byOpenId cache-aside after direct kycTier mutation
+          if (tierUpd?.openId) await invalidateUserByOpenIdCache(tierUpd.openId);
         }
         // Audit trail
         logAdminAction({
@@ -4977,7 +4986,9 @@ export const appRouter = router({
             const [user] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, doc.userId)).limit(1);
             const tierMap: Record<string, string> = { tier0: "tier1", tier1: "tier2", tier2: "tier3", tier3: "tier3" };
             const nextTier = tierMap[user?.kycTier ?? "tier0"] ?? "tier1";
-            await db.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId)).returning();
+            const [tierUpd] = await db.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId)).returning();
+            // W14: invalidate user:byOpenId cache-aside after direct kycTier mutation
+            if (tierUpd?.openId) await invalidateUserByOpenIdCache(tierUpd.openId);
           }
           approved++;
         }

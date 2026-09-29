@@ -55,14 +55,14 @@ type ServiceHealth struct {
 }
 
 type PlatformHealth struct {
-	Status     ServiceStatus   `json:"status"`
-	Score      int             `json:"score"` // 0–100
-	Services   []ServiceHealth `json:"services"`
-	Healthy    int             `json:"healthy"`
-	Degraded   int             `json:"degraded"`
-	Unhealthy  int             `json:"unhealthy"`
-	CheckedAt  string          `json:"checked_at"`
-	Version    string          `json:"version"`
+	Status    ServiceStatus   `json:"status"`
+	Score     int             `json:"score"` // 0–100
+	Services  []ServiceHealth `json:"services"`
+	Healthy   int             `json:"healthy"`
+	Degraded  int             `json:"degraded"`
+	Unhealthy int             `json:"unhealthy"`
+	CheckedAt string          `json:"checked_at"`
+	Version   string          `json:"version"`
 }
 
 type ServiceCheck struct {
@@ -367,11 +367,12 @@ func main() {
 	logger.Info("Health probe server listening", "addr", addr)
 
 	server := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              addr,
+		Handler:           mux,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	if err := server.ListenAndServe(); err != nil {

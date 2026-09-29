@@ -44,6 +44,8 @@ def get_pool() -> psycopg2.pool.ThreadedConnectionPool:
             minconn=2,
             maxconn=10,
             dsn=DATABASE_URL,
+            # SPEC-wave14 §4.6: 5s statement_timeout per pooled connection.
+            options="-c statement_timeout=5000",
         )
     return _pool
 

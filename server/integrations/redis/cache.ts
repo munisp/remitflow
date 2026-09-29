@@ -98,10 +98,20 @@ export async function cacheDelPattern(pattern: string): Promise<void> {
   if (!client) return;
 
   try {
-    const keys = await client.keys(pattern);
-    if (keys.length > 0) {
-      await client.del(...keys);
-      logger.debug({ pattern, count: keys.length }, "[Redis] Cache pattern deleted");
+    // W14: cursor SCAN instead of KEYS (KEYS blocks the Redis event loop on
+    // large keyspaces); deletes are batched per scan page.
+    let cursor = "0";
+    let deleted = 0;
+    do {
+      const [next, keys] = await client.scan(cursor, "MATCH", pattern, "COUNT", 100);
+      cursor = next;
+      if (keys.length > 0) {
+        await client.del(...keys);
+        deleted += keys.length;
+      }
+    } while (cursor !== "0");
+    if (deleted > 0) {
+      logger.debug({ pattern, count: deleted }, "[Redis] Cache pattern deleted");
     }
   } catch (err) {
     logger.warn({ err, pattern }, "[Redis] Cache pattern del failed");

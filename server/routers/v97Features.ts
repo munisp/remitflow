@@ -14,10 +14,10 @@
  */
 
 import { TRPCError } from "@trpc/server";
-import { and, count, desc, eq, gte, isNull, lte, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { randomBytes, createHash } from "crypto";
 import { z } from "zod";
-import { getDb } from "../db.js";
+import { getDb, invalidateUserByOpenIdCache } from "../db.js";
 import {
   adminProcedure,
   auditedProcedure,
@@ -375,6 +375,8 @@ export const kycLifecycleRouter = router({
       const tierMap: Record<number, string> = { 1: "tier1", 2: "tier2", 3: "tier3", 4: "tier3" };
       const [_row] = await db.update(users).set({ kycTier: tierMap[input.tier ?? existing.tier] as any }).where(eq(users.id, input.userId)).returning();
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+      // W14: invalidate user:byOpenId cache-aside after direct kycTier mutation
+      if (_row.openId) await invalidateUserByOpenIdCache(_row.openId);
       await sendAuditLog({ userId: ctx.user.id, action: "kyc_lifecycle.approve", resource: "kyc_lifecycle", resourceId: String(existing.id), severity: "info", details: { targetUserId: input.userId } });
       return updated;
     }),
@@ -1324,38 +1326,53 @@ export const adminComplianceTriggerRouter = router({
       let scanned = 0;
       let remindersQueued = 0;
 
-      for (const daysAhead of thresholds) {
-        const windowStart = new Date(now.getTime() + daysAhead * 86400000 - 3600000);
-        const windowEnd = new Date(now.getTime() + daysAhead * 86400000 + 3600000);
-        const conditions = [
-          gte(documentVaultTable.expiresAt, windowStart),
-          lte(documentVaultTable.expiresAt, windowEnd),
-          eq(documentVaultTable.status, "active"),
-        ];
-        if (input.userId) conditions.push(eq(documentVaultTable.userId, input.userId));
+      // W14: was 5 doc queries + 2 queries per doc (N+1). Now: one range query
+      // for all docs expiring within the widest window, one IN (...) query for
+      // recently-sent reminders, in-memory grouping, one batched insert.
+      const widestStart = new Date(now.getTime() + thresholds[0] * 86400000 - 3600000);
+      const widestEnd = new Date(now.getTime() + thresholds[thresholds.length - 1] * 86400000 + 3600000);
+      const conditions = [
+        gte(documentVaultTable.expiresAt, widestStart),
+        lte(documentVaultTable.expiresAt, widestEnd),
+        eq(documentVaultTable.status, "active"),
+      ];
+      if (input.userId) conditions.push(eq(documentVaultTable.userId, input.userId));
+      const docs = await db.select().from(documentVaultTable).where(and(...conditions));
+      scanned = docs.length;
 
-        const docs = await db.select().from(documentVaultTable).where(and(...conditions));
+      if (!input.dryRun && docs.length > 0) {
+        const recentSent = await db.select({
+          documentId: docReminderLog.documentId,
+          reminderType: docReminderLog.reminderType,
+        }).from(docReminderLog)
+          .where(and(
+            inArray(docReminderLog.documentId, docs.map((d) => d.id)),
+            gte(docReminderLog.sentAt, new Date(now.getTime() - 24 * 3600000)),
+          ));
+        const sentSet = new Set(recentSent.map((r) => `${r.documentId}:${r.reminderType}`));
+        const reminderRows: Array<typeof docReminderLog.$inferInsert> = [];
         for (const doc of docs) {
-          scanned++;
-          if (!input.dryRun) {
-            // Check if reminder already sent
-            const [alreadySent] = await db.select().from(docReminderLog)
-              .where(and(
-                eq(docReminderLog.documentId, doc.id),
-                eq(docReminderLog.reminderType, `${daysAhead}d`),
-                gte(docReminderLog.sentAt, new Date(now.getTime() - 24 * 3600000))
-              )).limit(1);
-            if (!alreadySent) {
-              await db.insert(docReminderLog).values({
-                userId: doc.userId,
-                documentId: doc.id,
-                reminderType: `${daysAhead}d`,
-                channel: "admin_trigger",
-                status: "sent",
-              }).returning();
-              remindersQueued++;
-            }
+          const expMs = doc.expiresAt ? new Date(doc.expiresAt).getTime() : null;
+          if (expMs == null) continue;
+          for (const daysAhead of thresholds) {
+            const windowStart = now.getTime() + daysAhead * 86400000 - 3600000;
+            const windowEnd = now.getTime() + daysAhead * 86400000 + 3600000;
+            if (expMs < windowStart || expMs > windowEnd) continue;
+            const dedupeKey = `${doc.id}:${daysAhead}d`;
+            if (sentSet.has(dedupeKey)) continue;
+            sentSet.add(dedupeKey); // windows can overlap ±1h — insert once per (doc, threshold)
+            reminderRows.push({
+              userId: doc.userId,
+              documentId: doc.id,
+              reminderType: `${daysAhead}d`,
+              channel: "admin_trigger",
+              status: "sent",
+            });
           }
+        }
+        if (reminderRows.length > 0) {
+          await db.insert(docReminderLog).values(reminderRows);
+          remindersQueued = reminderRows.length;
         }
       }
 

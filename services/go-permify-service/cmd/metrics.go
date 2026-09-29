@@ -75,10 +75,11 @@ func startPermifyMetricsServer(addr string) {
 	mux.HandleFunc("/healthz", permifyMetricsHealthHandler)
 	mux.HandleFunc("/readyz", permifyMetricsHealthHandler)
 	server := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              addr,
+		Handler:           mux,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      10 * time.Second,
 	}
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		panic("permify metrics server failed: " + err.Error())

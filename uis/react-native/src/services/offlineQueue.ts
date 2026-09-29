@@ -11,6 +11,14 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const QUEUE_KEY = "@remitflow/offline_queue";
 const MAX_RETRIES = 5;
+/**
+ * wave14 perf (M2): hard cap on persisted queue length so AsyncStorage
+ * payloads stay bounded (each enqueue rewrites the whole JSON blob).
+ * Terminal entries are pruned on every enqueue; if the cap is still
+ * exceeded by pending work, the OLDEST entries are evicted first — newest
+ * user intent is the most likely to still matter.
+ */
+const MAX_QUEUE_LENGTH = 200;
 
 export interface QueuedOperation {
   id: string;
@@ -41,7 +49,10 @@ export async function enqueue(params: {
   payload: Record<string, unknown>;
   idempotencyKey?: string;
 }): Promise<string> {
-  const queue = await loadQueue();
+  // wave14 perf (M2): prune terminal (completed/failed) entries before
+  // append — they are never replayed (getPending filters them out) and only
+  // inflate the persisted blob otherwise.
+  const queue = (await loadQueue()).filter((op) => op.status === "pending");
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const key =
     params.idempotencyKey ??
@@ -49,6 +60,14 @@ export async function enqueue(params: {
 
   if (queue.some((op) => op.idempotencyKey === key)) {
     return key;
+  }
+
+  // Cap the queue: evict oldest pending entries if we are already full.
+  while (queue.length >= MAX_QUEUE_LENGTH) {
+    const evicted = queue.shift();
+    console.warn(
+      `[offlineQueue] queue full (${MAX_QUEUE_LENGTH}); evicting oldest op ${evicted?.id}`
+    );
   }
 
   queue.push({

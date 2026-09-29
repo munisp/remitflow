@@ -30,7 +30,6 @@ import { registerMojaloopWebhooks } from "../mojaloop.webhook";
 import { registerPaymentRailWebhooks } from "../payment-rail-webhooks";
 import { registerSseClient, registerUserSseClient } from "../sse.service";
 import { requestIdMiddleware, requestLoggingMiddleware } from "../middleware/requestId";
-import { kycGateMiddleware } from "../middleware/kycGate";
 import { publishPlatformEvent, checkMiddlewareHealth } from "../lib/middleware-orchestrator";
 import { attachServicesHealthWS, stopServicesHealthWS } from "../ws-services-health.js";
 import { requireValidEnv } from "./startup-validation";
@@ -123,9 +122,11 @@ async function startServer() {
     next();
   });
 
-  // KYC/KYB gate middleware — enforces tier-based access control on all payment routes
-  // Triggers KYC verification workflows for users who haven't completed the required tier
-  app.use(kycGateMiddleware);
+  // W14-C1: the kycGateMiddleware Express mount was deleted — it was a
+  // documented no-op pass-through (kycGate.ts:425: "KYC enforcement is handled
+  // at the tRPC procedure level via requireKYCTier()"). Removing it changes no
+  // behavior and drops one layer from the per-request chain. The procedure-level
+  // requireKYCTier/checkTransactionLimits gates are untouched and fail closed.
 
   // Production hardening: health checks, metrics, CORS, OpenAPI
   registerProductionHardeningRoutes(app);

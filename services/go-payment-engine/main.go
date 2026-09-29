@@ -349,7 +349,7 @@ func createProgrammablePayment(c *gin.Context) {
 	}
 
 	if db != nil {
-		_, err := db.Exec(`INSERT INTO programmable_payments (payment_id, name, schedule_type, stablecoin, amount, status, cron_expression, max_executions, created_at)
+		_, err := db.ExecContext(c.Request.Context(), `INSERT INTO programmable_payments (payment_id, name, schedule_type, stablecoin, amount, status, cron_expression, max_executions, created_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 			payment.PaymentID, payment.Name, payment.ScheduleType, payment.Stablecoin,
 			payment.Amount, payment.Status, payment.CronExpr, payment.MaxExec, payment.CreatedAt)
@@ -395,7 +395,7 @@ func registerMerchant(c *gin.Context) {
 	}
 
 	if db != nil {
-		_, _ = db.Exec(`INSERT INTO merchant_accounts (merchant_id, business_name, api_key, webhook_url, webhook_secret, settlement_coin, fee_percent, status, created_at)
+		_, _ = db.ExecContext(c.Request.Context(), `INSERT INTO merchant_accounts (merchant_id, business_name, api_key, webhook_url, webhook_secret, settlement_coin, fee_percent, status, created_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 			merchant.MerchantID, merchant.BusinessName, merchant.APIKey, merchant.WebhookURL,
 			merchant.WebhookSecret, merchant.SettlementCoin, merchant.FeePercent, merchant.Status, merchant.CreatedAt)
@@ -650,6 +650,11 @@ func main() {
 			slog.Warn("PostgreSQL ping failed — running in-memory mode", "error", err)
 			db = nil
 		} else {
+			// Bound the pool: without limits a single service can exhaust PG
+			// max_connections under burst load.
+			db.SetMaxOpenConns(25)
+			db.SetMaxIdleConns(5)
+			db.SetConnMaxLifetime(5 * time.Minute)
 			slog.Info("Connected to PostgreSQL")
 		}
 	}

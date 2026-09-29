@@ -195,15 +195,15 @@ func (c *Client) GetHourlyStats(ctx context.Context, hours int, corridor string)
 
 // HourlyStatRow is a single row from liveness_stats_hourly.
 type HourlyStatRow struct {
-	Bucket            time.Time      `db:"bucket"`
-	CorridorCode      string         `db:"corridor_code"`
-	Total             int            `db:"total"`
-	Passed            int            `db:"passed"`
-	Failed            int            `db:"failed"`
-	DeepfakeCount     int            `db:"deepfake_count"`
-	SpoofingCount     int            `db:"spoofing_count"`
-	AvgPassiveScore   sql.NullFloat64 `db:"avg_passive_score"`
-	AvgDeepfakeScore  sql.NullFloat64 `db:"avg_deepfake_score"`
+	Bucket           time.Time       `db:"bucket"`
+	CorridorCode     string          `db:"corridor_code"`
+	Total            int             `db:"total"`
+	Passed           int             `db:"passed"`
+	Failed           int             `db:"failed"`
+	DeepfakeCount    int             `db:"deepfake_count"`
+	SpoofingCount    int             `db:"spoofing_count"`
+	AvgPassiveScore  sql.NullFloat64 `db:"avg_passive_score"`
+	AvgDeepfakeScore sql.NullFloat64 `db:"avg_deepfake_score"`
 }
 
 func passiveScoreOrNil(ev *model.LivenessResultEvent) any {

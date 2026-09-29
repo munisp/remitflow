@@ -6,6 +6,27 @@
 # separately (see docker-compose.security.yml).
 # Applied idempotently by services/gateway-config/apply-stablecoin-routes.py
 # (invoked from setup-routes.sh).
+#
+# wave14 (SPEC-wave14 §7) performance tuning:
+#   - Every upstream below carries keepalive_pool (reuses upstream connections,
+#     removing TCP handshake latency per request) and an explicit
+#     connect/send/read timeout budget.
+#   - Retry policy: APISIX has NO route-level `retries` field — retries are an
+#     upstream attribute. All routes in THIS file are POST mutations, so both
+#     upstreams here set retries: 0 (a mutation must never be replayed by the
+#     gateway). The idempotent GET query routes in
+#     deploy/apisix/routes-wave10.yaml use the separate `remitflow-backend-read`
+#     upstream (same nodes, retries: 1) defined in that file.
+#   - limit-count policy: left at the default `local` (per-worker counter).
+#     `policy: redis` was evaluated and NOT applied — repo evidence shows it is
+#     not currently satisfiable: the `redis` service (docker-compose.yml:34,
+#     redis:6379, ACL user remitflow_app) is on the compose default network,
+#     while the apisix container (docker-compose.yml:1075) is attached only to
+#     remitflow-internal/remitflow-external, and REDIS_APP_PASSWORD is not
+#     provisioned to the apisix container or to the route-render path. Until a
+#     network link + credential path exist, counters are per nginx worker:
+#     effective limits are (count × worker count) — acceptable here because
+#     these limits are DoS guardrails, not exact quotas.
 
 routes:
   # ─── ON-RAMP ───────────────────────────────────────────────────────────────
@@ -184,6 +205,20 @@ upstreams:
       - host: remitflow-server
         port: 3000
         weight: 1
+    # wave14: upstream connection reuse + timeout budget. idle_timeout/requests
+    # are numeric seconds/count per APISIX schema (no unit suffixes).
+    keepalive_pool:
+      size: 32
+      idle_timeout: 60   # seconds
+      requests: 1000
+    timeout:
+      connect: 2         # seconds
+      send: 10
+      read: 10
+    # POST mutations only on this upstream (in this file) — never replayed.
+    # Shared with the mutation routes of deploy/apisix/routes-wave10.yaml;
+    # GET query routes there use remitflow-backend-read (retries: 1).
+    retries: 0
     health_check:
       active:
         http_path: /api/health
@@ -198,6 +233,17 @@ upstreams:
       - host: go-stablecoin-settlement
         port: 8215
         weight: 1
+    # wave14: connection reuse + timeout budget (same rationale as above).
+    keepalive_pool:
+      size: 32
+      idle_timeout: 60   # seconds
+      requests: 1000
+    timeout:
+      connect: 2         # seconds
+      send: 10
+      read: 10
+    # Webhook POSTs are mutations; providers re-deliver on failure themselves.
+    retries: 0
     health_check:
       active:
         http_path: /health

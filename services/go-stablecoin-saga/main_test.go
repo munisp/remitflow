@@ -3,6 +3,7 @@ package main
 // Tests for wave12 compensation honesty + live FX + real TB bridge contract.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -64,16 +65,16 @@ func TestGetEngineFXRate(t *testing.T) {
 	stablecoinEngine = srv.URL
 	defer func() { stablecoinEngine = old }()
 
-	rate, err := getEngineFXRate("NGN", "USD")
+	rate, err := getEngineFXRate(context.Background(), "NGN", "USD")
 	if err != nil || rate != 0.000625 {
 		t.Fatalf("rate=%v err=%v", rate, err)
 	}
-	if _, err := getEngineFXRate("XXX", "USD"); err == nil {
+	if _, err := getEngineFXRate(context.Background(), "XXX", "USD"); err == nil {
 		t.Fatal("unknown pair did not fail closed")
 	}
 
 	stablecoinEngine = "http://127.0.0.1:1" // unreachable
-	if _, err := getEngineFXRate("NGN", "USD"); err == nil {
+	if _, err := getEngineFXRate(context.Background(), "NGN", "USD"); err == nil {
 		t.Fatal("unreachable engine did not fail closed")
 	}
 }
@@ -90,7 +91,7 @@ func TestPostTBTransfer_PerIndexErrorFails(t *testing.T) {
 	tigerBeetleBridge = srv.URL
 	defer func() { tigerBeetleBridge = old }()
 
-	err := postTBTransfer(tbTransfer{ID: "1", DebitAccountID: "2", CreditAccountID: "3", Amount: "100", Ledger: 9001, Code: 1})
+	err := postTBTransfer(context.Background(), tbTransfer{ID: "1", DebitAccountID: "2", CreditAccountID: "3", Amount: "100", Ledger: 9001, Code: 1})
 	if err == nil {
 		t.Fatal("per-index bridge error treated as success")
 	}
@@ -113,7 +114,7 @@ func TestLedgerReversal_InvertsTransfer(t *testing.T) {
 	defer func() { tigerBeetleBridge = old }()
 
 	orig := tbTransfer{ID: "42", DebitAccountID: "100", CreditAccountID: "200", Amount: "5000000", Ledger: 9001, Code: 1}
-	if err := ledgerReversal(orig); err != nil {
+	if err := ledgerReversal(context.Background(), orig); err != nil {
 		t.Fatalf("reversal failed: %v", err)
 	}
 	if got.ID != deterministicU128("reversal:42") {
@@ -136,7 +137,7 @@ func TestLedgerReversal_ErrorPropagates(t *testing.T) {
 	old := tigerBeetleBridge
 	tigerBeetleBridge = srv.URL
 	defer func() { tigerBeetleBridge = old }()
-	if err := ledgerReversal(tbTransfer{ID: "7", DebitAccountID: "1", CreditAccountID: "2", Amount: "1", Ledger: 9001, Code: 1}); err == nil {
+	if err := ledgerReversal(context.Background(), tbTransfer{ID: "7", DebitAccountID: "1", CreditAccountID: "2", Amount: "1", Ledger: 9001, Code: 1}); err == nil {
 		t.Fatal("bridge outage swallowed by reversal compensation")
 	}
 }

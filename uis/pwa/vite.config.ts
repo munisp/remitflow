@@ -35,7 +35,22 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
+        // PERF (wave14): precache narrowed to the app shell only — the
+        // previous '**/*.{js,css,...}' glob precached EVERY lazy route chunk
+        // (~1.15 MB / 67 entries) on SW install, most of it never visited.
+        // Now: entry HTML/JS/CSS, the eager vendor chunks, and the
+        // self-hosted font. Lazy route chunks stay network-only (no runtime
+        // caching per the CLI-004 security note below).
+        globPatterns: [
+          'index.html',
+          'assets/index-*.js',
+          'assets/index-*.css',
+          'assets/react-vendor-*.js',
+          'assets/i18n-*.js',
+          'assets/trpc-*.js',
+          'fonts/*.woff2',
+          '*.{ico,png,svg,webmanifest}',
+        ],
         // SECURITY (CLI-004): no runtimeCaching for API responses.
         // The previous NetworkFirst rule cached ALL authenticated
         // api.remittance.com responses (balances, transactions, PII, KYC
@@ -59,6 +74,35 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    // PERF (wave14): maps are still generated for debugging but no
+    // `//# sourceMappingURL` comment is shipped ('hidden'), so browsers do
+    // not fetch multi-MB .map files in production.
+    sourcemap: 'hidden',
+    // es2020: native async/await + optional chaining — less downlevel
+    // transform, smaller output, still covers all supported PWA targets.
+    target: 'es2020',
+    rollupOptions: {
+      output: {
+        // Groups verified against actual imports (grep over src/):
+        // - forms group from the audit is intentionally absent:
+        //   react-hook-form and @hookform/resolvers have ZERO importers in
+        //   this app, so the chunk would be empty.
+        // - map: maplibre-gl is imported only by OperationsMap, and is
+        //   currently dead-code-eliminated when VITE_MAP_STYLE_URL is unset;
+        //   the group is kept so a configured build splits it out of the
+        //   OperationsMap route chunk automatically.
+        manualChunks: {
+          'react-vendor': ['react', 'react-dom', 'react-router-dom'],
+          i18n: ['i18next', 'react-i18next', 'i18next-browser-languagedetector'],
+          trpc: [
+            '@trpc/client',
+            '@trpc/react-query',
+            '@tanstack/react-query',
+            'superjson',
+          ],
+          map: ['maplibre-gl'],
+        },
+      },
+    },
   },
 });

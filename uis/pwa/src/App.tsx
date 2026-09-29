@@ -74,7 +74,8 @@ interface ProtectedRouteProps {
 }
 
 const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
-  const { isAuthenticated } = useAuthStore();
+  // Selector subscription — re-render only when the auth flag flips.
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
@@ -84,7 +85,8 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
 };
 
 const AdminRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
-  const { isAuthenticated, user } = useAuthStore();
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const user = useAuthStore((s) => s.user);
   if (!isAuthenticated) return <Navigate to="/login" replace />;
   if (user?.role !== "admin") return <Navigate to="/" replace />;
   return <>{children}</>;
@@ -93,41 +95,63 @@ const AdminRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
 const App: React.FC = () => {
   const [tenantLoading, setTenantLoading] = useState(true);
   const [tenantError, setTenantError] = useState<string | null>(null);
-  const { refreshAuth, token, isAuthenticated } = useAuthStore();
+  const refreshAuth = useAuthStore((s) => s.refreshAuth);
+  const token = useAuthStore((s) => s.token);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
-  // Load tenant configuration and initialize auth on app startup
+  // Load tenant configuration and initialize auth on app startup.
+  // PERF (wave14): tenant config fetch and auth refresh previously ran as a
+  // sequential waterfall (two serialized round trips before first paint).
+  // They are independent, so they now run concurrently via allSettled.
+  // Fail-closed semantics are unchanged: a tenant-config failure still shows
+  // the blocking error screen, and refreshAuth failures still resolve to
+  // logged-out state internally (authStore.refreshAuth never throws — every
+  // failure path ends in logout()/isAuthenticated=false, which routes to
+  // /login via ProtectedRoute). A defensive rejection of refreshAuth is
+  // treated as unauthenticated as well.
   useEffect(() => {
     const initializeApp = async () => {
-      try {
-        // Load tenant configuration
-        const tenantId = tenantService.getTenantId();
-        console.log("Loading tenant configuration for:", tenantId);
+      // If user has a token, set it in the API client before any request.
+      // Cookie-based SSO sessions carry no bearer token but still need
+      // re-verification against the platform server on every boot.
+      if (token) {
+        setAuthToken(token);
+      }
 
-        if (!tenantService.hasTenantConfig()) {
-          await tenantService.getTenant(tenantId || undefined);
-          console.log("✓ Tenant configuration loaded");
-        }
+      const tenantId = tenantService.getTenantId();
+      console.log("Loading tenant configuration for:", tenantId);
 
-        // If user has a token, set it in the API client and check if it needs refresh.
-        // Cookie-based SSO sessions carry no bearer token but still need
-        // re-verification against the platform server on every boot.
-        if (token) {
-          setAuthToken(token);
-        }
-        if (token || isAuthenticated) {
-          await refreshAuth();
-        }
+      const tenantTask = tenantService.hasTenantConfig()
+        ? Promise.resolve()
+        : tenantService.getTenant(tenantId || undefined);
+      const authTask =
+        token || isAuthenticated ? refreshAuth() : Promise.resolve();
 
-        setTenantLoading(false);
-      } catch (error) {
-        console.error("Failed to load tenant configuration:", error);
+      const [tenantResult, authResult] = await Promise.allSettled([
+        tenantTask,
+        authTask,
+      ]);
+
+      if (authResult.status === "rejected") {
+        // Defensive fail-closed: refreshAuth is designed not to throw, but
+        // if it ever does, force unauthenticated so protected routes bounce
+        // to /login instead of rendering with a stale session.
+        console.error("Auth refresh failed during boot:", authResult.reason);
+        useAuthStore.getState().logout();
+      }
+
+      if (tenantResult.status === "rejected") {
+        console.error(
+          "Failed to load tenant configuration:",
+          tenantResult.reason,
+        );
         setTenantError(
-          error instanceof Error
-            ? error.message
+          tenantResult.reason instanceof Error
+            ? tenantResult.reason.message
             : "Failed to load configuration",
         );
-        setTenantLoading(false);
       }
+      setTenantLoading(false);
     };
 
     initializeApp();
@@ -183,6 +207,11 @@ const App: React.FC = () => {
   return (
     <>
       <OfflineIndicator />
+      {/* PERF (wave14): this root Suspense now only covers the public lazy
+          routes (login/register/onboarding/partner). Authenticated child
+          routes are caught by a dedicated Suspense inside Layout around
+          <Outlet/>, so a lazy page chunk suspending no longer unmounts the
+          already-painted app shell (sidebar/header/bottom-nav). */}
       <Suspense fallback={<LoadingSpinner />}>
         <Routes>
           <Route path="/login" element={<Login />} />

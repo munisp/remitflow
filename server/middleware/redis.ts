@@ -83,9 +83,17 @@ export async function cacheIncr(key: string, ttlSeconds?: number): Promise<numbe
   const r = getRedisClient();
   if (!r) return 0;
   try {
-    const val = await r.incr(key);
-    if (ttlSeconds && val === 1) await r.expire(key, ttlSeconds);
-    return val;
+    // W14: single-RTT Lua (INCR + conditional EXPIRE atomically) — same
+    // pattern as redisHardened.ts rate limiting; was INCR then EXPIRE (2 RTs,
+    // with a crash window leaving a TTL-less key).
+    const script = `
+      local v = redis.call("INCR", KEYS[1])
+      local ttl = tonumber(ARGV[1])
+      if ttl > 0 and v == 1 then redis.call("EXPIRE", KEYS[1], ttl) end
+      return v
+    `;
+    const val = await r.eval(script, 1, key, String(ttlSeconds ?? 0));
+    return Number(val);
   } catch { return 0; }
 }
 

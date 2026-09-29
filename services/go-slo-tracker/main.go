@@ -25,7 +25,9 @@ import (
 )
 
 func getEnv(k, d string) string {
-	if v := os.Getenv(k); v != "" { return v }
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
 	return d
 }
 
@@ -41,13 +43,13 @@ type SLODefinition struct {
 }
 
 var sloDefinitions = []SLODefinition{
-	{Name: "transfer-availability",   Service: "transfer-engine",   Target: 99.9,  ErrorBudget: 0.1,  Window: "30d"},
-	{Name: "transfer-latency-p99",    Service: "transfer-engine",   Target: 99.0,  ErrorBudget: 1.0,  Window: "30d"},
-	{Name: "fx-quote-availability",   Service: "fx-engine",         Target: 99.95, ErrorBudget: 0.05, Window: "30d"},
-	{Name: "kyc-completion-rate",     Service: "kyc-service",       Target: 95.0,  ErrorBudget: 5.0,  Window: "30d"},
-	{Name: "onramp-success-rate",     Service: "stablecoin-engine", Target: 99.0,  ErrorBudget: 1.0,  Window: "30d"},
-	{Name: "api-gateway-availability",Service: "apisix",            Target: 99.99, ErrorBudget: 0.01, Window: "30d"},
-	{Name: "webhook-delivery-rate",   Service: "webhook-engine",    Target: 99.5,  ErrorBudget: 0.5,  Window: "30d"},
+	{Name: "transfer-availability", Service: "transfer-engine", Target: 99.9, ErrorBudget: 0.1, Window: "30d"},
+	{Name: "transfer-latency-p99", Service: "transfer-engine", Target: 99.0, ErrorBudget: 1.0, Window: "30d"},
+	{Name: "fx-quote-availability", Service: "fx-engine", Target: 99.95, ErrorBudget: 0.05, Window: "30d"},
+	{Name: "kyc-completion-rate", Service: "kyc-service", Target: 95.0, ErrorBudget: 5.0, Window: "30d"},
+	{Name: "onramp-success-rate", Service: "stablecoin-engine", Target: 99.0, ErrorBudget: 1.0, Window: "30d"},
+	{Name: "api-gateway-availability", Service: "apisix", Target: 99.99, ErrorBudget: 0.01, Window: "30d"},
+	{Name: "webhook-delivery-rate", Service: "webhook-engine", Target: 99.5, ErrorBudget: 0.5, Window: "30d"},
 }
 
 // ── Event recording ───────────────────────────────────────────────────────────
@@ -59,10 +61,10 @@ type SLOEvent struct {
 }
 
 type SLOState struct {
-	mu         sync.RWMutex
-	events     []SLOEvent
-	totalGood  int64
-	totalBad   int64
+	mu        sync.RWMutex
+	events    []SLOEvent
+	totalGood int64
+	totalBad  int64
 }
 
 var sloStates = make(map[string]*SLOState)
@@ -71,7 +73,9 @@ var sloMu sync.RWMutex
 func getOrCreateState(sloName string) *SLOState {
 	sloMu.Lock()
 	defer sloMu.Unlock()
-	if s, ok := sloStates[sloName]; ok { return s }
+	if s, ok := sloStates[sloName]; ok {
+		return s
+	}
 	s := &SLOState{events: make([]SLOEvent, 0, 10000)}
 	sloStates[sloName] = s
 	return s
@@ -104,24 +108,37 @@ var railCosts = map[string]float64{
 
 // ── Metrics ───────────────────────────────────────────────────────────────────
 var (
-	sloEventsTotal    atomic.Int64
-	sloBreachesTotal  atomic.Int64
-	costEntriesTotal  atomic.Int64
+	sloEventsTotal   atomic.Int64
+	sloBreachesTotal atomic.Int64
+	costEntriesTotal atomic.Int64
 )
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 func recordEventHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", 405); return }
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
 	var evt SLOEvent
-	if err := json.NewDecoder(r.Body).Decode(&evt); err != nil { http.Error(w, "Invalid body", 400); return }
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
+	if err := json.NewDecoder(r.Body).Decode(&evt); err != nil {
+		http.Error(w, "Invalid body", 400)
+		return
+	}
 	evt.Timestamp = time.Now().UnixMilli()
 
 	state := getOrCreateState(evt.SLOName)
 	state.mu.Lock()
 	state.events = append(state.events, evt)
-	if evt.Success { state.totalGood++ } else { state.totalBad++ }
+	if evt.Success {
+		state.totalGood++
+	} else {
+		state.totalBad++
+	}
 	// Keep last 100k events
-	if len(state.events) > 100_000 { state.events = state.events[1000:] }
+	if len(state.events) > 100_000 {
+		state.events = state.events[1000:]
+	}
 	state.mu.Unlock()
 	sloEventsTotal.Add(1)
 
@@ -149,11 +166,17 @@ func computeCompliance(state *SLOState, windowMs int64) float64 {
 	cutoff := time.Now().UnixMilli() - windowMs
 	var good, total int64
 	for _, e := range state.events {
-		if e.Timestamp < cutoff { continue }
+		if e.Timestamp < cutoff {
+			continue
+		}
 		total++
-		if e.Success { good++ }
+		if e.Success {
+			good++
+		}
 	}
-	if total == 0 { return 100.0 }
+	if total == 0 {
+		return 100.0
+	}
 	return math.Round(float64(good)/float64(total)*100000) / 1000
 }
 
@@ -162,8 +185,8 @@ func getSLOReportHandler(w http.ResponseWriter, r *http.Request) {
 	for _, def := range sloDefinitions {
 		state := getOrCreateState(def.Name)
 		compliance30d := computeCompliance(state, 30*24*3600*1000)
-		compliance1h  := computeCompliance(state, 3600*1000)
-		compliance6h  := computeCompliance(state, 6*3600*1000)
+		compliance1h := computeCompliance(state, 3600*1000)
+		compliance6h := computeCompliance(state, 6*3600*1000)
 		compliance24h := computeCompliance(state, 24*3600*1000)
 
 		errorBudgetUsed := math.Max(0, def.Target-compliance30d)
@@ -171,17 +194,22 @@ func getSLOReportHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Burn rate = (1 - compliance) / error_budget_per_hour
 		budgetPerHour := def.ErrorBudget / (30 * 24)
-		burnRate1h  := 0.0
-		burnRate6h  := 0.0
+		burnRate1h := 0.0
+		burnRate6h := 0.0
 		burnRate24h := 0.0
 		if budgetPerHour > 0 {
-			burnRate1h  = (100 - compliance1h)  / budgetPerHour
-			burnRate6h  = (100 - compliance6h)  / budgetPerHour
+			burnRate1h = (100 - compliance1h) / budgetPerHour
+			burnRate6h = (100 - compliance6h) / budgetPerHour
 			burnRate24h = (100 - compliance24h) / budgetPerHour
 		}
 
 		status := "healthy"
-		if compliance30d < def.Target { status = "breached"; sloBreachesTotal.Add(1) } else if burnRate1h > 14.4 { status = "at_risk" }
+		if compliance30d < def.Target {
+			status = "breached"
+			sloBreachesTotal.Add(1)
+		} else if burnRate1h > 14.4 {
+			status = "at_risk"
+		}
 
 		state.mu.RLock()
 		totalEvents := state.totalGood + state.totalBad
@@ -191,12 +219,12 @@ func getSLOReportHandler(w http.ResponseWriter, r *http.Request) {
 			SLOName: def.Name, Service: def.Service, Target: def.Target,
 			CurrentCompliance: compliance30d,
 			ErrorBudgetTotal:  def.ErrorBudget,
-			ErrorBudgetUsed:   math.Round(errorBudgetUsed*1000)/1000,
-			ErrorBudgetRemain: math.Round(errorBudgetRemain*1000)/1000,
-			BurnRate1h:  math.Round(burnRate1h*100)/100,
-			BurnRate6h:  math.Round(burnRate6h*100)/100,
-			BurnRate24h: math.Round(burnRate24h*100)/100,
-			Status: status, TotalEvents: totalEvents,
+			ErrorBudgetUsed:   math.Round(errorBudgetUsed*1000) / 1000,
+			ErrorBudgetRemain: math.Round(errorBudgetRemain*1000) / 1000,
+			BurnRate1h:        math.Round(burnRate1h*100) / 100,
+			BurnRate6h:        math.Round(burnRate6h*100) / 100,
+			BurnRate24h:       math.Round(burnRate24h*100) / 100,
+			Status:            status, TotalEvents: totalEvents,
 		})
 	}
 
@@ -205,24 +233,35 @@ func getSLOReportHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func recordCostHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", 405); return }
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
 	var req struct {
 		TenantID string `json:"tenant_id"`
 		Rail     string `json:"rail"`
 		Service  string `json:"service"`
 		Count    int    `json:"count"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, "Invalid body", 400); return }
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid body", 400)
+		return
+	}
 
 	unitCost := railCosts[req.Rail]
-	if unitCost == 0 { unitCost = 0.50 }
+	if unitCost == 0 {
+		unitCost = 0.50
+	}
 	entry := CostEntry{
 		TenantID: req.TenantID, Rail: req.Rail, Service: req.Service,
 		CostUSD: unitCost * float64(req.Count), Timestamp: time.Now().UnixMilli(),
 	}
 	costMu.Lock()
 	costEntries = append(costEntries, entry)
-	if len(costEntries) > 100_000 { costEntries = costEntries[1000:] }
+	if len(costEntries) > 100_000 {
+		costEntries = costEntries[1000:]
+	}
 	costMu.Unlock()
 	costEntriesTotal.Add(1)
 	w.WriteHeader(202)
@@ -232,30 +271,40 @@ func getCostReportHandler(w http.ResponseWriter, r *http.Request) {
 	tenantID := r.URL.Query().Get("tenant_id")
 	window := r.URL.Query().Get("window")
 	var windowMs int64 = 30 * 24 * 3600 * 1000
-	if window == "7d"  { windowMs = 7 * 24 * 3600 * 1000 }
-	if window == "24h" { windowMs = 24 * 3600 * 1000 }
-	if window == "1h"  { windowMs = 3600 * 1000 }
+	if window == "7d" {
+		windowMs = 7 * 24 * 3600 * 1000
+	}
+	if window == "24h" {
+		windowMs = 24 * 3600 * 1000
+	}
+	if window == "1h" {
+		windowMs = 3600 * 1000
+	}
 
 	cutoff := time.Now().UnixMilli() - windowMs
-	byRail    := make(map[string]float64)
+	byRail := make(map[string]float64)
 	byService := make(map[string]float64)
-	byTenant  := make(map[string]float64)
+	byTenant := make(map[string]float64)
 	total := 0.0
 
 	costMu.RLock()
 	for _, e := range costEntries {
-		if e.Timestamp < cutoff { continue }
-		if tenantID != "" && e.TenantID != tenantID { continue }
-		byRail[e.Rail]       += e.CostUSD
+		if e.Timestamp < cutoff {
+			continue
+		}
+		if tenantID != "" && e.TenantID != tenantID {
+			continue
+		}
+		byRail[e.Rail] += e.CostUSD
 		byService[e.Service] += e.CostUSD
 		byTenant[e.TenantID] += e.CostUSD
-		total                += e.CostUSD
+		total += e.CostUSD
 	}
 	costMu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total_usd": math.Round(total*100)/100,
+		"total_usd":  math.Round(total*100) / 100,
 		"by_rail":    byRail,
 		"by_service": byService,
 		"by_tenant":  byTenant,
@@ -266,7 +315,7 @@ func getCostReportHandler(w http.ResponseWriter, r *http.Request) {
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "healthy", "service": "go-slo-tracker",
+		"status": "healthy", "service": "go-slo-tracker",
 		"slo_events_total":   sloEventsTotal.Load(),
 		"slo_breaches_total": sloBreachesTotal.Load(),
 		"cost_entries_total": costEntriesTotal.Load(),
@@ -290,16 +339,19 @@ func main() {
 	slog.Info("[SLOTracker] Starting", "port", port)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health",        healthHandler)
-	mux.HandleFunc("/livez",         func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/readyz",        func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/metrics",       metricsHandler)
-	mux.HandleFunc("/slo/event",     recordEventHandler)
-	mux.HandleFunc("/slo/report",    getSLOReportHandler)
-	mux.HandleFunc("/cost/record",   recordCostHandler)
-	mux.HandleFunc("/cost/report",   getCostReportHandler)
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/metrics", metricsHandler)
+	mux.HandleFunc("/slo/event", recordEventHandler)
+	mux.HandleFunc("/slo/report", getSLOReportHandler)
+	mux.HandleFunc("/cost/record", recordCostHandler)
+	mux.HandleFunc("/cost/report", getCostReportHandler)
 
-	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second}
+	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Addr: ":" + port, Handler: mux, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second}
 	slog.Info("[SLOTracker] Ready", "addr", srv.Addr)
-	if err := srv.ListenAndServe(); err != nil { slog.Error("Fatal", "err", err); os.Exit(1) }
+	if err := srv.ListenAndServe(); err != nil {
+		slog.Error("Fatal", "err", err)
+		os.Exit(1)
+	}
 }

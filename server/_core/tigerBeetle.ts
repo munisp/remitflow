@@ -16,6 +16,8 @@
  *   TIGERBEETLE_TIMEOUT_MS   e.g. 5000
  */
 import axios, { AxiosInstance } from "axios";
+import http from "http";
+import https from "https";
 import { context as otelContext, propagation, defaultTextMapSetter } from "@opentelemetry/api";
 import { logger } from "./logger";
 import { getDb } from "../db";
@@ -26,7 +28,17 @@ import { getRequestTenantContext } from "./tenantGuc";
 const BRIDGE_URL = process.env.TIGERBEETLE_BRIDGE_URL || "http://localhost:8080";
 const CLUSTER_ID = BigInt(process.env.TIGERBEETLE_CLUSTER_ID || "0");
 const TIMEOUT_MS = parseInt(process.env.TIGERBEETLE_TIMEOUT_MS || "5000", 10);
-const MAX_RETRIES = 3;
+// W14-C1: wired (previously declared but unused). createTransfers replays are
+// safe because TigerBeetle dedupes by transfer id — a replay of an accepted
+// transfer is an idempotent no-op, never a double-post.
+const MAX_RETRIES = 3; // total attempts: 1 initial + 2 bounded replays
+const RETRY_DELAYS_MS = [200, 800] as const;
+
+// W14-C1: keep-alive agents — the bridge is on the hottest money path, and a
+// fresh TCP (and possibly TLS) handshake per transfer batch was pure latency.
+// maxSockets 32 bounds connection growth under burst load.
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 32 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32 });
 
 // ─── TigerBeetle Account Flags ────────────────────────────────────────────────
 export const TB_FLAGS = {
@@ -158,6 +170,8 @@ function getClient(): AxiosInstance {
     _client = axios.create({
       baseURL: BRIDGE_URL,
       timeout: TIMEOUT_MS,
+      httpAgent,
+      httpsAgent,
       headers: {
         "Content-Type": "application/json",
         "X-Cluster-ID": CLUSTER_ID.toString(),
@@ -291,7 +305,31 @@ export async function createTransfers(transfers: CreateTransferRequest[]): Promi
     user_data_32: t.userData32 ?? 0,
     timeout: t.timeout ?? 0,
   }));
-  const res = await getClient().post("/transfers/create", { transfers: payload });
+  // W14-C1: bounded replay of the BATCH on transport failure only (no response
+  // received) or a 5xx from the bridge. Idempotent by construction — TB keys
+  // transfers by id, so a replay of an already-accepted batch returns per-item
+  // "exists" results instead of double-posting. A 4xx or a parsed response is
+  // never retried; per-leg errors keep their index-based attribution below.
+  let res: Awaited<ReturnType<AxiosInstance["post"]>> | null = null;
+  let lastTransportError: unknown = null;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      res = await getClient().post("/transfers/create", { transfers: payload });
+      lastTransportError = null;
+      break;
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      const retriable = status === undefined || status >= 500;
+      lastTransportError = err;
+      if (!retriable || attempt === MAX_RETRIES - 1) break;
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1]));
+    }
+  }
+  if (!res) {
+    throw lastTransportError instanceof Error
+      ? lastTransportError
+      : new Error(`[TigerBeetle] transfers/create failed after ${MAX_RETRIES} attempts`);
+  }
   const errors: Record<string, unknown>[] = res.data?.errors ?? [];
   return transfers.map((t, i) => {
     const err = errors.find((e: Record<string, unknown>) => e.index === i);

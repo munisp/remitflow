@@ -31,6 +31,7 @@ Boot refuses to start without DATABASE_URL and INTERNAL_API_TOKEN (fail-closed,
 mirrors services/python-refund-engine).
 """
 
+import anyio
 import hmac
 import logging
 import os
@@ -58,15 +59,30 @@ def _require_env(name: str) -> str:
 
 
 _DB_URL = _require_env("DATABASE_URL")
-_db_conn = None
+
+# SPEC-wave14 §4.1: module-level ThreadedConnectionPool instead of a single
+# global connection (which serialised concurrent runs and was driven from the
+# event loop). statement_timeout=5000ms is applied per-connection via PG
+# `options` so a runaway analytics query can never hold a pooled connection
+# hostage indefinitely (fail-closed on slow queries).
+from psycopg2 import pool as _pg_pool
+
+_db_pool = _pg_pool.ThreadedConnectionPool(
+    minconn=1,
+    maxconn=10,
+    dsn=_DB_URL,
+    options="-c statement_timeout=5000",
+)
 
 
 def _get_db():
-    global _db_conn
-    if _db_conn is None or _db_conn.closed:
-        _db_conn = psycopg2.connect(_DB_URL)
-        _db_conn.autocommit = True
-    return _db_conn
+    conn = _db_pool.getconn()
+    conn.autocommit = True
+    return conn
+
+
+def _put_db(conn) -> None:
+    _db_pool.putconn(conn)
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -247,42 +263,50 @@ def _counterfeit_concentration(cur, window_start: date, window_end: date,
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-@app.post("/analytics/teller-fraud/run", response_model=RunResponse)
-async def run_teller_fraud_scan(req: RunRequest, _auth: None = Depends(require_internal_auth)):
+def _run_scan_sync(req: RunRequest) -> RunResponse:
+    """Blocking psycopg2 scan worker.
+
+    SPEC-wave14 §4.1: this runs in a worker thread (anyio.to_thread.run_sync)
+    so the event loop is never blocked by synchronous DB I/O. The connection
+    is borrowed from the module-level pool and ALWAYS returned (finally).
+    """
     window_end = datetime.now(timezone.utc).date()
     window_start = window_end - timedelta(days=req.window_days)
     skipped: list[str] = []
     signals_written = 0
 
     conn = _get_db()
-    with conn.cursor() as cur:
-        # (a) variance_pattern — SKIPPED HONESTLY. Verified at implementation
-        # time: bdc_teller_drawers has no session/variance columns and no
-        # bdc_drawer_sessions / drawer-adjustment table exists anywhere in the
-        # repo (drizzle/schema.ts + all migrations + all services).
-        skipped.append(
-            "variance_pattern: no drawer-session variance source exists "
-            "(bdc_teller_drawers has no session/variance columns; no "
-            "bdc_drawer_sessions or drawer-adjustment table in schema)"
-        )
+    try:
+        with conn.cursor() as cur:
+            # (a) variance_pattern — SKIPPED HONESTLY. Verified at implementation
+            # time: bdc_teller_drawers has no session/variance columns and no
+            # bdc_drawer_sessions / drawer-adjustment table exists anywhere in the
+            # repo (drizzle/schema.ts + all migrations + all services).
+            skipped.append(
+                "variance_pattern: no drawer-session variance source exists "
+                "(bdc_teller_drawers has no session/variance columns; no "
+                "bdc_drawer_sessions or drawer-adjustment table in schema)"
+            )
 
-        for tenant, teller, score, evidence in _out_of_hours_signals(
-            cur, window_start, window_end, req.tenant_id
-        ):
-            _upsert_signal(cur, tenant, teller, "out_of_hours", window_start, window_end, score, evidence)
-            signals_written += 1
+            for tenant, teller, score, evidence in _out_of_hours_signals(
+                cur, window_start, window_end, req.tenant_id
+            ):
+                _upsert_signal(cur, tenant, teller, "out_of_hours", window_start, window_end, score, evidence)
+                signals_written += 1
 
-        for tenant, teller, score, evidence in _reversal_concentration(
-            cur, window_start, window_end, req.tenant_id
-        ):
-            _upsert_signal(cur, tenant, teller, "reversal_concentration", window_start, window_end, score, evidence)
-            signals_written += 1
+            for tenant, teller, score, evidence in _reversal_concentration(
+                cur, window_start, window_end, req.tenant_id
+            ):
+                _upsert_signal(cur, tenant, teller, "reversal_concentration", window_start, window_end, score, evidence)
+                signals_written += 1
 
-        for tenant, teller, score, evidence in _counterfeit_concentration(
-            cur, window_start, window_end, req.tenant_id
-        ):
-            _upsert_signal(cur, tenant, teller, "counterfeit_concentration", window_start, window_end, score, evidence)
-            signals_written += 1
+            for tenant, teller, score, evidence in _counterfeit_concentration(
+                cur, window_start, window_end, req.tenant_id
+            ):
+                _upsert_signal(cur, tenant, teller, "counterfeit_concentration", window_start, window_end, score, evidence)
+                signals_written += 1
+    finally:
+        _put_db(conn)
 
     logger.info(
         "teller-fraud run complete: tenant=%s window=%s..%s signals=%d skipped=%d",
@@ -296,6 +320,13 @@ async def run_teller_fraud_scan(req: RunRequest, _auth: None = Depends(require_i
     )
 
 
+@app.post("/analytics/teller-fraud/run", response_model=RunResponse)
+async def run_teller_fraud_scan(req: RunRequest, _auth: None = Depends(require_internal_auth)):
+    # psycopg2 is synchronous — offload the whole scan to a worker thread so
+    # concurrent requests (and /health) are not head-of-line blocked.
+    return await anyio.to_thread.run_sync(_run_scan_sync, req)
+
+
 @app.get("/health")
 async def health():
     return {"status": "healthy", "service": "teller-analytics"}
@@ -304,4 +335,8 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("TELLER_ANALYTICS_PORT", "8230"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # SPEC-wave14 §4.6: worker count is env-configurable (default 1 — in-app
+    # concurrency comes from the async loop + thread pool; raise via env for
+    # multi-core deployments).
+    workers = int(os.getenv("UVICORN_WORKERS", "1"))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, workers=workers)

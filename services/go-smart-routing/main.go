@@ -47,25 +47,27 @@ var (
 )
 
 func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" { return v }
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
 	return fallback
 }
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
 type Rail struct {
-	ID              string  `json:"id"`
-	Name            string  `json:"name"`           // SWIFT, SEPA, PIX, UPI, CIPS, FedNow, PAPSS, Mojaloop, MobileMoney, Stablecoin
-	Corridors       []string `json:"corridors"`
-	BaseCostBPS     float64 `json:"base_cost_bps"`  // basis points
-	AvgSettlementMs int64   `json:"avg_settlement_ms"`
-	Reliability     float64 `json:"reliability"`    // 0-1 (30-day success rate)
-	MaxAmountUSD    float64 `json:"max_amount_usd"`
-	MinAmountUSD    float64 `json:"min_amount_usd"`
-	OperatingHours  string  `json:"operating_hours"` // "24/7" or "Mon-Fri 09:00-17:00 UTC"
-	IsAvailable     bool    `json:"is_available"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name"` // SWIFT, SEPA, PIX, UPI, CIPS, FedNow, PAPSS, Mojaloop, MobileMoney, Stablecoin
+	Corridors       []string  `json:"corridors"`
+	BaseCostBPS     float64   `json:"base_cost_bps"` // basis points
+	AvgSettlementMs int64     `json:"avg_settlement_ms"`
+	Reliability     float64   `json:"reliability"` // 0-1 (30-day success rate)
+	MaxAmountUSD    float64   `json:"max_amount_usd"`
+	MinAmountUSD    float64   `json:"min_amount_usd"`
+	OperatingHours  string    `json:"operating_hours"` // "24/7" or "Mon-Fri 09:00-17:00 UTC"
+	IsAvailable     bool      `json:"is_available"`
 	LastHealthCheck time.Time `json:"last_health_check"`
-	CircuitState    string  `json:"circuit_state"` // closed, open, half-open
+	CircuitState    string    `json:"circuit_state"` // closed, open, half-open
 }
 
 type RouteRequest struct {
@@ -74,19 +76,19 @@ type RouteRequest struct {
 	FromCountry  string  `json:"from_country"`
 	ToCountry    string  `json:"to_country"`
 	Amount       float64 `json:"amount"`
-	Priority     string  `json:"priority"` // cost, speed, reliability
+	Priority     string  `json:"priority"`  // cost, speed, reliability
 	UserTier     string  `json:"user_tier"` // standard, premium, enterprise
 }
 
 type RouteDecision struct {
-	PrimaryRail    string   `json:"primary_rail"`
-	FallbackRails  []string `json:"fallback_rails"`
-	EstimatedCost  float64  `json:"estimated_cost_bps"`
-	EstimatedTime  int64    `json:"estimated_time_ms"`
-	Confidence     float64  `json:"confidence"`
-	Score          float64  `json:"score"`
-	Reasoning      string   `json:"reasoning"`
-	CorridorID     string   `json:"corridor_id"`
+	PrimaryRail   string   `json:"primary_rail"`
+	FallbackRails []string `json:"fallback_rails"`
+	EstimatedCost float64  `json:"estimated_cost_bps"`
+	EstimatedTime int64    `json:"estimated_time_ms"`
+	Confidence    float64  `json:"confidence"`
+	Score         float64  `json:"score"`
+	Reasoning     string   `json:"reasoning"`
+	CorridorID    string   `json:"corridor_id"`
 }
 
 type CorridorStats struct {
@@ -109,7 +111,9 @@ var (
 func initDB() {
 	var err error
 	db, err = sql.Open("postgres", pgDSN)
-	if err != nil { log.Fatalf("[SmartRoute] DB connect failed: %v", err) }
+	if err != nil {
+		log.Fatalf("[SmartRoute] DB connect failed: %v", err)
+	}
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(10)
 	db.SetConnMaxLifetime(5 * time.Minute)
@@ -158,7 +162,9 @@ func initDB() {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 	`)
-	if err != nil { log.Printf("[SmartRoute] Table creation: %v", err) }
+	if err != nil {
+		log.Printf("[SmartRoute] Table creation: %v", err)
+	}
 
 	// Seed default rails if empty
 	var count int
@@ -173,12 +179,12 @@ func initDB() {
 
 func seedDefaultRails() {
 	defaultRails := []struct {
-		id, name string
-		corridors []string
-		costBPS float64
+		id, name     string
+		corridors    []string
+		costBPS      float64
 		settlementMs int64
-		reliability float64
-		maxUSD float64
+		reliability  float64
+		maxUSD       float64
 	}{
 		{"swift", "SWIFT", []string{"*"}, 150, 172800000, 0.97, 10000000},
 		{"sepa", "SEPA", []string{"EUR-*", "*-EUR"}, 5, 3600000, 0.99, 5000000},
@@ -201,8 +207,14 @@ func seedDefaultRails() {
 }
 
 func loadRails() {
-	rows, err := db.Query(`SELECT id, name, corridors, base_cost_bps, avg_settlement_ms, reliability, max_amount_usd, min_amount_usd, operating_hours, is_available, last_health_check, circuit_state FROM routing_rails`)
-	if err != nil { log.Printf("[SmartRoute] loadRails: %v", err); return }
+	// bounded 5s ctx — wave-14 perf
+	lctx, lcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer lcancel()
+	rows, err := db.QueryContext(lctx, `SELECT id, name, corridors, base_cost_bps, avg_settlement_ms, reliability, max_amount_usd, min_amount_usd, operating_hours, is_available, last_health_check, circuit_state FROM routing_rails`)
+	if err != nil {
+		log.Printf("[SmartRoute] loadRails: %v", err)
+		return
+	}
 	defer rows.Close()
 
 	var loaded []Rail
@@ -213,7 +225,9 @@ func loadRails() {
 			continue
 		}
 		corridors = strings.Trim(corridors, "{}")
-		if corridors != "" { r.Corridors = strings.Split(corridors, ",") }
+		if corridors != "" {
+			r.Corridors = strings.Split(corridors, ",")
+		}
 		loaded = append(loaded, r)
 	}
 
@@ -233,14 +247,14 @@ func routeTransaction(req RouteRequest) RouteDecision {
 
 	if len(candidateRails) == 0 {
 		return RouteDecision{
-			PrimaryRail: "swift",
+			PrimaryRail:   "swift",
 			FallbackRails: []string{"stablecoin"},
 			EstimatedCost: 150,
 			EstimatedTime: 172800000,
-			Confidence: 0.5,
-			Score: 0.3,
-			Reasoning: "No optimized rail available, defaulting to SWIFT",
-			CorridorID: corridor,
+			Confidence:    0.5,
+			Score:         0.3,
+			Reasoning:     "No optimized rail available, defaulting to SWIFT",
+			CorridorID:    corridor,
 		}
 	}
 
@@ -254,22 +268,30 @@ func routeTransaction(req RouteRequest) RouteDecision {
 	weights := getCorridorWeights(req.Priority, req.FromCountry, req.ToCountry)
 
 	for _, r := range candidateRails {
-		if !r.IsAvailable || r.CircuitState == "open" { continue }
+		if !r.IsAvailable || r.CircuitState == "open" {
+			continue
+		}
 
 		// Normalize scores (0-1, higher is better)
 		costScore := 1.0 - math.Min(r.BaseCostBPS/200.0, 1.0)
 		speedScore := 1.0 - math.Min(float64(r.AvgSettlementMs)/(86400000.0*2), 1.0)
 		reliabilityScore := r.Reliability
 		capacityScore := 1.0
-		if req.Amount > r.MaxAmountUSD*0.8 { capacityScore = 0.5 }
-		if req.Amount > r.MaxAmountUSD { capacityScore = 0 }
+		if req.Amount > r.MaxAmountUSD*0.8 {
+			capacityScore = 0.5
+		}
+		if req.Amount > r.MaxAmountUSD {
+			capacityScore = 0
+		}
 
 		totalScore := weights.Cost*costScore + weights.Speed*speedScore +
 			weights.Reliability*reliabilityScore + weights.Capacity*capacityScore
 
 		// Premium users get speed boost
 		if req.UserTier == "premium" || req.UserTier == "enterprise" {
-			if r.AvgSettlementMs < 60000 { totalScore *= 1.1 }
+			if r.AvgSettlementMs < 60000 {
+				totalScore *= 1.1
+			}
 		}
 
 		scored = append(scored, scoredRail{rail: r, score: totalScore})
@@ -298,8 +320,10 @@ func routeTransaction(req RouteRequest) RouteDecision {
 		CorridorID:    corridor,
 	}
 
-	// Persist decision
-	db.Exec(`INSERT INTO routing_decisions (corridor, amount_usd, primary_rail, fallback_rails, estimated_cost_bps, estimated_time_ms)
+	// Persist decision (bounded 5s ctx — wave-14 perf)
+	pctx, pcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pcancel()
+	db.ExecContext(pctx, `INSERT INTO routing_decisions (corridor, amount_usd, primary_rail, fallback_rails, estimated_cost_bps, estimated_time_ms)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		corridor, req.Amount, decision.PrimaryRail, "{"+strings.Join(fallbacks, ",")+"}", decision.EstimatedCost, decision.EstimatedTime)
 
@@ -338,10 +362,14 @@ func getCorridorWeights(priority, fromCountry, toCountry string) Weights {
 func filterRailsForCorridor(corridor string, amount float64) []Rail {
 	var candidates []Rail
 	parts := strings.Split(corridor, "-")
-	if len(parts) != 2 { return candidates }
+	if len(parts) != 2 {
+		return candidates
+	}
 
 	for _, r := range rails {
-		if amount < r.MinAmountUSD || amount > r.MaxAmountUSD { continue }
+		if amount < r.MinAmountUSD || amount > r.MaxAmountUSD {
+			continue
+		}
 		for _, c := range r.Corridors {
 			if c == "*" || c == corridor ||
 				(strings.HasSuffix(c, "-*") && strings.HasPrefix(corridor, strings.TrimSuffix(c, "-*"))) ||
@@ -365,7 +393,7 @@ func executeWithFailover(ctx context.Context, req RouteRequest, decision RouteDe
 	log.Printf("[SmartRoute] Primary rail %s failed: %v, trying failover", decision.PrimaryRail, err)
 
 	// Mark primary as degraded
-	db.Exec(`UPDATE routing_rails SET circuit_state = 'half-open', reliability = reliability * 0.95 WHERE id = $1`, decision.PrimaryRail)
+	db.ExecContext(ctx, `UPDATE routing_rails SET circuit_state = 'half-open', reliability = reliability * 0.95 WHERE id = $1`, decision.PrimaryRail)
 
 	// Try fallbacks in order
 	for _, fallbackID := range decision.FallbackRails {
@@ -379,11 +407,18 @@ func executeWithFailover(ctx context.Context, req RouteRequest, decision RouteDe
 
 	// All rails failed — queue for manual processing
 	return map[string]interface{}{
-		"status": "queued_for_manual",
-		"reason": "all rails unavailable",
+		"status":   "queued_for_manual",
+		"reason":   "all rails unavailable",
 		"decision": decision,
 	}
 }
+
+// Shared outbound HTTP clients (wave-14 perf): per-call client construction
+// disabled keep-alive connection pooling.
+var (
+	railExecHTTPClient   = &http.Client{Timeout: 30 * time.Second}
+	railHealthHTTPClient = &http.Client{Timeout: 5 * time.Second}
+)
 
 func executeOnRail(ctx context.Context, railID string, req RouteRequest) (map[string]interface{}, error) {
 	url := fmt.Sprintf("http://localhost:%s/v1.0/invoke/payment-rails/method/execute/%s", daprPort, railID)
@@ -391,9 +426,10 @@ func executeOnRail(ctx context.Context, railID string, req RouteRequest) (map[st
 	httpReq, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(payload)))
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
-	if err != nil { return nil, err }
+	resp, err := railExecHTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
@@ -416,15 +452,20 @@ func runHealthChecks(ctx context.Context) {
 	for _, r := range currentRails {
 		url := fmt.Sprintf("http://localhost:%s/v1.0/invoke/payment-rails/method/health/%s", daprPort, r.ID)
 		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-		client := &http.Client{Timeout: 5 * time.Second}
-		resp, err := client.Do(req)
+		resp, err := railHealthHTTPClient.Do(req)
 
 		available := err == nil && resp != nil && resp.StatusCode == 200
-		if resp != nil { resp.Body.Close() }
+		if resp != nil {
+			resp.Body.Close()
+		}
 
 		newState := "closed"
 		if !available {
-			if r.CircuitState == "closed" { newState = "half-open" } else { newState = "open" }
+			if r.CircuitState == "closed" {
+				newState = "half-open"
+			} else {
+				newState = "open"
+			}
 		}
 
 		db.ExecContext(ctx, `UPDATE routing_rails SET is_available = $1, circuit_state = $2, last_health_check = NOW() WHERE id = $3`,
@@ -435,26 +476,36 @@ func runHealthChecks(ctx context.Context) {
 
 // ── HTTP Server ─────────────────────────────────────────────────────────────
 
-func startHTTP() {
+func startHTTP() *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "healthy", "service": "go-smart-routing"})
 	})
 	mux.HandleFunc("/route", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" { http.Error(w, "POST only", 405); return }
+		if r.Method != "POST" {
+			http.Error(w, "POST only", 405)
+			return
+		}
 		var req RouteRequest
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid body", 400); return
+			http.Error(w, "invalid body", 400)
+			return
 		}
 		decision := routeTransaction(req)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(decision)
 	})
 	mux.HandleFunc("/execute", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" { http.Error(w, "POST only", 405); return }
+		if r.Method != "POST" {
+			http.Error(w, "POST only", 405)
+			return
+		}
 		var req RouteRequest
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid body", 400); return
+			http.Error(w, "invalid body", 400)
+			return
 		}
 		decision := routeTransaction(req)
 		result := executeWithFailover(r.Context(), req, decision)
@@ -468,8 +519,21 @@ func startHTTP() {
 		json.NewEncoder(w).Encode(rails)
 	})
 
-	log.Printf("[SmartRoute] HTTP on %s", listenAddr)
-	http.ListenAndServe(listenAddr, mux)
+	srv := &http.Server{
+		Addr:              listenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	go func() {
+		log.Printf("[SmartRoute] HTTP on %s", listenAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("[SmartRoute] HTTP server error: %v", err)
+		}
+	}()
+	return srv
 }
 
 func main() {
@@ -479,7 +543,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go startHTTP()
+	httpSrv := startHTTP()
 
 	// Health check every 30s
 	healthTicker := time.NewTicker(30 * time.Second)
@@ -501,6 +565,11 @@ func main() {
 		case <-sigCh:
 			log.Println("[SmartRoute] Shutting down")
 			cancel()
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+				log.Printf("[SmartRoute] HTTP shutdown error: %v", err)
+			}
+			shutdownCancel()
 			db.Close()
 			return
 		}

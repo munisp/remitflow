@@ -46,6 +46,7 @@ const {
   recordAuditLog,
 } = proxyActivities<typeof activities>({
   startToCloseTimeout: "30 seconds",
+  heartbeatTimeout: "30s", // W14
   retry: {
     maximumAttempts: 3,
     initialInterval: "1 second",

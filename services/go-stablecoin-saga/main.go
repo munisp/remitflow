@@ -17,8 +17,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -27,9 +29,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -150,10 +154,14 @@ var kycLimits = map[string]struct{ onramp, offramp, single float64 }{
 // non-200, undecodable body, or non-positive rate is an error — the saga must
 // not fall back to a hardcoded table (the old static map disagreed with the
 // engine, e.g. NGN 1650 vs 1600).
-func getEngineFXRate(from, to string) (float64, error) {
+func getEngineFXRate(ctx context.Context, from, to string) (float64, error) {
 	u := fmt.Sprintf("%s/stablecoin/fx-rates?from=%s&to=%s",
 		strings.TrimRight(stablecoinEngine, "/"), url.QueryEscape(from), url.QueryEscape(to))
-	resp, err := sagaHTTP.Get(u)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return 0, fmt.Errorf("engine fx-rates request build: %w", err)
+	}
+	resp, err := sagaHTTP.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("engine fx-rates unreachable: %w", err)
 	}
@@ -175,16 +183,34 @@ func getEngineFXRate(from, to string) (float64, error) {
 }
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
-var sagaHTTP = &http.Client{Timeout: 8 * time.Second}
+// Shared client with a pooled transport: per-host idle conns cover concurrent
+// sagas (default MaxIdleConnsPerHost=2 would churn connections).
+var sagaHTTP = &http.Client{
+	Timeout: 8 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 16,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
+// httpStatusError marks a non-2xx HTTP response (as opposed to a transport
+// error), so bounded-retry logic can tell "retryable 5xx" from "permanent 4xx".
+type httpStatusError struct {
+	status int
+	msg    string
+}
+
+func (e *httpStatusError) Error() string { return e.msg }
 
 // postJSON POSTs body as JSON and FAILS CLOSED on any non-2xx response — a
 // money-moving step may never treat an HTTP error as success.
-func postJSON(rawURL string, body interface{}) (map[string]interface{}, error) {
+func postJSON(ctx context.Context, rawURL string, body interface{}) (map[string]interface{}, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest(http.MethodPost, rawURL, bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(b))
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +226,10 @@ func postJSON(rawURL string, body interface{}) (map[string]interface{}, error) {
 		if len(snippet) > 256 {
 			snippet = snippet[:256]
 		}
-		return nil, fmt.Errorf("POST %s -> HTTP %d: %s", rawURL, resp.StatusCode, snippet)
+		return nil, &httpStatusError{
+			status: resp.StatusCode,
+			msg:    fmt.Sprintf("POST %s -> HTTP %d: %s", rawURL, resp.StatusCode, snippet),
+		}
 	}
 	result := map[string]interface{}{}
 	if len(data) > 0 {
@@ -209,6 +238,51 @@ func postJSON(rawURL string, body interface{}) (map[string]interface{}, error) {
 		}
 	}
 	return result, nil
+}
+
+// tbRetryBackoffs is the bounded retry schedule for TigerBeetle bridge posts:
+// at most 3 attempts (1 + 2 retries) with 200ms / 800ms backoff.
+var tbRetryBackoffs = []time.Duration{200 * time.Millisecond, 800 * time.Millisecond}
+
+// isRetryableTBError reports whether an error is worth retrying: transport
+// (connection) errors and 5xx ONLY. 4xx and bridge-level rejections are
+// permanent and never retried (fail closed, no duplicate-post storms).
+func isRetryableTBError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se *httpStatusError
+	if errors.As(err, &se) {
+		return se.status >= 500
+	}
+	// Transport error (dial/timeout/reset) — retryable.
+	return true
+}
+
+// postJSONWithBoundedRetry retries postJSON on retryable errors per
+// tbRetryBackoffs. Compensation semantics are unchanged: the final error (if
+// any) is returned to the caller exactly as before.
+func postJSONWithBoundedRetry(ctx context.Context, rawURL string, body interface{}) (map[string]interface{}, error) {
+	var lastErr error
+	for attempt := 0; attempt <= len(tbRetryBackoffs); attempt++ {
+		res, err := postJSON(ctx, rawURL, body)
+		if err == nil {
+			return res, nil
+		}
+		lastErr = err
+		if !isRetryableTBError(err) {
+			return nil, err
+		}
+		if attempt < len(tbRetryBackoffs) {
+			slog.Warn("[Saga] retryable post failed — backing off", "url", rawURL, "attempt", attempt+1, "err", err)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(tbRetryBackoffs[attempt]):
+			}
+		}
+	}
+	return nil, lastErr
 }
 
 // ── TigerBeetle bridge contract (rust-tigerbeetle-bridge) ────────────────────
@@ -259,10 +333,14 @@ func tbMinorUnits(amount float64) string {
 	return strconv.FormatUint(uint64(math.Round(amount*1e6)), 10)
 }
 
-// postTBTransfer posts one transfer to the real bridge contract. A per-index
-// entry in the bridge's errors array is a failure, not a success.
-func postTBTransfer(t tbTransfer) error {
-	res, err := postJSON(tigerBeetleBridge+"/transfers/create",
+// postTBTransfer posts one transfer to the real bridge contract with bounded
+// retry (conn/5xx only). A per-index entry in the bridge's errors array is a
+// failure, not a success. NOTE on batching: each saga currently posts exactly
+// ONE ledger leg (credit on on-ramp, debit on off-ramp) — there are no
+// independent legs to batch into a single /transfers/create call; if a
+// multi-leg step is added, batch them into one request to halve round trips.
+func postTBTransfer(ctx context.Context, t tbTransfer) error {
+	res, err := postJSONWithBoundedRetry(ctx, tigerBeetleBridge+"/transfers/create",
 		map[string]interface{}{"transfers": []tbTransfer{t}})
 	if err != nil {
 		return err
@@ -282,11 +360,11 @@ func postTBTransfer(t tbTransfer) error {
 // ledgerReversal posts the inverse of an already-posted transfer: debit/credit
 // accounts swapped, deterministic id = sha256("reversal:"+originalID). An
 // error marks the compensation failed — it is never swallowed.
-func ledgerReversal(original tbTransfer) error {
+func ledgerReversal(ctx context.Context, original tbTransfer) error {
 	rev := original
 	rev.ID = deterministicU128("reversal:" + original.ID)
 	rev.DebitAccountID, rev.CreditAccountID = original.CreditAccountID, original.DebitAccountID
-	return postTBTransfer(rev)
+	return postTBTransfer(ctx, rev)
 }
 
 // ── Compensation framework ────────────────────────────────────────────────────
@@ -344,7 +422,7 @@ func stepKYCCheck(userID int64, amountUSD float64, kycTier string, txType string
 // stepSanctionsScreen calls the real AML scorer (python-aml-scorer /score).
 // FAIL CLOSED: any error, non-allow action, or undecodable response fails the
 // step (aborting the saga) — no random simulation on the live path.
-func stepSanctionsScreen(userID int64, amount float64, currency string) StepResult {
+func stepSanctionsScreen(ctx context.Context, userID int64, amount float64, currency string) StepResult {
 	start := time.Now()
 	if amount <= 0 {
 		amount = 1 // scorer requires amount > 0; screening is amount-independent here
@@ -352,7 +430,7 @@ func stepSanctionsScreen(userID int64, amount float64, currency string) StepResu
 	if currency == "" {
 		currency = "USD"
 	}
-	result, err := postJSON(amlScorerURL+"/score", map[string]interface{}{
+	result, err := postJSON(ctx, amlScorerURL+"/score", map[string]interface{}{
 		"user_id":           userID,
 		"amount":            amount,
 		"from_currency":     currency,
@@ -405,9 +483,9 @@ func stepFXQuote(fiatCurrency, stablecoin string, fiatAmount, fiatToUSDRate floa
 // (go-stablecoin-settlement /settlement/execute, action=initiate_onramp).
 // FAIL CLOSED: unreachable/rejected settlement fails the step and the saga
 // compensates — no random success/failure simulation.
-func stepProviderCharge(provider, txRef string, fiatAmount float64, fiatCurrency string) StepResult {
+func stepProviderCharge(ctx context.Context, provider, txRef string, fiatAmount float64, fiatCurrency string) StepResult {
 	start := time.Now()
-	result, err := postJSON(settlementSvc+"/settlement/execute", map[string]interface{}{
+	result, err := postJSON(ctx, settlementSvc+"/settlement/execute", map[string]interface{}{
 		"operation_id": txRef,
 		"provider":     provider,
 		"action":       "initiate_onramp",
@@ -446,7 +524,7 @@ func stepProviderCharge(provider, txRef string, fiatAmount float64, fiatCurrency
 // (POST /transfers/create). FAIL CLOSED: a bridge error fails the step — the
 // old "best-effort ok" report is gone. On success it returns the posted
 // transfer so a reversal compensation can invert it exactly.
-func stepLedgerCredit(txRef string, userID int64, stablecoin string, amount float64) (StepResult, *tbTransfer) {
+func stepLedgerCredit(ctx context.Context, txRef string, userID int64, stablecoin string, amount float64) (StepResult, *tbTransfer) {
 	start := time.Now()
 	ledger, ok := tbLedgers[strings.ToUpper(stablecoin)]
 	if !ok {
@@ -462,7 +540,7 @@ func stepLedgerCredit(txRef string, userID int64, stablecoin string, amount floa
 		Ledger:          ledger,
 		Code:            tbCodeSagaTransfer,
 	}
-	if err := postTBTransfer(t); err != nil {
+	if err := postTBTransfer(ctx, t); err != nil {
 		slog.Error("[Saga] TigerBeetle ledger credit failed — failing closed", "ref", txRef, "err", err)
 		return StepResult{StepName: "ledger_credit", Status: "failed",
 			Error:      fmt.Sprintf("TigerBeetle ledger credit failed: %v", err),
@@ -475,7 +553,7 @@ func stepLedgerCredit(txRef string, userID int64, stablecoin string, amount floa
 
 // stepLedgerDebit posts the debit leg to the REAL bridge contract, fail-closed,
 // returning the posted transfer for exact inversion on compensation.
-func stepLedgerDebit(txRef string, userID int64, stablecoin string, amount float64) (StepResult, *tbTransfer) {
+func stepLedgerDebit(ctx context.Context, txRef string, userID int64, stablecoin string, amount float64) (StepResult, *tbTransfer) {
 	start := time.Now()
 	ledger, ok := tbLedgers[strings.ToUpper(stablecoin)]
 	if !ok {
@@ -491,7 +569,7 @@ func stepLedgerDebit(txRef string, userID int64, stablecoin string, amount float
 		Ledger:          ledger,
 		Code:            tbCodeSagaTransfer,
 	}
-	if err := postTBTransfer(t); err != nil {
+	if err := postTBTransfer(ctx, t); err != nil {
 		slog.Error("[Saga] TigerBeetle ledger debit failed — failing closed", "ref", txRef, "err", err)
 		return StepResult{StepName: "ledger_debit", Status: "failed",
 			Error:      fmt.Sprintf("TigerBeetle ledger debit failed: %v", err),
@@ -506,9 +584,9 @@ func stepLedgerDebit(txRef string, userID int64, stablecoin string, amount float
 // POST /settlement/execute {operation_id, provider, action, payload}.
 // FAIL CLOSED: transport errors, non-2xx and missing/failed status fail the
 // step (the old code POSTed to a nonexistent /settlement route and reported ok).
-func stepProviderPayout(payoutRail, txRef string, fiatAmount float64, fiatCurrency string) StepResult {
+func stepProviderPayout(ctx context.Context, payoutRail, txRef string, fiatAmount float64, fiatCurrency string) StepResult {
 	start := time.Now()
-	result, err := postJSON(settlementSvc+"/settlement/execute", map[string]interface{}{
+	result, err := postJSON(ctx, settlementSvc+"/settlement/execute", map[string]interface{}{
 		"operation_id": txRef,
 		"action":       "initiate_payout",
 		"payload": map[string]interface{}{
@@ -536,9 +614,9 @@ func stepProviderPayout(payoutRail, txRef string, fiatAmount float64, fiatCurren
 		DurationMs: time.Since(start).Milliseconds()}
 }
 
-func stepNotify(userID int64, txRef, txType, status string, amount float64, currency string) StepResult {
+func stepNotify(ctx context.Context, userID int64, txRef, txType, status string, amount float64, currency string) StepResult {
 	start := time.Now()
-	postJSON(coreAPIURL+"/internal/notify", map[string]interface{}{
+	postJSON(ctx, coreAPIURL+"/internal/notify", map[string]interface{}{
 		"user_id": userID, "tx_ref": txRef, "type": txType,
 		"status": status, "amount": amount, "currency": currency,
 	})
@@ -548,7 +626,7 @@ func stepNotify(userID int64, txRef, txType, status string, amount float64, curr
 }
 
 // ── On-Ramp Saga Execution ────────────────────────────────────────────────────
-func executeOnRampSaga(input OnRampSagaInput) OnRampSagaResult {
+func executeOnRampSaga(ctx context.Context, input OnRampSagaInput) OnRampSagaResult {
 	onrampStarted.Add(1)
 	txRef := fmt.Sprintf("ONRAMP-%s", uuid.New().String()[:12])
 	result := OnRampSagaResult{
@@ -583,7 +661,7 @@ func executeOnRampSaga(input OnRampSagaInput) OnRampSagaResult {
 
 	// Step 1: FX rate fetch (live engine source) — fail closed before any
 	// money-moving step when the engine cannot supply a rate.
-	fiatToUSD, rateErr := getEngineFXRate(input.FiatCurrency, "USD")
+	fiatToUSD, rateErr := getEngineFXRate(ctx, input.FiatCurrency, "USD")
 	if rateErr != nil {
 		result.Steps = append(result.Steps, StepResult{
 			StepName: "fx_quote", Status: "failed",
@@ -601,7 +679,7 @@ func executeOnRampSaga(input OnRampSagaInput) OnRampSagaResult {
 	}
 
 	// Step 3: Sanctions Screen
-	step3 := stepSanctionsScreen(input.UserID, input.FiatAmount, input.FiatCurrency)
+	step3 := stepSanctionsScreen(ctx, input.UserID, input.FiatAmount, input.FiatCurrency)
 	result.Steps = append(result.Steps, step3)
 	if step3.Status != "ok" {
 		return abort()
@@ -614,7 +692,7 @@ func executeOnRampSaga(input OnRampSagaInput) OnRampSagaResult {
 	result.Fee = fee
 
 	// Step 5: Provider Charge (money-moving; compensation: provider refund)
-	step5 := stepProviderCharge(input.Provider, txRef, input.FiatAmount, input.FiatCurrency)
+	step5 := stepProviderCharge(ctx, input.Provider, txRef, input.FiatAmount, input.FiatCurrency)
 	result.Steps = append(result.Steps, step5)
 	if step5.Status != "ok" {
 		// Charge never landed — nothing to undo.
@@ -623,8 +701,13 @@ func executeOnRampSaga(input OnRampSagaInput) OnRampSagaResult {
 	compensations = append(compensations, compensation{
 		name: "provider_charge",
 		fn: func() error {
+			// Compensations MUST run even if the originating request ctx was
+			// cancelled (client disconnect) — a rollback bound to a dead ctx
+			// would silently never execute. Detach from cancellation; the 8s
+			// client timeout still bounds each call.
+			compCtx := context.WithoutCancel(ctx)
 			slog.Info("[Saga] Compensating: refund provider charge", "tx_ref", txRef)
-			_, err := postJSON(settlementSvc+"/settlement/execute", map[string]interface{}{
+			_, err := postJSON(compCtx, settlementSvc+"/settlement/execute", map[string]interface{}{
 				"operation_id": txRef + "-refund",
 				"provider":     input.Provider,
 				"action":       "refund",
@@ -639,7 +722,7 @@ func executeOnRampSaga(input OnRampSagaInput) OnRampSagaResult {
 	})
 
 	// Step 6: Ledger Credit (money-moving; compensation: ledger reversal)
-	step6, creditLeg := stepLedgerCredit(txRef, input.UserID, input.Stablecoin, stablecoinAmount)
+	step6, creditLeg := stepLedgerCredit(ctx, txRef, input.UserID, input.Stablecoin, stablecoinAmount)
 	result.Steps = append(result.Steps, step6)
 	if step6.Status != "ok" {
 		return abort()
@@ -648,12 +731,12 @@ func executeOnRampSaga(input OnRampSagaInput) OnRampSagaResult {
 		name: "ledger_credit",
 		fn: func() error {
 			slog.Info("[Saga] Compensating: reverse ledger credit", "tx_ref", txRef, "transfer_id", creditLeg.ID)
-			return ledgerReversal(*creditLeg)
+			return ledgerReversal(context.WithoutCancel(ctx), *creditLeg)
 		},
 	})
 
 	// Step 7: Notify (telemetry only — not money-moving)
-	step7 := stepNotify(input.UserID, txRef, "onramp", "completed", stablecoinAmount, input.Stablecoin)
+	step7 := stepNotify(ctx, input.UserID, txRef, "onramp", "completed", stablecoinAmount, input.Stablecoin)
 	result.Steps = append(result.Steps, step7)
 
 	result.Status = "completed"
@@ -664,7 +747,7 @@ func executeOnRampSaga(input OnRampSagaInput) OnRampSagaResult {
 }
 
 // ── Off-Ramp Saga Execution ───────────────────────────────────────────────────
-func executeOffRampSaga(input OffRampSagaInput) OffRampSagaResult {
+func executeOffRampSaga(ctx context.Context, input OffRampSagaInput) OffRampSagaResult {
 	offrampStarted.Add(1)
 	txRef := fmt.Sprintf("OFFRAMP-%s", uuid.New().String()[:12])
 
@@ -700,7 +783,7 @@ func executeOffRampSaga(input OffRampSagaInput) OffRampSagaResult {
 
 	// Step 1: FX rate fetch (live engine source) — fail closed before any
 	// money-moving step.
-	usdToFiat, rateErr := getEngineFXRate("USD", input.FiatCurrency)
+	usdToFiat, rateErr := getEngineFXRate(ctx, "USD", input.FiatCurrency)
 	if rateErr != nil {
 		result.Steps = append(result.Steps, StepResult{
 			StepName: "fx_quote", Status: "failed",
@@ -723,7 +806,7 @@ func executeOffRampSaga(input OffRampSagaInput) OffRampSagaResult {
 	// Step 3: Balance Debit (money-moving, via Core API — atomic pessimistic
 	// lock; compensation: re-credit the balance)
 	start := time.Now()
-	debitResult, err := postJSON(coreAPIURL+"/internal/stablecoin/debit", map[string]interface{}{
+	debitResult, err := postJSON(ctx, coreAPIURL+"/internal/stablecoin/debit", map[string]interface{}{
 		"user_id":    input.UserID,
 		"stablecoin": input.Stablecoin,
 		"amount":     input.StablecoinAmount,
@@ -742,8 +825,10 @@ func executeOffRampSaga(input OffRampSagaInput) OffRampSagaResult {
 	compensations = append(compensations, compensation{
 		name: "balance_debit",
 		fn: func() error {
+			// Detached from request cancellation — see provider_charge above.
+			compCtx := context.WithoutCancel(ctx)
 			slog.Info("[Saga] Compensating: re-credit stablecoin balance", "tx_ref", txRef)
-			_, err := postJSON(coreAPIURL+"/internal/stablecoin/credit", map[string]interface{}{
+			_, err := postJSON(compCtx, coreAPIURL+"/internal/stablecoin/credit", map[string]interface{}{
 				"user_id": input.UserID, "stablecoin": input.Stablecoin,
 				"amount": input.StablecoinAmount, "tx_ref": txRef + "-compensation",
 			})
@@ -752,14 +837,14 @@ func executeOffRampSaga(input OffRampSagaInput) OffRampSagaResult {
 	})
 
 	// Step 4: Sanctions Screen
-	step4 := stepSanctionsScreen(input.UserID, netPayout, input.FiatCurrency)
+	step4 := stepSanctionsScreen(ctx, input.UserID, netPayout, input.FiatCurrency)
 	result.Steps = append(result.Steps, step4)
 	if step4.Status != "ok" {
 		return abort()
 	}
 
 	// Step 5: Ledger Debit (money-moving; compensation: ledger reversal)
-	step5, debitLeg := stepLedgerDebit(txRef, input.UserID, input.Stablecoin, input.StablecoinAmount)
+	step5, debitLeg := stepLedgerDebit(ctx, txRef, input.UserID, input.Stablecoin, input.StablecoinAmount)
 	result.Steps = append(result.Steps, step5)
 	if step5.Status != "ok" {
 		return abort()
@@ -768,19 +853,19 @@ func executeOffRampSaga(input OffRampSagaInput) OffRampSagaResult {
 		name: "ledger_debit",
 		fn: func() error {
 			slog.Info("[Saga] Compensating: reverse ledger debit", "tx_ref", txRef, "transfer_id", debitLeg.ID)
-			return ledgerReversal(*debitLeg)
+			return ledgerReversal(context.WithoutCancel(ctx), *debitLeg)
 		},
 	})
 
 	// Step 6: Provider Payout
-	step6 := stepProviderPayout(input.PayoutRail, txRef, netPayout, input.FiatCurrency)
+	step6 := stepProviderPayout(ctx, input.PayoutRail, txRef, netPayout, input.FiatCurrency)
 	result.Steps = append(result.Steps, step6)
 	if step6.Status != "ok" {
 		return abort()
 	}
 
 	// Step 7: Notify (telemetry only — not money-moving)
-	step7 := stepNotify(input.UserID, txRef, "offramp", "completed", netPayout, input.FiatCurrency)
+	step7 := stepNotify(ctx, input.UserID, txRef, "offramp", "completed", netPayout, input.FiatCurrency)
 	result.Steps = append(result.Steps, step7)
 
 	result.Status = "completed"
@@ -804,7 +889,7 @@ func onrampHandler(w http.ResponseWriter, r *http.Request) {
 	if input.SagaID == "" {
 		input.SagaID = uuid.New().String()
 	}
-	result := executeOnRampSaga(input)
+	result := executeOnRampSaga(r.Context(), input)
 	w.Header().Set("Content-Type", "application/json")
 	if result.Status == "failed" || result.Status == "failed_compensated" || result.Status == "failed_compensation_partial" {
 		w.WriteHeader(http.StatusUnprocessableEntity)
@@ -825,7 +910,7 @@ func offrampHandler(w http.ResponseWriter, r *http.Request) {
 	if input.SagaID == "" {
 		input.SagaID = uuid.New().String()
 	}
-	result := executeOffRampSaga(input)
+	result := executeOffRampSaga(r.Context(), input)
 	w.Header().Set("Content-Type", "application/json")
 	if result.Status == "failed" || result.Status == "failed_compensated" || result.Status == "failed_compensation_partial" {
 		w.WriteHeader(http.StatusUnprocessableEntity)
@@ -887,15 +972,32 @@ func main() {
 	mux.HandleFunc("/saga/offramp", offrampHandler)
 
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
-	slog.Info("[StablecoinSaga] Ready", "addr", srv.Addr)
-	if err := srv.ListenAndServe(); err != nil {
-		slog.Error("[StablecoinSaga] Fatal", "err", err)
-		os.Exit(1)
+
+	go func() {
+		slog.Info("[StablecoinSaga] Ready", "addr", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("[StablecoinSaga] Fatal", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Graceful shutdown: drain in-flight sagas (up to 30s — a saga step chain
+	// can legitimately take multiple downstream round trips + retry backoff).
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	slog.Info("[StablecoinSaga] Shutting down...")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("[StablecoinSaga] Forced shutdown", "err", err)
 	}
+	slog.Info("[StablecoinSaga] Stopped")
 }

@@ -53,9 +53,14 @@ export function hashIdempotencyRequest(req: Request): string {
 async function inTenantTransaction<T>(tenantId: number, userId: number, operation: (db: any) => Promise<T>): Promise<T> {
   const db = await requireDb();
   return db.transaction(async (tx: any) => {
-    await tx.execute(sql`SELECT set_config('app.current_tenant_id', ${String(tenantId)}, true)`);
-    await tx.execute(sql`SELECT set_config('app.current_user_id', ${String(userId)}, true)`);
-    await tx.execute(sql`SELECT set_config('app.bypass_rls', 'false', true)`);
+    // W14-C1: one round trip instead of three — identical transaction-local
+    // GUC semantics, all set before any idempotency statement runs.
+    await tx.execute(sql`
+      SELECT
+        set_config('app.current_tenant_id', ${String(tenantId)}, true),
+        set_config('app.current_user_id', ${String(userId)}, true),
+        set_config('app.bypass_rls', 'false', true)
+    `);
     return operation(tx);
   });
 }

@@ -29,7 +29,33 @@
 # performed by the open-appsec agent at the container/ingress layer — it is
 # NOT an APISIX plugin (see deploy/openappsec/profile-wave10.yaml and
 # docker-compose.security.yml).
-# Applied idempotently alongside services/gateway-config/apply-stablecoin-routes.py.
+# Applied idempotently alongside services/gateway-config/apply-stablecoin-routes.py
+# (requires infra/apisix/stablecoin-routes.yaml applied first — mutation routes
+# here reference its `remitflow-backend` upstream).
+#
+# wave14 (SPEC-wave14 §7) performance tuning:
+#   - Upstreams carry keepalive_pool (connection reuse) and an explicit
+#     connect/send/read timeout budget. `remitflow-backend` itself is defined
+#     in infra/apisix/stablecoin-routes.yaml (keepalive/timeout added there).
+#   - Retry policy: APISIX has NO route-level `retries` field — retries are an
+#     upstream attribute. To give idempotent GET queries one retry WITHOUT
+#     enabling gateway replay of mutations, the three GET query routes below
+#     use `remitflow-backend-read` (defined at the bottom of this file): SAME
+#     backend nodes as `remitflow-backend`, different retry policy
+#     (retries: 1). Every POST/mutation route stays on `remitflow-backend`
+#     (retries: 0) — a payout or payment must never be re-sent by the gateway.
+#     (Even where retries exist, nginx/openresty never passes an already-sent
+#     non-idempotent request to the next server; the split upstream makes the
+#     intent explicit instead of relying on that default.)
+#   - limit-count policy: left at the default `local` (per-worker counter).
+#     `policy: redis` was evaluated and NOT applied — the `redis` service
+#     (docker-compose.yml:34, redis:6379, ACL user remitflow_app) is on the
+#     compose default network while the apisix container
+#     (docker-compose.yml:1075) is only on remitflow-internal/-external, and
+#     REDIS_APP_PASSWORD is not provisioned to the apisix container or the
+#     route-render path. Effective limits are (count × worker count) until a
+#     redis network link + credential path exist; these are DoS guardrails,
+#     not exact quotas.
 
 routes:
   # ─── PARTNER: Embedded Payouts (/partner/v1/* → embeddedPayouts tRPC) ─────
@@ -42,7 +68,7 @@ routes:
   - id: wave10-partner-payout-create
     uri: /partner/v1/payouts
     methods: [POST]
-    upstream_id: remitflow-backend
+    upstream_id: remitflow-backend   # mutation (POST): upstream retries: 0 — never replayed
     plugins:
       proxy-rewrite:
         regex_uri: ["^/partner/v1/payouts$", "/api/trpc/embeddedPayouts.createPayout"]
@@ -73,7 +99,8 @@ routes:
   - id: wave10-partner-payout-get
     uri: /partner/v1/payouts/get
     methods: [GET]
-    upstream_id: remitflow-backend
+    # Idempotent GET query: retries: 1 via remitflow-backend-read (see header).
+    upstream_id: remitflow-backend-read
     plugins:
       proxy-rewrite:
         regex_uri: ["^/partner/v1/payouts/get$", "/api/trpc/embeddedPayouts.getPayout"]
@@ -104,7 +131,8 @@ routes:
   - id: wave10-partner-corridors
     uri: /partner/v1/corridors
     methods: [GET]
-    upstream_id: remitflow-backend
+    # Idempotent GET query: retries: 1 via remitflow-backend-read (see header).
+    upstream_id: remitflow-backend-read
     plugins:
       proxy-rewrite:
         regex_uri: ["^/partner/v1/corridors$", "/api/trpc/embeddedPayouts.corridors"]
@@ -140,7 +168,8 @@ routes:
   - id: wave10-payment-link-resolve
     uri: /pl/resolve
     methods: [GET]
-    upstream_id: remitflow-backend
+    # Idempotent GET query: retries: 1 via remitflow-backend-read (see header).
+    upstream_id: remitflow-backend-read
     plugins:
       proxy-rewrite:
         regex_uri: ["^/pl/resolve$", "/api/trpc/paymentLinks.resolve"]
@@ -168,7 +197,7 @@ routes:
   - id: wave10-payment-link-pay-card
     uri: /pl/pay/card
     methods: [POST]
-    upstream_id: remitflow-backend
+    upstream_id: remitflow-backend   # mutation (POST): upstream retries: 0 — never replayed
     plugins:
       proxy-rewrite:
         regex_uri: ["^/pl/pay/card$", "/api/trpc/paymentLinks.payCard"]
@@ -196,7 +225,7 @@ routes:
   - id: wave10-payment-link-pay-bank
     uri: /pl/pay/bank
     methods: [POST]
-    upstream_id: remitflow-backend
+    upstream_id: remitflow-backend   # mutation (POST): upstream retries: 0 — never replayed
     plugins:
       proxy-rewrite:
         regex_uri: ["^/pl/pay/bank$", "/api/trpc/paymentLinks.payBank"]
@@ -224,7 +253,7 @@ routes:
   - id: wave10-payment-link-pay-wallet
     uri: /pl/pay/wallet
     methods: [POST]
-    upstream_id: remitflow-backend
+    upstream_id: remitflow-backend   # mutation (POST): upstream retries: 0 — never replayed
     plugins:
       proxy-rewrite:
         regex_uri: ["^/pl/pay/wallet$", "/api/trpc/paymentLinks.payWallet"]
@@ -264,7 +293,7 @@ routes:
   - id: wave10-bill-capture-inbound-email
     uri: /api/trpc/billCapture.inboundEmail
     methods: [POST]
-    upstream_id: remitflow-backend
+    upstream_id: remitflow-backend   # mutation (POST): upstream retries: 0 — never replayed
     plugins:
       limit-req:
         rate: 5
@@ -291,6 +320,16 @@ routes:
       type: roundrobin
       nodes:
         "bill-capture:8112": 1
+      # wave14: connection reuse + timeout budget (numeric seconds per schema).
+      keepalive_pool:
+        size: 32
+        idle_timeout: 60
+        requests: 1000
+      timeout:
+        connect: 2
+        send: 10
+        read: 10
+      retries: 0   # mixed GET/POST service; never replay a mutation
     plugins:
       key-auth:
         header: x-api-key
@@ -314,6 +353,16 @@ routes:
       type: roundrobin
       nodes:
         "accounting-sync:8113": 1
+      # wave14: connection reuse + timeout budget (numeric seconds per schema).
+      keepalive_pool:
+        size: 32
+        idle_timeout: 60
+        requests: 1000
+      timeout:
+        connect: 2
+        send: 10
+        read: 10
+      retries: 0   # mixed GET/POST service; never replay a mutation
     plugins:
       key-auth:
         header: x-api-key
@@ -326,4 +375,50 @@ routes:
         burst: 20
         key: consumer_name
         rejected_code: 429
+
+# ─── UPSTREAMS ───────────────────────────────────────────────────────────────
+# wave14: read-only twin of `remitflow-backend` (infra/apisix/stablecoin-routes.yaml).
+# SAME backend nodes — this is a retry-policy split, not new infrastructure:
+# APISIX carries retries on the upstream, so idempotent GET queries get one
+# retry here while every mutation route stays on `remitflow-backend`
+# (retries: 0). Keep nodes in lockstep with `remitflow-backend`.
+upstreams:
+  - id: remitflow-backend-read
+    type: roundrobin
+    nodes:
+      - host: remitflow-server
+        port: 3000
+        weight: 1
+    keepalive_pool:
+      size: 32
+      idle_timeout: 60   # seconds
+      requests: 1000
+    timeout:
+      connect: 2         # seconds
+      send: 10
+      read: 10
+    retries: 1           # idempotent GET routes only (see header)
+    health_check:
+      active:
+        http_path: /api/health
+        interval: 5
+        timeout: 3
+        healthy:
+          http_statuses: [200]
+
+# ─── PgBouncer note (wave14 C6 — guidance only, NO config change here) ──────
+# A2 found a PgBouncer service defined but unused: docker-compose.yml:674
+# (`pgbouncer`, edoburu/pgbouncer:1.22.0, pgbouncer:6432, POOL_MODE=transaction,
+# profiles [full, monitoring], upstream postgres:5432). Several services take
+# DATABASE_URL from the environment (docker-compose.yml — `${DATABASE_URL}`
+# form); those deployments can be pointed at the pooler WITHOUT code changes by
+# setting DATABASE_URL to the pgbouncer endpoint (host `pgbouncer`, port 6432)
+# at deploy time. Do NOT hardcode DSNs in repo files. Caveats to verify before
+# switching a service: transaction pooling breaks session-level state
+# (SET/NOTIFY, session advisory locks, session GUCs) and multi-statement
+# prepared transactions; pgbouncer is currently behind compose profiles, so it
+# only exists in `full`/`monitoring` deployments.
+# TODO(infra): no dedicated env hook (e.g. PG_DSN_HOST indirection) exists —
+# the `api` service hardcodes postgres:5432 in docker-compose.yml:68, so
+# pooler adoption there needs a compose/env change owned by the compose track.
 #END

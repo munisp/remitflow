@@ -31,6 +31,7 @@
  */
 import type { Request, Response, NextFunction } from "express";
 import { logger } from './_core/logger';
+import { getSharedBodyString } from "./security.middleware";
 
 const OPENAPPSEC_SIDECAR_URL =
   process.env.OPENAPPSEC_SIDECAR_URL?.trim() ||
@@ -93,15 +94,17 @@ export function getBlocklistSize(): number {
 
 const _wafBlockCounts = new Map<string, number>();
 
-/** Safely extract request body snippet for inspection (max 4KB) */
-function getRequestBodySnippet(req: Request): string | undefined {
+/**
+ * Safely extract request body snippet for inspection (max 4KB).
+ * W14-C1: reuses the per-request serialization computed by the security
+ * middleware chain (res.locals via getSharedBodyString) instead of a second
+ * JSON.stringify — the WAF runs after those middlewares in index.ts.
+ */
+function getRequestBodySnippet(req: Request, res: Response): string | undefined {
   if (!req.body) return undefined;
-  try {
-    const bodyStr = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
-    return bodyStr.slice(0, 4096);
-  } catch {
-    return undefined;
-  }
+  if (typeof req.body === "string") return req.body.slice(0, 4096);
+  const bodyStr = getSharedBodyString(req, res);
+  return bodyStr ? bodyStr.slice(0, 4096) : undefined;
 }
 
 /**
@@ -137,13 +140,29 @@ export async function openAppSecWafMiddleware(
     return;
   }
 
+  // W14-C1: skip the sidecar round-trip for read-only verbs carrying no body
+  // (GET/HEAD/OPTIONS). There is no payload to inspect for injection, and the
+  // per-request WAF RTT on every read was pure overhead. Mutations and any
+  // request with a body are ALWAYS inspected, with unchanged fail semantics
+  // (explicit "block" verdicts still deny; sidecar outage policy unchanged).
+  // X-OpenAppSec-Protected is NOT set on the skip path — no inspection occurred.
+  const isReadOnlyVerb = req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS";
+  const contentLength = parseInt((req.headers["content-length"] as string) || "0", 10);
+  const hasBody = (Number.isFinite(contentLength) && contentLength > 0) ||
+    (req.body != null && typeof req.body === "object" && Object.keys(req.body).length > 0);
+  if (isReadOnlyVerb && !hasBody) {
+    return next();
+  }
+
   try {
     const controller = new AbortController();
-    const inspectionTimeoutMs = parseInt(process.env.OPENAPPSEC_INSPECTION_TIMEOUT_MS || "250", 10);
+    // 250ms is the CEILING: an env value above it is clamped so a slow sidecar
+    // can never add more than 250ms to a request.
+    const inspectionTimeoutMs = Math.min(parseInt(process.env.OPENAPPSEC_INSPECTION_TIMEOUT_MS || "250", 10), 250);
     const timeout = setTimeout(() => controller.abort(), inspectionTimeoutMs);
 
     // Include request body snippet for full inspection (SQL injection, XSS in POST bodies)
-    const bodySnippet = getRequestBodySnippet(req);
+    const bodySnippet = getRequestBodySnippet(req, res);
 
     const resp = await fetch(`${OPENAPPSEC_SIDECAR_URL}/v1/inspect`, {
       method: "POST",

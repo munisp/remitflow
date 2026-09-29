@@ -257,13 +257,45 @@ export const tierHeavyRateLimit = rateLimit({
   message: { error: 'Too many computation requests. Max 10 per minute.' },
 });
 // ─── REQUEST ID ───────────────────────────────────────────────────────────────
+// W14-C1: ONE generator per request. middleware/requestId.ts runs first in
+// index.ts and sets req.requestId (validated inbound header or randomUUID) —
+// this middleware previously generated a SECOND id and overwrote the response
+// header. Now it reuses req.requestId when present and only generates as a
+// fallback (standalone mounts, tests). Also attaches res.locals.requestId so
+// securityAuditMiddleware no longer logs "unknown".
 export function requestIdMiddleware(req: Request, res: Response, next: NextFunction) {
   const requestId =
+    req.requestId ||
     (req.headers["x-request-id"] as string) ||
     `req_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+  if (!req.requestId) req.requestId = requestId;
   req.headers["x-request-id"] = requestId;
+  res.locals.requestId = requestId;
   res.setHeader("X-Request-ID", requestId);
   next();
+}
+
+// ─── SHARED BODY SERIALIZATION (W14-C1) ──────────────────────────────────────
+// amlScreening / sqlInjectionDetection / xssDetection each ran their own
+// JSON.stringify(req.body) — three identical serializations per request.
+// Compute once per request, share via res.locals. Safe because all consumers
+// run AFTER sanitizeBody, so req.body is stable for the rest of the chain.
+const BODY_STR_LOCALS_KEY = "__securityBodyStr";
+
+export function getSharedBodyString(req: Request, res: Response): string {
+  const locals = res.locals as Record<string, unknown>;
+  let bodyStr = locals[BODY_STR_LOCALS_KEY] as string | undefined;
+  if (bodyStr === undefined) {
+    try {
+      bodyStr = JSON.stringify(req.body ?? {});
+    } catch {
+      // Unreachable for express.json()-parsed bodies (already valid JSON);
+      // if it ever happens, scanners inspect an empty string.
+      bodyStr = "";
+    }
+    locals[BODY_STR_LOCALS_KEY] = bodyStr;
+  }
+  return bodyStr;
 }
 
 // ─── ADDITIONAL SECURITY HEADERS ─────────────────────────────────────────────
@@ -465,7 +497,7 @@ const SANCTIONED_KEYWORDS = [
 export function amlScreeningMiddleware(req: Request, res: Response, next: NextFunction) {
   if (!req.body) return next();
 
-  const body = JSON.stringify(req.body).toLowerCase();
+  const body = getSharedBodyString(req, res).toLowerCase();
 
   for (const keyword of SANCTIONED_KEYWORDS) {
     if (body.includes(keyword)) {
@@ -546,7 +578,7 @@ const SQL_INJECTION_PATTERNS = [
 ];
 
 export function sqlInjectionDetectionMiddleware(req: Request, res: Response, next: NextFunction) {
-  const body = JSON.stringify(req.body ?? {});
+  const body = getSharedBodyString(req, res);
   const query = JSON.stringify(req.query ?? {});
   const combined = body + query;
   for (const pattern of SQL_INJECTION_PATTERNS) {
@@ -571,7 +603,7 @@ const XSS_PATTERNS = [
 ];
 
 export function xssDetectionMiddleware(req: Request, res: Response, next: NextFunction) {
-  const body = JSON.stringify(req.body ?? {});
+  const body = getSharedBodyString(req, res);
   for (const pattern of XSS_PATTERNS) {
     if (pattern.test(body)) {
       logger.warn(`[Security] XSS pattern detected from ${req.ip}`);

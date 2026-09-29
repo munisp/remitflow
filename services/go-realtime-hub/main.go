@@ -13,19 +13,24 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math/rand"
 	"net/http"
 	"os"
+	"os/signal"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
 func getEnv(k, d string) string {
-	if v := os.Getenv(k); v != "" { return v }
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
 	return d
 }
 
@@ -98,7 +103,9 @@ var roomHub = &RoomHub{rooms: make(map[string]*Room)}
 func (h *RoomHub) getOrCreate(roomID string) *Room {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if r, ok := h.rooms[roomID]; ok { return r }
+	if r, ok := h.rooms[roomID]; ok {
+		return r
+	}
 	r := &Room{clients: make(map[chan Event]struct{})}
 	h.rooms[roomID] = r
 	return r
@@ -118,10 +125,27 @@ func (h *RoomHub) Unsubscribe(roomID string, ch chan Event) {
 	h.mu.RLock()
 	r, ok := h.rooms[roomID]
 	h.mu.RUnlock()
-	if !ok { return }
+	if !ok {
+		return
+	}
 	r.mu.Lock()
 	delete(r.clients, ch)
+	empty := len(r.clients) == 0
 	r.mu.Unlock()
+	// wave-14 perf: evict empty rooms so the room map does not grow unboundedly.
+	// Recheck under the hub write lock; a concurrent subscriber re-creates the room.
+	if empty {
+		h.mu.Lock()
+		if cur, ok := h.rooms[roomID]; ok && cur == r {
+			r.mu.Lock()
+			stillEmpty := len(r.clients) == 0
+			r.mu.Unlock()
+			if stillEmpty {
+				delete(h.rooms, roomID)
+			}
+		}
+		h.mu.Unlock()
+	}
 	wsConnections.Add(-1)
 }
 
@@ -129,7 +153,9 @@ func (h *RoomHub) Publish(roomID string, evt Event) {
 	h.mu.RLock()
 	r, ok := h.rooms[roomID]
 	h.mu.RUnlock()
-	if !ok { return }
+	if !ok {
+		return
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for ch := range r.clients {
@@ -144,8 +170,8 @@ func (h *RoomHub) Publish(roomID string, evt Event) {
 // ── Simulated FX rate generator ───────────────────────────────────────────────
 var baseRates = map[string]float64{
 	"USD/NGN": 1605.50, "USD/GHS": 15.80, "USD/KES": 129.50,
-	"USD/ZAR": 18.45,   "USD/EUR": 0.921, "USD/GBP": 0.789,
-	"USD/AED": 3.673,   "USD/CNY": 7.245, "USD/INR": 83.50,
+	"USD/ZAR": 18.45, "USD/EUR": 0.921, "USD/GBP": 0.789,
+	"USD/AED": 3.673, "USD/CNY": 7.245, "USD/INR": 83.50,
 }
 
 func startFxBroadcaster() {
@@ -171,7 +197,10 @@ func startFxBroadcaster() {
 // SSE endpoint: GET /stream/fx
 func sseHandler(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
-	if !ok { http.Error(w, "SSE not supported", 500); return }
+	if !ok {
+		http.Error(w, "SSE not supported", 500)
+		return
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -183,7 +212,9 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial snapshot
 	rates := make(map[string]float64, len(baseRates))
-	for k, v := range baseRates { rates[k] = v }
+	for k, v := range baseRates {
+		rates[k] = v
+	}
 	snapshot, _ := json.Marshal(map[string]interface{}{"rates": rates, "ts": time.Now().UnixMilli()})
 	fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", snapshot)
 	flusher.Flush()
@@ -199,7 +230,9 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, ": heartbeat\n\n")
 			flusher.Flush()
 		case msg, ok := <-ch:
-			if !ok { return }
+			if !ok {
+				return
+			}
 			fmt.Fprint(w, msg)
 			flusher.Flush()
 		}
@@ -209,10 +242,16 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 // Long-poll endpoint: GET /stream/events?room=<userId>
 func eventStreamHandler(w http.ResponseWriter, r *http.Request) {
 	roomID := r.URL.Query().Get("room")
-	if roomID == "" { http.Error(w, "room param required", 400); return }
+	if roomID == "" {
+		http.Error(w, "room param required", 400)
+		return
+	}
 
 	flusher, ok := w.(http.Flusher)
-	if !ok { http.Error(w, "SSE not supported", 500); return }
+	if !ok {
+		http.Error(w, "SSE not supported", 500)
+		return
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -237,7 +276,9 @@ func eventStreamHandler(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, ": heartbeat\n\n")
 			flusher.Flush()
 		case evt, ok := <-ch:
-			if !ok { return }
+			if !ok {
+				return
+			}
 			data, _ := json.Marshal(evt)
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Type, data)
 			flusher.Flush()
@@ -247,9 +288,16 @@ func eventStreamHandler(w http.ResponseWriter, r *http.Request) {
 
 // Publish endpoint: POST /publish (internal use by other services)
 func publishHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", 405); return }
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
 	var evt Event
-	if err := json.NewDecoder(r.Body).Decode(&evt); err != nil { http.Error(w, "Invalid body", 400); return }
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB body cap (wave-14)
+	if err := json.NewDecoder(r.Body).Decode(&evt); err != nil {
+		http.Error(w, "Invalid body", 400)
+		return
+	}
 	evt.Timestamp = time.Now().UnixMilli()
 	if evt.RoomID != "" {
 		roomHub.Publish(evt.RoomID, evt)
@@ -280,15 +328,33 @@ func main() {
 	startFxBroadcaster()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health",         healthHandler)
-	mux.HandleFunc("/livez",          func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/readyz",         func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/metrics",        metricsHandler)
-	mux.HandleFunc("/stream/fx",      sseHandler)
-	mux.HandleFunc("/stream/events",  eventStreamHandler)
-	mux.HandleFunc("/publish",        publishHandler)
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/metrics", metricsHandler)
+	mux.HandleFunc("/stream/fx", sseHandler)
+	mux.HandleFunc("/stream/events", eventStreamHandler)
+	mux.HandleFunc("/publish", publishHandler)
 
-	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadTimeout: 0, WriteTimeout: 0}
+	// ReadHeaderTimeout guards against slowloris; body read/write timeouts stay 0
+	// because SSE streams are long-lived by design.
+	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 0, WriteTimeout: 0}
 	slog.Info("[RealtimeHub] Ready", "addr", srv.Addr)
-	if err := srv.ListenAndServe(); err != nil { slog.Error("Fatal", "err", err); os.Exit(1) }
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("Fatal", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Graceful shutdown (wave-14 hardening)
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	slog.Info("[RealtimeHub] Shutting down")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("shutdown error", "err", err)
+	}
 }

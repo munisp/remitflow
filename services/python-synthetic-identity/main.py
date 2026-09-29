@@ -36,7 +36,7 @@ def get_pool():
     if pool is None:
         with pool_lock:
             if pool is None:
-                pool = ThreadedConnectionPool(2, 10, DB_URL)
+                pool = ThreadedConnectionPool(2, 10, DB_URL, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
     return pool
 
 

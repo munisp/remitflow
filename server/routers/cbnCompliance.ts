@@ -26,7 +26,7 @@ import {
   users,
   exchangeRateAlerts,
 } from "../../drizzle/schema";
-import { eq, desc, and, gte, lte, sql, count } from "drizzle-orm";
+import { eq, desc, and, gte, lte, sql, count, inArray } from "drizzle-orm";
 import { callService } from "../_core/serviceProxy";
 import { notifyOwner } from "../_core/notification";
 import { createAuditLog } from "../audit.service";
@@ -1320,31 +1320,56 @@ export const cbnComplianceRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       const results: Array<{ id: number; name: string; success: boolean; error?: string; verified?: boolean }> = [];
-      for (const partnerId of input.partnerIds) {
+      // W14: one IN (...) fetch instead of a SELECT per partner, then chunked
+      // db.transaction writes with a guarded single-winner transition
+      // (UPDATE ... WHERE status <> 'approved' RETURNING) per partner.
+      const partners = await db
+        .select()
+        .from(bdcPartners)
+        .where(inArray(bdcPartners.id, input.partnerIds));
+      const byId = new Map(partners.map((p: any) => [p.id, p]));
+      const CHUNK = 10;
+      for (let i = 0; i < input.partnerIds.length; i += CHUNK) {
+        const chunk = input.partnerIds.slice(i, i + CHUNK);
+        const approvedInChunk: Array<{ id: number; name: string }> = [];
         try {
-          const [partner] = await db
-            .select()
-            .from(bdcPartners)
-            .where(eq(bdcPartners.id, partnerId))
-            .limit(1);
-          if (!partner) { results.push({ id: partnerId, name: "Unknown", success: false, error: "Not found" }); continue; }
-          if (partner.status === "approved") { results.push({ id: partnerId, name: partner.name, success: false, error: "Already approved" }); continue; }
-          await db
-            .update(bdcPartners)
-            .set({ status: "approved", updatedAt: new Date() })
-            .where(eq(bdcPartners.id, partnerId));
+          await db.transaction(async (tx: any) => {
+            for (const partnerId of chunk) {
+              const partner: any = byId.get(partnerId);
+              if (!partner) { results.push({ id: partnerId, name: "Unknown", success: false, error: "Not found" }); continue; }
+              if (partner.status === "approved") { results.push({ id: partnerId, name: partner.name, success: false, error: "Already approved" }); continue; }
+              const updated = await tx
+                .update(bdcPartners)
+                .set({ status: "approved", updatedAt: new Date() })
+                .where(and(eq(bdcPartners.id, partnerId), sql`${bdcPartners.status} <> 'approved'`))
+                .returning({ id: bdcPartners.id });
+              if (updated.length !== 1) {
+                results.push({ id: partnerId, name: partner.name, success: false, error: "Status changed concurrently — retry" });
+                continue;
+              }
+              approvedInChunk.push({ id: partnerId, name: partner.name });
+            }
+          });
+        } catch (err: any) {
+          // Transaction aborted: mark not-yet-resolved chunk partners as failed.
+          for (const partnerId of chunk) {
+            if (!results.some((r) => r.id === partnerId) && !approvedInChunk.some((a) => a.id === partnerId)) {
+              const partner: any = byId.get(partnerId);
+              results.push({ id: partnerId, name: partner?.name ?? String(partnerId), success: false, error: err.message });
+            }
+          }
+        }
+        for (const a of approvedInChunk) {
           await createAuditLog({
             userId: ctx.user.id,
             action: "BDC_PARTNER_BULK_APPROVED",
-            description: `Bulk approved BDC partner: ${partner.name}${input.note ? ` — ${input.note}` : ""}`,
+            description: `Bulk approved BDC partner: ${a.name}${input.note ? ` — ${input.note}` : ""}`,
             targetType: "bdc_partners",
-             targetId: partnerId,
-            metadata: { partnerId, partnerName: partner.name, note: input.note },
+             targetId: a.id,
+            metadata: { partnerId: a.id, partnerName: a.name, note: input.note },
             severity: "info",
           });
-          results.push({ id: partnerId, name: partner.name, success: true, verified: true });
-        } catch (err: any) {
-          results.push({ id: partnerId, name: String(partnerId), success: false, error: err.message });
+          results.push({ id: a.id, name: a.name, success: true, verified: true });
         }
       }
       const approved = results.filter(r => r.success).length;

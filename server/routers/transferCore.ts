@@ -299,34 +299,67 @@ export const transferCoreRouter = router({
       return { success: true, verified: true, referenceId: input.referenceId };
     }),
 
-  /** List user's transfer history */
+  /**
+   * List user's transfer history.
+   * W14: column-projected keyset pagination — pass `cursor` (opaque, from the
+   * previous page's nextCursor) instead of `offset`. OFFSET remains accepted
+   * for legacy callers but keyset is the performant path. COUNT(*) runs only
+   * on the first page (no cursor, offset 0); deeper pages return total: null.
+   */
   history: protectedProcedure
     .input(z.object({
       limit: z.number().int().min(1).max(100).default(20),
       offset: z.number().int().min(0).default(0),
+      cursor: z.string().max(128).optional(),
       status: z.enum(["all", "completed", "pending", "failed", "cancelled"]).default("all"),
     }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) return { transfers: [], total: 0, limit: input.limit, offset: input.offset };
+      if (!db) return { transfers: [], total: 0, limit: input.limit, offset: input.offset, nextCursor: null };
       const statusFilter = input.status === "all" ? sql`` : sql`AND status = ${input.status}`;
+      // Opaque cursor: "<createdAtMs>_<id>" of the last row of the prior page.
+      let keysetFilter = sql``;
+      if (input.cursor) {
+        const sep = input.cursor.lastIndexOf("_");
+        const cursorMs = Number(input.cursor.slice(0, sep));
+        const cursorId = Number(input.cursor.slice(sep + 1));
+        if (!Number.isFinite(cursorMs) || !Number.isFinite(cursorId)) {
+          return { transfers: [], total: null, limit: input.limit, offset: input.offset, nextCursor: null };
+        }
+        const cursorTs = new Date(cursorMs);
+        keysetFilter = sql`AND ("createdAt", id) < (${cursorTs}, ${cursorId})`;
+      }
+      const offsetFilter = input.cursor ? sql`` : sql`OFFSET ${input.offset}`;
+      // Projected columns only (was SELECT *): everything the history UI reads.
       const result = await db.execute(sql`
-        SELECT * FROM transactions 
-        WHERE "userId" = ${ctx.user.id} ${statusFilter}
-        ORDER BY "createdAt" DESC 
-        LIMIT ${input.limit} OFFSET ${input.offset}
+        SELECT id, type, status, "fromCurrency", "fromAmount", "toCurrency", "toAmount",
+               fee, "fxRate", reference, description, "recipientName", "createdAt", "updatedAt"
+        FROM transactions
+        WHERE "userId" = ${ctx.user.id} ${statusFilter} ${keysetFilter}
+        ORDER BY "createdAt" DESC, id DESC
+        LIMIT ${input.limit} ${offsetFilter}
       `);
-      const countResult = await db.execute(sql`
-        SELECT COUNT(*) as total FROM transactions 
-        WHERE "userId" = ${ctx.user.id} ${statusFilter}
-      `);
-      const rows = result as unknown as Record<string, unknown>[];
-      const countRows = countResult as unknown as { total: string }[];
+      const rows = result as unknown as Array<Record<string, unknown> & { id: number; createdAt: string | Date }>;
+      // COUNT only where a UI total is meaningful (first page); keyset pages skip it.
+      let total: number | null = null;
+      if (!input.cursor && input.offset === 0) {
+        const countResult = await db.execute(sql`
+          SELECT COUNT(*) as total FROM transactions
+          WHERE "userId" = ${ctx.user.id} ${statusFilter}
+        `);
+        const countRows = countResult as unknown as { total: string }[];
+        total = parseInt(countRows[0]?.total || "0");
+      }
+      const lastRow = rows[rows.length - 1];
+      const nextCursor = rows.length === input.limit && lastRow
+        ? `${new Date(lastRow.createdAt).getTime()}_${lastRow.id}`
+        : null;
       return {
         transfers: rows,
-        total: parseInt(countRows[0]?.total || "0"),
+        total,
         limit: input.limit,
         offset: input.offset,
+        nextCursor,
       };
     }),
 

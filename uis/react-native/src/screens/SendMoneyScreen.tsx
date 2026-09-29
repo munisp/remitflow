@@ -20,7 +20,7 @@ export default function SendMoneyScreen() {
   const { data: rates } = trpc.paymentRails.getLiveRates.useQuery({ baseCurrency: fromCurrency });
   const sendMutation = trpc.transactions.send.useMutation({
     onSuccess: () => setStep('success'),
-    onError: (e) => Alert.alert('Transfer Failed', e.message),
+    onError: (e: any) => Alert.alert('Transfer Failed', e.message),
   });
 
   const rate = rates?.rates?.[toCurrency] ?? 1;

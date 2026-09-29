@@ -4,13 +4,13 @@
 package main
 
 import (
-	"database/sql"
-	_ "github.com/lib/pq"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	_ "github.com/lib/pq"
 	"log/slog"
 	"net/http"
 	"os"
@@ -21,20 +21,19 @@ import (
 
 // ─── CBN eFASS Report ────────────────────────────────────────────────────────
 
-
 var _processStartTime = time.Now()
 
 var db *sql.DB
 
 type CBNReport struct {
-	XMLName        xml.Name         `xml:"eFASSReport"`
-	Version        string           `xml:"version,attr"`
-	ReportType     string           `xml:"reportType"`
-	InstitutionID  string           `xml:"institutionId"`
-	Period         CBNPeriod        `xml:"period"`
-	Transactions   []CBNTransaction `xml:"transactions>transaction"`
-	Summary        CBNSummary       `xml:"summary"`
-	GeneratedAt    string           `xml:"generatedAt"`
+	XMLName       xml.Name         `xml:"eFASSReport"`
+	Version       string           `xml:"version,attr"`
+	ReportType    string           `xml:"reportType"`
+	InstitutionID string           `xml:"institutionId"`
+	Period        CBNPeriod        `xml:"period"`
+	Transactions  []CBNTransaction `xml:"transactions>transaction"`
+	Summary       CBNSummary       `xml:"summary"`
+	GeneratedAt   string           `xml:"generatedAt"`
 }
 
 type CBNPeriod struct {
@@ -63,13 +62,13 @@ type CBNSummary struct {
 // ─── FinCEN BSA ──────────────────────────────────────────────────────────────
 
 type FinCENReport struct {
-	XMLName      xml.Name           `xml:"BSAEFiling"`
-	Version      string             `xml:"version,attr"`
-	ReportType   string             `xml:"reportType"`
-	FilingInst   string             `xml:"filingInstitution"`
-	BatchID      string             `xml:"batchId"`
-	Filings      []FinCENFiling     `xml:"filings>filing"`
-	GeneratedAt  string             `xml:"generatedAt"`
+	XMLName     xml.Name       `xml:"BSAEFiling"`
+	Version     string         `xml:"version,attr"`
+	ReportType  string         `xml:"reportType"`
+	FilingInst  string         `xml:"filingInstitution"`
+	BatchID     string         `xml:"batchId"`
+	Filings     []FinCENFiling `xml:"filings>filing"`
+	GeneratedAt string         `xml:"generatedAt"`
 }
 
 type FinCENFiling struct {
@@ -87,23 +86,23 @@ type FinCENFiling struct {
 // ─── FINTRAC ─────────────────────────────────────────────────────────────────
 
 type FINTRACReport struct {
-	XMLName     xml.Name          `xml:"FINTRACReport"`
-	Version     string            `xml:"version,attr"`
-	ReportType  string            `xml:"reportType"`
-	FINTRACID   string            `xml:"fintracId"`
-	Reports     []FINTRACEntry    `xml:"reports>report"`
-	GeneratedAt string            `xml:"generatedAt"`
+	XMLName     xml.Name       `xml:"FINTRACReport"`
+	Version     string         `xml:"version,attr"`
+	ReportType  string         `xml:"reportType"`
+	FINTRACID   string         `xml:"fintracId"`
+	Reports     []FINTRACEntry `xml:"reports>report"`
+	GeneratedAt string         `xml:"generatedAt"`
 }
 
 type FINTRACEntry struct {
-	ReportID      string  `xml:"reportId"`
-	Type          string  `xml:"type"`
-	Amount        float64 `xml:"amount"`
-	Currency      string  `xml:"currency"`
-	Date          string  `xml:"date"`
-	SenderName    string  `xml:"senderName"`
-	ReceiverName  string  `xml:"receiverName"`
-	Description   string  `xml:"description"`
+	ReportID     string  `xml:"reportId"`
+	Type         string  `xml:"type"`
+	Amount       float64 `xml:"amount"`
+	Currency     string  `xml:"currency"`
+	Date         string  `xml:"date"`
+	SenderName   string  `xml:"senderName"`
+	ReceiverName string  `xml:"receiverName"`
+	Description  string  `xml:"description"`
 }
 
 // ─── API Request/Response ────────────────────────────────────────────────────
@@ -161,7 +160,6 @@ func generateFINTRACReport(req GenerateRequest) ([]byte, error) {
 	return xml.MarshalIndent(report, "", "  ")
 }
 
-
 func initDB() error {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -204,11 +202,14 @@ func initDB() error {
 
 // dbUpsert stores or updates a record in the service state table
 func dbUpsert(id string, data interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO regulatory_reports_state (id, data, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
@@ -218,8 +219,11 @@ func dbUpsert(id string, data interface{}) error {
 
 // dbGet retrieves a record from the service state table
 func dbGet(id string, dest interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM regulatory_reports_state WHERE id = $1", id).Scan(&jsonData)
+	err := db.QueryRowContext(ctx, "SELECT data FROM regulatory_reports_state WHERE id = $1", id).Scan(&jsonData)
 	if err != nil {
 		return err
 	}
@@ -228,7 +232,10 @@ func dbGet(id string, dest interface{}) error {
 
 // dbList retrieves all records from the service state table
 func dbList(limit int) ([]json.RawMessage, error) {
-	rows, err := db.Query("SELECT data FROM regulatory_reports_state ORDER BY updated_at DESC LIMIT $1", limit)
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT data FROM regulatory_reports_state ORDER BY updated_at DESC LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -246,22 +253,27 @@ func dbList(limit int) ([]json.RawMessage, error) {
 
 // dbLogEvent stores an event in the events table
 func dbLogEvent(eventType string, payload interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("INSERT INTO regulatory_reports_events (event_type, payload) VALUES ($1, $2)",
+	_, err = db.ExecContext(ctx, "INSERT INTO regulatory_reports_events (event_type, payload) VALUES ($1, $2)",
 		eventType, jsonData)
 	return err
 }
 
-
 // loadFromDB populates in-memory state from database on startup (write-through cache warm)
 func loadFromDB() {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query("SELECT id, data FROM regulatory_reports_state ORDER BY updated_at DESC LIMIT 1000")
+	rows, err := db.QueryContext(ctx, "SELECT id, data FROM regulatory_reports_state ORDER BY updated_at DESC LIMIT 1000")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
@@ -297,16 +309,16 @@ func main() {
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "regulatory-reports"})
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		uptime := time.Since(_processStartTime).Seconds()
-		fmt.Fprintf(w, "# HELP pod_uptime_seconds Time since process started\n")
-		fmt.Fprintf(w, "# TYPE pod_uptime_seconds gauge\n")
-		fmt.Fprintf(w, "pod_uptime_seconds{service=\"%s\"} %.1f\n", "go-regulatory-reports", uptime)
-		fmt.Fprintf(w, "# HELP pod_ready Whether pod is ready\n")
-		fmt.Fprintf(w, "# TYPE pod_ready gauge\n")
-		fmt.Fprintf(w, "pod_ready{service=\"%s\"} 1\n", "go-regulatory-reports")
-	})
+		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			uptime := time.Since(_processStartTime).Seconds()
+			fmt.Fprintf(w, "# HELP pod_uptime_seconds Time since process started\n")
+			fmt.Fprintf(w, "# TYPE pod_uptime_seconds gauge\n")
+			fmt.Fprintf(w, "pod_uptime_seconds{service=\"%s\"} %.1f\n", "go-regulatory-reports", uptime)
+			fmt.Fprintf(w, "# HELP pod_ready Whether pod is ready\n")
+			fmt.Fprintf(w, "# TYPE pod_ready gauge\n")
+			fmt.Fprintf(w, "pod_ready{service=\"%s\"} 1\n", "go-regulatory-reports")
+		})
 	})
 
 	mux.HandleFunc("/generate", func(w http.ResponseWriter, r *http.Request) {
@@ -315,6 +327,7 @@ func main() {
 			return
 		}
 		var req GenerateRequest
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
@@ -369,7 +382,7 @@ func main() {
 		w.Write(bytes.TrimSpace(data))
 	})
 
-	srv := &http.Server{Addr: ":" + port, Handler: mux}
+	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() {
 		logger.Info("regulatory-reports service starting", "port", port)
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
@@ -378,7 +391,6 @@ func main() {
 		}
 	}()
 
-	
 	// Periodic state persistence to PostgreSQL (write-through cache)
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)

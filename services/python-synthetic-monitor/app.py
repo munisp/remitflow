@@ -19,6 +19,26 @@ from datetime import datetime
 from typing import Optional
 
 import httpx
+
+# ── Shared HTTP clients (SPEC-wave14 §4.6) ────────────────────────────────────
+# Timeout-keyed pool of module-level AsyncClients: outbound calls previously
+# constructed a fresh client per request (TCP/TLS + pool setup each time).
+# Clients live for the process lifetime; pools are capped at 100 connections.
+_http_clients: dict = {}
+
+
+def get_http_client(timeout: float = 5.0, **kwargs) -> httpx.AsyncClient:
+    key = (float(timeout), tuple(sorted(kwargs.items())))
+    client = _http_clients.get(key)
+    if client is None:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout),
+            limits=httpx.Limits(max_connections=100),
+            **kwargs,
+        )
+        _http_clients[key] = client
+    return client
+
 from fastapi import FastAPI
 
 # ── PostgreSQL persistence ──────────────────────────────────────────────
@@ -43,7 +63,7 @@ _db_pool = None
 def _get_db():
     global _db_pool
     if _db_pool is None:
-        _db_pool = psycopg2.connect(_DB_URL)
+        _db_pool = psycopg2.connect(_DB_URL, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
         _db_pool.autocommit = True
         with _db_pool.cursor() as cur:
             cur.execute("""
@@ -126,17 +146,17 @@ async def check_endpoint(name: str, url: str, timeout: float = 10.0) -> dict:
     }
 
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, timeout=timeout)
-            result["response_time_ms"] = round((time.monotonic() - start) * 1000, 2)
-            result["status_code"] = resp.status_code
+        client = get_http_client()  # shared client (SPEC-wave14 §4.6)
+        resp = await client.get(url, timeout=timeout)
+        result["response_time_ms"] = round((time.monotonic() - start) * 1000, 2)
+        result["status_code"] = resp.status_code
 
-            if resp.status_code < 300:
-                result["status"] = "healthy"
-            elif resp.status_code < 500:
-                result["status"] = "degraded"
-            else:
-                result["status"] = "down"
+        if resp.status_code < 300:
+            result["status"] = "healthy"
+        elif resp.status_code < 500:
+            result["status"] = "degraded"
+        else:
+            result["status"] = "down"
     except httpx.TimeoutException:
         result["status"] = "timeout"
         result["error"] = f"Request timed out after {timeout}s"
@@ -220,4 +240,4 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("SYNTHETIC_MONITOR_PORT", "8201"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run("app:app", host="0.0.0.0", port=port, workers=int(os.getenv("UVICORN_WORKERS", "1")))  # SPEC-wave14 §4.6: env-configurable workers (default 1)

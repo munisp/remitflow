@@ -159,7 +159,7 @@ class PostgresExtractor:
                 "Install psycopg2-binary (see requirements.txt). Refusing to emit fabricated data."
             ) from e
         try:
-            self._conn = psycopg2.connect(self.db_url)
+            self._conn = psycopg2.connect(self.db_url, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
             logger.info("Connected to PostgreSQL")
         except Exception as e:
             raise RuntimeError(

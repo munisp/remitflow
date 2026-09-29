@@ -5,95 +5,96 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
-"context"
-"encoding/json"
-"fmt"
-"log"
-"math/rand"
-"net/http"
-"os"
-"sync"
-"time"
 	"database/sql"
-	"log/slog"
+	"encoding/json"
+	"fmt"
 	_ "github.com/lib/pq"
+	"io"
+	"log"
+	"log/slog"
+	"math/rand"
+	"net/http"
+	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 )
 
 var (
-port              = getEnv("PORT", "8095")
-daprHTTPPort      = getEnv("DAPR_HTTP_PORT", "3500")
-mojalooopEndpoint = getEnv("MOJALOOP_ENDPOINT", "http://localhost:3003")
-tigerBeetleAddr   = getEnv("TIGERBEETLE_ADDR", "http://localhost:3004")
-openSearchURL     = getEnv("OPENSEARCH_URL", "http://localhost:9200")
+	port              = getEnv("PORT", "8095")
+	daprHTTPPort      = getEnv("DAPR_HTTP_PORT", "3500")
+	mojalooopEndpoint = getEnv("MOJALOOP_ENDPOINT", "http://localhost:3003")
+	tigerBeetleAddr   = getEnv("TIGERBEETLE_ADDR", "http://localhost:3004")
+	openSearchURL     = getEnv("OPENSEARCH_URL", "http://localhost:9200")
 )
 
 type Corridor struct {
-Code             string  `json:"code"`
-CountryName      string  `json:"country_name"`
-Currency         string  `json:"currency"`
-FxRateNGN        float64 `json:"fx_rate_ngn"`
-FeePercent       float64 `json:"fee_percent"`
-SettlementHours  int     `json:"settlement_hours"`
-MojalooopEnabled bool    `json:"mojaloop_enabled"`
-IsActive         bool    `json:"is_active"`
+	Code             string  `json:"code"`
+	CountryName      string  `json:"country_name"`
+	Currency         string  `json:"currency"`
+	FxRateNGN        float64 `json:"fx_rate_ngn"`
+	FeePercent       float64 `json:"fee_percent"`
+	SettlementHours  int     `json:"settlement_hours"`
+	MojalooopEnabled bool    `json:"mojaloop_enabled"`
+	IsActive         bool    `json:"is_active"`
 }
 
 type XofTransferRequest struct {
-UserID             int     `json:"user_id"`
-CorridorCode       string  `json:"corridor_code"`
-AmountNGN          float64 `json:"amount_ngn"`
-PayoutMethod       string  `json:"payout_method"`
-BeneficiaryName    string  `json:"beneficiary_name"`
-BeneficiaryMobile  string  `json:"beneficiary_mobile,omitempty"`
-BeneficiaryAccount string  `json:"beneficiary_account,omitempty"`
-MobileProvider     string  `json:"mobile_provider,omitempty"`
-Reference          string  `json:"reference"`
+	UserID             int     `json:"user_id"`
+	CorridorCode       string  `json:"corridor_code"`
+	AmountNGN          float64 `json:"amount_ngn"`
+	PayoutMethod       string  `json:"payout_method"`
+	BeneficiaryName    string  `json:"beneficiary_name"`
+	BeneficiaryMobile  string  `json:"beneficiary_mobile,omitempty"`
+	BeneficiaryAccount string  `json:"beneficiary_account,omitempty"`
+	MobileProvider     string  `json:"mobile_provider,omitempty"`
+	Reference          string  `json:"reference"`
 }
 
 type XofTransferResponse struct {
-TransferID          string  `json:"transfer_id"`
-Status              string  `json:"status"`
-AmountNGN           float64 `json:"amount_ngn"`
-AmountXOF           float64 `json:"amount_xof"`
-FxRate              float64 `json:"fx_rate"`
-FeeNGN              float64 `json:"fee_ngn"`
-EstimatedSettlement string  `json:"estimated_settlement"`
-MojalooopRef        string  `json:"mojaloop_ref,omitempty"`
-TigerBeetleEntry    int64   `json:"tiger_beetle_entry,omitempty"`
-KafkaOffset         int64   `json:"kafka_offset,omitempty"`
+	TransferID          string  `json:"transfer_id"`
+	Status              string  `json:"status"`
+	AmountNGN           float64 `json:"amount_ngn"`
+	AmountXOF           float64 `json:"amount_xof"`
+	FxRate              float64 `json:"fx_rate"`
+	FeeNGN              float64 `json:"fee_ngn"`
+	EstimatedSettlement string  `json:"estimated_settlement"`
+	MojalooopRef        string  `json:"mojaloop_ref,omitempty"`
+	TigerBeetleEntry    int64   `json:"tiger_beetle_entry,omitempty"`
+	KafkaOffset         int64   `json:"kafka_offset,omitempty"`
 }
 
 type XofQuoteResponse struct {
-CorridorCode        string   `json:"corridor_code"`
-AmountNGN           float64  `json:"amount_ngn"`
-AmountXOF           float64  `json:"amount_xof"`
-FxRate              float64  `json:"fx_rate"`
-FeeNGN              float64  `json:"fee_ngn"`
-FeePercent          float64  `json:"fee_percent"`
-TotalNGN            float64  `json:"total_ngn"`
-EstimatedSettlement string   `json:"estimated_settlement"`
-RateValidUntil      string   `json:"rate_valid_until"`
-PayoutMethods       []string `json:"payout_methods"`
+	CorridorCode        string   `json:"corridor_code"`
+	AmountNGN           float64  `json:"amount_ngn"`
+	AmountXOF           float64  `json:"amount_xof"`
+	FxRate              float64  `json:"fx_rate"`
+	FeeNGN              float64  `json:"fee_ngn"`
+	FeePercent          float64  `json:"fee_percent"`
+	TotalNGN            float64  `json:"total_ngn"`
+	EstimatedSettlement string   `json:"estimated_settlement"`
+	RateValidUntil      string   `json:"rate_valid_until"`
+	PayoutMethods       []string `json:"payout_methods"`
 }
 
 var corridorRegistry = map[string]Corridor{
-"TG": {Code: "TG", CountryName: "Togo", Currency: "XOF", FxRateNGN: 0.59, FeePercent: 0.015, SettlementHours: 24, MojalooopEnabled: true, IsActive: true},
-"NE": {Code: "NE", CountryName: "Niger", Currency: "XOF", FxRateNGN: 0.59, FeePercent: 0.015, SettlementHours: 24, MojalooopEnabled: true, IsActive: true},
-"ML": {Code: "ML", CountryName: "Mali", Currency: "XOF", FxRateNGN: 0.59, FeePercent: 0.015, SettlementHours: 48, MojalooopEnabled: false, IsActive: true},
-"BJ": {Code: "BJ", CountryName: "Benin", Currency: "XOF", FxRateNGN: 0.59, FeePercent: 0.015, SettlementHours: 24, MojalooopEnabled: true, IsActive: true},
-"CI": {Code: "CI", CountryName: "Cote d'Ivoire", Currency: "XOF", FxRateNGN: 0.59, FeePercent: 0.012, SettlementHours: 12, MojalooopEnabled: true, IsActive: true},
-"SN": {Code: "SN", CountryName: "Senegal", Currency: "XOF", FxRateNGN: 0.59, FeePercent: 0.012, SettlementHours: 12, MojalooopEnabled: true, IsActive: true},
-"BF": {Code: "BF", CountryName: "Burkina Faso", Currency: "XOF", FxRateNGN: 0.59, FeePercent: 0.015, SettlementHours: 48, MojalooopEnabled: false, IsActive: true},
-"GH": {Code: "GH", CountryName: "Ghana", Currency: "GHS", FxRateNGN: 0.0062, FeePercent: 0.013, SettlementHours: 6, MojalooopEnabled: true, IsActive: true},
+	"TG": {Code: "TG", CountryName: "Togo", Currency: "XOF", FxRateNGN: 0.59, FeePercent: 0.015, SettlementHours: 24, MojalooopEnabled: true, IsActive: true},
+	"NE": {Code: "NE", CountryName: "Niger", Currency: "XOF", FxRateNGN: 0.59, FeePercent: 0.015, SettlementHours: 24, MojalooopEnabled: true, IsActive: true},
+	"ML": {Code: "ML", CountryName: "Mali", Currency: "XOF", FxRateNGN: 0.59, FeePercent: 0.015, SettlementHours: 48, MojalooopEnabled: false, IsActive: true},
+	"BJ": {Code: "BJ", CountryName: "Benin", Currency: "XOF", FxRateNGN: 0.59, FeePercent: 0.015, SettlementHours: 24, MojalooopEnabled: true, IsActive: true},
+	"CI": {Code: "CI", CountryName: "Cote d'Ivoire", Currency: "XOF", FxRateNGN: 0.59, FeePercent: 0.012, SettlementHours: 12, MojalooopEnabled: true, IsActive: true},
+	"SN": {Code: "SN", CountryName: "Senegal", Currency: "XOF", FxRateNGN: 0.59, FeePercent: 0.012, SettlementHours: 12, MojalooopEnabled: true, IsActive: true},
+	"BF": {Code: "BF", CountryName: "Burkina Faso", Currency: "XOF", FxRateNGN: 0.59, FeePercent: 0.015, SettlementHours: 48, MojalooopEnabled: false, IsActive: true},
+	"GH": {Code: "GH", CountryName: "Ghana", Currency: "GHS", FxRateNGN: 0.0062, FeePercent: 0.013, SettlementHours: 6, MojalooopEnabled: true, IsActive: true},
 }
 
 var (
-rateCache   = make(map[string]float64)
-rateCacheMu sync.RWMutex
-rateExpiry  = make(map[string]time.Time)
+	rateCache   = make(map[string]float64)
+	rateCacheMu sync.RWMutex
+	rateExpiry  = make(map[string]time.Time)
 )
 
 func getLiveFXRate(corridorCode string) (float64, error) {
@@ -120,19 +121,23 @@ func getLiveFXRate(corridorCode string) (float64, error) {
 	return 0, fmt.Errorf("corridor %s not found", corridorCode)
 }
 
+// outboundHTTPClient is a shared client with an explicit timeout (wave-14 perf):
+// per-call &http.Client{} construction disabled keep-alive pooling and had no
+// timeout ceiling.
+var outboundHTTPClient = &http.Client{Timeout: 5 * time.Second}
+
 func publishKafkaEvent(topic string, event interface{}) (int64, error) {
-url := fmt.Sprintf("http://localhost:%s/v1.0/publish/kafka-pubsub/%s", daprHTTPPort, topic)
-body, _ := json.Marshal(event)
-ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-defer cancel()
-req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-req.Header.Set("Content-Type", "application/json")
-client := &http.Client{}
-resp, err := client.Do(req)
-if err != nil {
+	url := fmt.Sprintf("http://localhost:%s/v1.0/publish/kafka-pubsub/%s", daprHTTPPort, topic)
+	body, _ := json.Marshal(event)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := outboundHTTPClient.Do(req)
+	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { io.Copy(io.Discard, resp.Body); resp.Body.Close() }() // drain for keep-alive reuse
 	return time.Now().UnixNano(), nil
 }
 
@@ -143,17 +148,16 @@ func recordTigerBeetleEntry(userID int, amountNGN float64, corridorCode string) 
 		"amount": amountNGN, "currency": "NGN",
 		"corridor": corridorCode, "type": "xof_outbound",
 	}
-body, _ := json.Marshal(payload)
-ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-defer cancel()
-req, _ := http.NewRequestWithContext(ctx, "POST", tigerBeetleAddr+"/accounts/transfer", bytes.NewReader(body))
-req.Header.Set("Content-Type", "application/json")
-client := &http.Client{}
-resp, err := client.Do(req)
-if err != nil {
+	body, _ := json.Marshal(payload)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "POST", tigerBeetleAddr+"/accounts/transfer", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := outboundHTTPClient.Do(req)
+	if err != nil {
 		return entryID, nil
 	}
-	defer resp.Body.Close()
+	defer func() { io.Copy(io.Discard, resp.Body); resp.Body.Close() }() // drain for keep-alive reuse
 	return entryID, nil
 }
 
@@ -162,8 +166,11 @@ func indexOpenSearch(transferID string, doc map[string]interface{}) {
 	url := fmt.Sprintf("%s/xof-transfers/_doc/%s", openSearchURL, transferID)
 	req, _ := http.NewRequest("PUT", url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 5 * time.Second}
-	client.Do(req) //nolint:errcheck
+	// wave-14: shared timeout client + drain/close (was leaking response bodies)
+	if resp, err := outboundHTTPClient.Do(req); err == nil && resp != nil {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
 }
 
 func handleQuote(w http.ResponseWriter, r *http.Request) {
@@ -176,6 +183,7 @@ func handleQuote(w http.ResponseWriter, r *http.Request) {
 		AmountNGN    float64 `json:"amount_ngn"`
 		PayoutMethod string  `json:"payout_method"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
@@ -197,16 +205,16 @@ func handleQuote(w http.ResponseWriter, r *http.Request) {
 		payoutMethods = []string{"mobile_money", "bank_account", "wallet"}
 	}
 	resp := XofQuoteResponse{
-		CorridorCode:   req.CorridorCode,
-		AmountNGN:      req.AmountNGN,
-		AmountXOF:      amountXOF,
-		FxRate:         fxRate,
-		FeeNGN:         feeNGN,
-		FeePercent:     corridor.FeePercent,
-		TotalNGN:       req.AmountNGN + feeNGN,
+		CorridorCode:        req.CorridorCode,
+		AmountNGN:           req.AmountNGN,
+		AmountXOF:           amountXOF,
+		FxRate:              fxRate,
+		FeeNGN:              feeNGN,
+		FeePercent:          corridor.FeePercent,
+		TotalNGN:            req.AmountNGN + feeNGN,
 		EstimatedSettlement: fmt.Sprintf("%d hours", corridor.SettlementHours),
-		RateValidUntil:     time.Now().Add(60 * time.Second).Format(time.RFC3339),
-		PayoutMethods:      payoutMethods,
+		RateValidUntil:      time.Now().Add(60 * time.Second).Format(time.RFC3339),
+		PayoutMethods:       payoutMethods,
 	}
 	// Persist quote to PostgreSQL (middleware-ready: swap to TigerBeetle in production)
 	if db != nil {
@@ -222,6 +230,7 @@ func handleTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req XofTransferRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
@@ -253,16 +262,16 @@ func handleTransfer(w http.ResponseWriter, r *http.Request) {
 		mojalooopRef = fmt.Sprintf("MJL-%s-%d", transferID, time.Now().UnixNano())
 	}
 	resp := XofTransferResponse{
-		TransferID:     transferID,
-		Status:         "processing",
-		AmountNGN:      req.AmountNGN,
-		AmountXOF:      amountXOF,
-		FxRate:         fxRate,
-		FeeNGN:         feeNGN,
+		TransferID:          transferID,
+		Status:              "processing",
+		AmountNGN:           req.AmountNGN,
+		AmountXOF:           amountXOF,
+		FxRate:              fxRate,
+		FeeNGN:              feeNGN,
 		EstimatedSettlement: fmt.Sprintf("%d hours", corridor.SettlementHours),
-		MojalooopRef:       mojalooopRef,
-		TigerBeetleEntry:   tbEntry,
-		KafkaOffset:        kafkaOffset,
+		MojalooopRef:        mojalooopRef,
+		TigerBeetleEntry:    tbEntry,
+		KafkaOffset:         kafkaOffset,
 	}
 	go indexOpenSearch(transferID, map[string]interface{}{
 		"transfer_id": transferID, "user_id": req.UserID,
@@ -359,7 +368,6 @@ func authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-
 // ── PostgreSQL Persistence Layer ─────────────────────────────────────────────
 var db *sql.DB
 
@@ -403,42 +411,73 @@ func initDB() error {
 }
 
 func dbUpsert(id string, data interface{}) error {
-	if db == nil { return nil }
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if db == nil {
+		return nil
+	}
 	jsonData, err := json.Marshal(data)
-	if err != nil { return err }
-	_, err = db.Exec(`INSERT INTO go_xof_adapter_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`, id, jsonData)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO go_xof_adapter_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`, id, jsonData)
 	return err
 }
 
 func dbGet(id string, dest interface{}) error {
-	if db == nil { return fmt.Errorf("no db") }
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if db == nil {
+		return fmt.Errorf("no db")
+	}
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM go_xof_adapter_state WHERE id = $1", id).Scan(&jsonData)
-	if err != nil { return err }
+	err := db.QueryRowContext(ctx, "SELECT data FROM go_xof_adapter_state WHERE id = $1", id).Scan(&jsonData)
+	if err != nil {
+		return err
+	}
 	return json.Unmarshal(jsonData, dest)
 }
 
 func dbList(limit int) ([]json.RawMessage, error) {
-	if db == nil { return nil, nil }
-	rows, err := db.Query("SELECT data FROM go_xof_adapter_state ORDER BY updated_at DESC LIMIT $1", limit)
-	if err != nil { return nil, err }
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if db == nil {
+		return nil, nil
+	}
+	rows, err := db.QueryContext(ctx, "SELECT data FROM go_xof_adapter_state ORDER BY updated_at DESC LIMIT $1", limit)
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var results []json.RawMessage
 	for rows.Next() {
 		var data json.RawMessage
-		if err := rows.Scan(&data); err != nil { return nil, err }
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
 		results = append(results, data)
 	}
 	return results, rows.Err()
 }
 
 func dbLogEvent(eventType string, payload interface{}) error {
-	if db == nil { return nil }
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if db == nil {
+		return nil
+	}
 	jsonData, err := json.Marshal(payload)
-	if err != nil { return err }
-	_, err = db.Exec("INSERT INTO go_xof_adapter_events (event_type, payload) VALUES ($1, $2)", eventType, jsonData)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, "INSERT INTO go_xof_adapter_events (event_type, payload) VALUES ($1, $2)", eventType, jsonData)
 	return err
 }
+
 // ── End PostgreSQL Layer ─────────────────────────────────────────────────────
 
 // panicRecoveryMiddleware catches panics and returns 500 instead of crashing
@@ -467,11 +506,12 @@ func main() {
 	mux.HandleFunc("/corridors", handleCorridors)
 	addr := fmt.Sprintf(":%s", port)
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      panicRecoveryMiddleware(authMiddleware(mux)),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              addr,
+		Handler:           panicRecoveryMiddleware(authMiddleware(mux)),
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	sigCh := make(chan os.Signal, 1)

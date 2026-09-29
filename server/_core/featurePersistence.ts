@@ -81,13 +81,24 @@ async function flushEvents() {
   const batch = eventBuffer.splice(0, eventBuffer.length);
 
   try {
-    const { publishEvent } = await import("../middleware/kafka");
+    // W14: group by topic and send each group as one producer batch
+    // (was: one send round trip per event).
+    const { publishBatch } = await import("../middleware/kafka");
+    const byTopic = new Map<string, Array<{ key: string; payload: Record<string, unknown> }>>();
     for (const event of batch) {
-      await publishEvent(event.topic, event.key, {
-        ...event.value,
-        _emittedAt: event.timestamp ?? new Date().toISOString(),
-        _source: "feature-persistence",
+      const msgs = byTopic.get(event.topic) ?? [];
+      msgs.push({
+        key: event.key,
+        payload: {
+          ...event.value,
+          _emittedAt: event.timestamp ?? new Date().toISOString(),
+          _source: "feature-persistence",
+        },
       });
+      byTopic.set(event.topic, msgs);
+    }
+    for (const [topic, msgs] of byTopic) {
+      await publishBatch(topic, msgs);
     }
   } catch (err) {
     logger.debug({ err, count: batch.length }, "Kafka event flush failed — events dropped");

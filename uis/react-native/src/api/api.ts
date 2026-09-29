@@ -2,12 +2,14 @@
  * api.ts — Centralised API client for React Native RemitFlow app.
  * Uses fetch with credentials and handles tRPC response format.
  */
+import { fetchWithTimeout } from './fetchWithTimeout';
+
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL ?? 'https://remitflow.app';
 
 export async function apiGet<T>(path: string, params?: Record<string, string>): Promise<T> {
   const url = new URL(BASE_URL + path);
   if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-  const res = await fetch(url.toString(), {
+  const res = await fetchWithTimeout(url.toString(), {
     method: 'GET',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     credentials: 'include',
@@ -18,7 +20,7 @@ export async function apiGet<T>(path: string, params?: Record<string, string>): 
 }
 
 export async function apiPost<T>(path: string, data: unknown): Promise<T> {
-  const res = await fetch(BASE_URL + path, {
+  const res = await fetchWithTimeout(BASE_URL + path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     credentials: 'include',

@@ -9,8 +9,8 @@ export default function SplitBillScreen() {
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({ title: '', totalAmount: '', currency: 'USD', participantEmails: '' });
   const { data, isLoading, refetch } = trpc.splitBill.list.useQuery();
-  const createMutation = trpc.splitBill.create.useMutation({ onSuccess: () => { setShowCreate(false); refetch(); }, onError: (e) => Alert.alert('Error', e.message) });
-  const cancelMutation = trpc.splitBill.cancel.useMutation({ onSuccess: refetch, onError: (e) => Alert.alert('Error', e.message) });
+  const createMutation = trpc.splitBill.create.useMutation({ onSuccess: () => { setShowCreate(false); refetch(); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const cancelMutation = trpc.splitBill.cancel.useMutation({ onSuccess: refetch, onError: (e: any) => Alert.alert('Error', e.message) });
   const STATUS_COLOR: Record<string, string> = { active: '#10b981', completed: '#6366f1', cancelled: '#6b7280' };
   return (
     <View style={s.container}>

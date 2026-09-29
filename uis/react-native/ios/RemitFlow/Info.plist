@@ -69,8 +69,6 @@
 			</array>
 		</dict>
 	</array>
-	<key>NSCameraUsageDescription</key>
-	<string>RemitFlow needs camera access for KYC document verification and selfie capture.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>RemitFlow needs photo library access to upload KYC documents.</string>
 	<key>NSFaceIDUsageDescription</key>

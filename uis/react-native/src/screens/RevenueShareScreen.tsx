@@ -10,7 +10,7 @@ export default function RevenueShareScreen() {
 
   const requestPayout = trpc.revenueShare.requestPayout.useMutation({
     onSuccess: () => Alert.alert('Success', 'Payout request submitted successfully!'),
-    onError: (e) => Alert.alert('Error', e.message),
+    onError: (e: any) => Alert.alert('Error', e.message),
   });
 
   return (
@@ -57,7 +57,7 @@ export default function RevenueShareScreen() {
 
           <Text style={styles.sectionTitle}>Payout History</Text>
           <View style={styles.payoutList}>
-            {(payouts ?? []).map((p) => (
+            {(payouts ?? []).map((p: any) => (
               <View key={p.id} style={styles.payoutItem}>
                 <View>
                   <Text style={styles.payoutDate}>{new Date(p.createdAt).toLocaleDateString()}</Text>

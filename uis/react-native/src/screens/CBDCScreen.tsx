@@ -9,7 +9,7 @@ export default function CBDCScreen() {
   const [showTransfer, setShowTransfer] = useState(false);
   const [form, setForm] = useState({ fromWalletId: '', toAddress: '', amount: '' });
   const { data: wallets, isLoading, refetch } = trpc.cbdc.wallets.useQuery();
-  const transferMutation = trpc.cbdc.transfer.useMutation({ onSuccess: () => { setShowTransfer(false); refetch(); Alert.alert('Success', 'CBDC transfer initiated'); }, onError: (e) => Alert.alert('Error', e.message) });
+  const transferMutation = trpc.cbdc.transfer.useMutation({ onSuccess: () => { setShowTransfer(false); refetch(); Alert.alert('Success', 'CBDC transfer initiated'); }, onError: (e: any) => Alert.alert('Error', e.message) });
   const CBDC_COLORS: Record<string, string> = { eNaira: '#10b981', eCedi: '#f59e0b', eKwanza: '#6366f1', eShekel: '#3b82f6' };
   return (
     <View style={s.container}>

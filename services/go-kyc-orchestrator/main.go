@@ -20,7 +20,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -67,23 +69,23 @@ var (
 
 // ── Data Models ───────────────────────────────────────────────────────────────
 type KYCOrchestrationRequest struct {
-	UserID          int64   `json:"user_id"`
-	DocType         string  `json:"doc_type"`
-	DocNumber       string  `json:"doc_number,omitempty"`
-	DocImageBase64  string  `json:"doc_image_base64,omitempty"`
-	DocBackBase64   string  `json:"doc_back_base64,omitempty"`
-	SelfieBase64    string  `json:"selfie_base64,omitempty"`
-	FirstName       string  `json:"first_name"`
-	LastName        string  `json:"last_name"`
-	DateOfBirth     string  `json:"date_of_birth"`
-	Nationality     string  `json:"nationality"`
-	Address         string  `json:"address,omitempty"`
-	RunLiveness     bool    `json:"run_liveness"`
-	RunVLM          bool    `json:"run_vlm"`
-	RunBiometric    bool    `json:"run_biometric"`
-	RunAML          bool    `json:"run_aml"`
-	RunTravelRule   bool    `json:"run_travel_rule"`
-	TransferAmount  float64 `json:"transfer_amount,omitempty"`
+	UserID         int64   `json:"user_id"`
+	DocType        string  `json:"doc_type"`
+	DocNumber      string  `json:"doc_number,omitempty"`
+	DocImageBase64 string  `json:"doc_image_base64,omitempty"`
+	DocBackBase64  string  `json:"doc_back_base64,omitempty"`
+	SelfieBase64   string  `json:"selfie_base64,omitempty"`
+	FirstName      string  `json:"first_name"`
+	LastName       string  `json:"last_name"`
+	DateOfBirth    string  `json:"date_of_birth"`
+	Nationality    string  `json:"nationality"`
+	Address        string  `json:"address,omitempty"`
+	RunLiveness    bool    `json:"run_liveness"`
+	RunVLM         bool    `json:"run_vlm"`
+	RunBiometric   bool    `json:"run_biometric"`
+	RunAML         bool    `json:"run_aml"`
+	RunTravelRule  bool    `json:"run_travel_rule"`
+	TransferAmount float64 `json:"transfer_amount,omitempty"`
 }
 
 type KYCOrchestrationResult struct {
@@ -99,7 +101,16 @@ type KYCOrchestrationResult struct {
 }
 
 // ── HTTP Client ───────────────────────────────────────────────────────────────
-var httpClient = &http.Client{Timeout: 60 * time.Second}
+// Shared client with a pooled transport: stages 2–4 now run concurrently, so
+// per-host idle connections must cover the fan-out (default is 2).
+var httpClient = &http.Client{
+	Timeout: 60 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 16,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
 
 func postJSON(ctx context.Context, url string, payload interface{}) (map[string]interface{}, error) {
 	body, err := json.Marshal(payload)
@@ -119,7 +130,8 @@ func postJSON(ctx context.Context, url string, payload interface{}) (map[string]
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	// Bound the downstream response read (max 4 MiB) — no unbounded reads.
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return nil, fmt.Errorf("read error: %w", err)
 	}
@@ -198,116 +210,137 @@ func orchestrateKYC(ctx context.Context, req KYCOrchestrationRequest) KYCOrchest
 		}
 	}
 
+	// ── Stages 2–4: independent downstream checks, run CONCURRENTLY ─────────
+	// They depend only on req (not on each other or on stage 1 output), so they
+	// share ctx and run under a WaitGroup. mu guards the shared stages map and
+	// the rejection/fraud/stage-error slices. Contract preserved: a biometric
+	// dedup or AML scorer failure appends to stageErrors → manual_review
+	// (fail closed, wave-13 contract).
+	var wg sync.WaitGroup
+
 	// ── Stage 2: Biometric Deduplication (Rust Biometric Service) ────────────
 	if req.RunBiometric && req.SelfieBase64 != "" {
-		log.Printf("[KYC Orchestrator] Stage 2: Biometric dedup user_id=%d", req.UserID)
-		dedupPayload := map[string]interface{}{
-			"image_base64": req.SelfieBase64,
-		}
-		dedupResult, err := postJSON(ctx, biometricURL+"/biometric/dedup", dedupPayload)
-		if err != nil {
-			serviceErrors.WithLabelValues("rust-biometric").Inc()
-			log.Printf("[KYC Orchestrator] Biometric dedup error: %v", err)
-			stages["biometric_dedup"] = map[string]interface{}{"error": err.Error()}
-			// FAIL CLOSED: cannot prove identity is not a duplicate → manual review.
-			mu.Lock()
-			stageErrors = append(stageErrors, fmt.Sprintf("biometric_dedup_error: %v", err))
-			mu.Unlock()
-		} else {
-			stages["biometric_dedup"] = dedupResult
-			if isDup, ok := dedupResult["is_duplicate"].(bool); ok && isDup {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Printf("[KYC Orchestrator] Stage 2: Biometric dedup user_id=%d", req.UserID)
+			dedupPayload := map[string]interface{}{
+				"image_base64": req.SelfieBase64,
+			}
+			dedupResult, err := postJSON(ctx, biometricURL+"/biometric/dedup", dedupPayload)
+			isDuplicate := false
+			if err != nil {
+				serviceErrors.WithLabelValues("rust-biometric").Inc()
+				log.Printf("[KYC Orchestrator] Biometric dedup error: %v", err)
+				// FAIL CLOSED: cannot prove identity is not a duplicate → manual review.
 				mu.Lock()
-				fraudSignals = append(fraudSignals, fmt.Sprintf(
-					"duplicate_biometric_identity: matched_user=%v similarity=%v",
-					dedupResult["matched_user_id"], dedupResult["similarity"],
-				))
+				stages["biometric_dedup"] = map[string]interface{}{"error": err.Error()}
+				stageErrors = append(stageErrors, fmt.Sprintf("biometric_dedup_error: %v", err))
+				mu.Unlock()
+			} else {
+				mu.Lock()
+				stages["biometric_dedup"] = dedupResult
+				mu.Unlock()
+				if isDup, ok := dedupResult["is_duplicate"].(bool); ok && isDup {
+					isDuplicate = true
+					mu.Lock()
+					fraudSignals = append(fraudSignals, fmt.Sprintf(
+						"duplicate_biometric_identity: matched_user=%v similarity=%v",
+						dedupResult["matched_user_id"], dedupResult["similarity"],
+					))
+					mu.Unlock()
+				}
+			}
+
+			// Enroll biometric if not a duplicate
+			if !isDuplicate {
+				enrollPayload := map[string]interface{}{
+					"user_id":      req.UserID,
+					"image_base64": req.SelfieBase64,
+					"doc_type":     req.DocType,
+				}
+				enrollResult, err := postJSON(ctx, biometricURL+"/biometric/enroll", enrollPayload)
+				mu.Lock()
+				if err != nil {
+					serviceErrors.WithLabelValues("rust-biometric-enroll").Inc()
+					stages["biometric_enroll"] = map[string]interface{}{"error": err.Error()}
+				} else {
+					stages["biometric_enroll"] = enrollResult
+				}
 				mu.Unlock()
 			}
-		}
-
-		// Enroll biometric if not a duplicate
-		isDuplicate := false
-		if dedupStage, ok := stages["biometric_dedup"].(map[string]interface{}); ok {
-			if isDup, ok := dedupStage["is_duplicate"].(bool); ok {
-				isDuplicate = isDup
-			}
-		}
-
-		if !isDuplicate {
-			enrollPayload := map[string]interface{}{
-				"user_id":      req.UserID,
-				"image_base64": req.SelfieBase64,
-				"doc_type":     req.DocType,
-			}
-			enrollResult, err := postJSON(ctx, biometricURL+"/biometric/enroll", enrollPayload)
-			if err != nil {
-				serviceErrors.WithLabelValues("rust-biometric-enroll").Inc()
-				stages["biometric_enroll"] = map[string]interface{}{"error": err.Error()}
-			} else {
-				stages["biometric_enroll"] = enrollResult
-			}
-		}
+		}()
 	}
 
 	// ── Stage 3: AML Scoring (Python AML Scorer) ──────────────────────────────
 	if req.RunAML {
-		log.Printf("[KYC Orchestrator] Stage 3: AML scoring user_id=%d", req.UserID)
-		amlPayload := map[string]interface{}{
-			"user_id":     req.UserID,
-			"first_name":  req.FirstName,
-			"last_name":   req.LastName,
-			"nationality": req.Nationality,
-			"doc_type":    req.DocType,
-			"doc_number":  req.DocNumber,
-		}
-		amlResult, err := postJSON(ctx, amlScorerURL+"/score", amlPayload)
-		if err != nil {
-			serviceErrors.WithLabelValues("python-aml-scorer").Inc()
-			log.Printf("[KYC Orchestrator] AML scorer error: %v", err)
-			stages["aml_scoring"] = map[string]interface{}{"error": err.Error()}
-			// FAIL CLOSED: sanctions/PEP screening could not run → manual review.
-			mu.Lock()
-			stageErrors = append(stageErrors, fmt.Sprintf("aml_scorer_error: %v", err))
-			mu.Unlock()
-		} else {
-			stages["aml_scoring"] = amlResult
-			if riskLevel, ok := amlResult["risk_level"].(string); ok {
-				if riskLevel == "critical" || riskLevel == "high" {
-					mu.Lock()
-					rejectionReasons = append(rejectionReasons,
-						fmt.Sprintf("aml_high_risk: level=%s score=%v", riskLevel, amlResult["risk_score"]))
-					mu.Unlock()
-				}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Printf("[KYC Orchestrator] Stage 3: AML scoring user_id=%d", req.UserID)
+			amlPayload := map[string]interface{}{
+				"user_id":     req.UserID,
+				"first_name":  req.FirstName,
+				"last_name":   req.LastName,
+				"nationality": req.Nationality,
+				"doc_type":    req.DocType,
+				"doc_number":  req.DocNumber,
 			}
-			// Check sanctions hit
-			if sanctionsHit, ok := amlResult["sanctions_hit"].(bool); ok && sanctionsHit {
+			amlResult, err := postJSON(ctx, amlScorerURL+"/score", amlPayload)
+			if err != nil {
+				serviceErrors.WithLabelValues("python-aml-scorer").Inc()
+				log.Printf("[KYC Orchestrator] AML scorer error: %v", err)
+				// FAIL CLOSED: sanctions/PEP screening could not run → manual review.
 				mu.Lock()
-				rejectionReasons = append(rejectionReasons, "sanctions_list_match")
+				stages["aml_scoring"] = map[string]interface{}{"error": err.Error()}
+				stageErrors = append(stageErrors, fmt.Sprintf("aml_scorer_error: %v", err))
+				mu.Unlock()
+			} else {
+				mu.Lock()
+				stages["aml_scoring"] = amlResult
+				if riskLevel, ok := amlResult["risk_level"].(string); ok {
+					if riskLevel == "critical" || riskLevel == "high" {
+						rejectionReasons = append(rejectionReasons,
+							fmt.Sprintf("aml_high_risk: level=%s score=%v", riskLevel, amlResult["risk_score"]))
+					}
+				}
+				// Check sanctions hit
+				if sanctionsHit, ok := amlResult["sanctions_hit"].(bool); ok && sanctionsHit {
+					rejectionReasons = append(rejectionReasons, "sanctions_list_match")
+				}
 				mu.Unlock()
 			}
-		}
+		}()
 	}
 
 	// ── Stage 4: Travel Rule (if transfer amount >= $1000) ────────────────────
 	if req.RunTravelRule && req.TransferAmount >= 1000.0 {
-		log.Printf("[KYC Orchestrator] Stage 4: Travel Rule user_id=%d amount=%.2f", req.UserID, req.TransferAmount)
-		trPayload := map[string]interface{}{
-			"user_id":         req.UserID,
-			"transfer_amount": req.TransferAmount,
-			"originator": map[string]interface{}{
-				"name":        fmt.Sprintf("%s %s", req.FirstName, req.LastName),
-				"nationality": req.Nationality,
-				"doc_number":  req.DocNumber,
-			},
-		}
-		trResult, err := postJSON(ctx, travelRuleURL+"/travel-rule/screen", trPayload)
-		if err != nil {
-			serviceErrors.WithLabelValues("python-travel-rule").Inc()
-			stages["travel_rule"] = map[string]interface{}{"error": err.Error()}
-		} else {
-			stages["travel_rule"] = trResult
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Printf("[KYC Orchestrator] Stage 4: Travel Rule user_id=%d amount=%.2f", req.UserID, req.TransferAmount)
+			trPayload := map[string]interface{}{
+				"user_id":         req.UserID,
+				"transfer_amount": req.TransferAmount,
+				"originator": map[string]interface{}{
+					"name":        fmt.Sprintf("%s %s", req.FirstName, req.LastName),
+					"nationality": req.Nationality,
+					"doc_number":  req.DocNumber,
+				},
+			}
+			trResult, err := postJSON(ctx, travelRuleURL+"/travel-rule/screen", trPayload)
+			mu.Lock()
+			if err != nil {
+				serviceErrors.WithLabelValues("python-travel-rule").Inc()
+				stages["travel_rule"] = map[string]interface{}{"error": err.Error()}
+			} else {
+				stages["travel_rule"] = trResult
+			}
+			mu.Unlock()
+		}()
 	}
+
+	wg.Wait()
 
 	// ── Determine Final Status ────────────────────────────────────────────────
 	finalStatus := "approved"
@@ -366,6 +399,9 @@ func orchestrateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req KYCOrchestrationRequest
+	// Bound the body read (max 16 MiB — requests carry base64 document/selfie
+	// images, but never unbounded).
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
 		return
@@ -390,10 +426,10 @@ func orchestrateHandler(w http.ResponseWriter, r *http.Request) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 func main() {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health",         healthHandler)
-	mux.HandleFunc("/livez",          func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"ok":true}`) })
-	mux.HandleFunc("/readyz",         func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"ok":true}`) })
-	mux.Handle("/metrics",            promhttp.Handler())
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"ok":true}`) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"ok":true}`) })
+	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/kyc/orchestrate", orchestrateHandler)
 
 	addr := "0.0.0.0:" + port
@@ -401,7 +437,32 @@ func main() {
 	log.Printf("[KYC Orchestrator] Downstream: pipeline=%s biometric=%s aml=%s travel_rule=%s",
 		kycPipelineURL, biometricURL, amlScorerURL, travelRuleURL)
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("[KYC Orchestrator] Fatal: %v", err)
+	// WriteTimeout must exceed the orchestration budget (120s ctx above) plus
+	// margin, or in-flight KYC runs would be cut off mid-response.
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      150 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("[KYC Orchestrator] Fatal: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Printf("[KYC Orchestrator] Shutting down...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("[KYC Orchestrator] Forced shutdown: %v", err)
+	}
+	log.Printf("[KYC Orchestrator] Stopped")
 }

@@ -56,6 +56,15 @@ registerCache(flagCache as unknown as BoundedCache<unknown, unknown>);
 
 // ─── Core resolver ────────────────────────────────────────────────────────────
 
+// ─── W14-C1: singleflight in-flight dedupe ───────────────────────────────────
+// Concurrent requests for the same user previously each ran the full
+// resolution (users + tenants + feature flags + overrides = up to 4 queries)
+// on a cache miss. Now a cold cache costs ONE resolution; concurrent callers
+// share the in-flight promise. Entries are removed on settle; rejections
+// propagate to ALL waiters (fail-closed callers like assertTenantNotSuspended
+// and tenantGucMiddleware still see the error) and are never cached.
+const inflightResolutions = new Map<number, Promise<TenantContext>>();
+
 /**
  * Resolve tenant context for a given userId.
  * Falls back to the default "remitflow-default" tenant.
@@ -65,6 +74,19 @@ export async function resolveTenantContext(userId: number): Promise<TenantContex
   const cached = tenantCache.get(userId);
   if (cached) return cached;
 
+  const inflight = inflightResolutions.get(userId);
+  if (inflight) return inflight;
+
+  const promise = resolveTenantContextUncached(userId);
+  inflightResolutions.set(userId, promise);
+  try {
+    return await promise;
+  } finally {
+    inflightResolutions.delete(userId);
+  }
+}
+
+async function resolveTenantContextUncached(userId: number): Promise<TenantContext> {
   const db = await getDb();
   if (!db) {
     return { tenantId: null, tenantSlug: "remitflow-default", tenantStatus: null, featureFlags: {}, whiteLabelConfig: null };

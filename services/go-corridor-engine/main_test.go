@@ -13,12 +13,12 @@ import (
 
 func TestCorridorEngine_FeeCalculation(t *testing.T) {
 	tests := []struct {
-		name        string
-		amount      float64
-		fromCcy     string
-		toCcy       string
-		wantFeeMin  float64
-		wantFeeMax  float64
+		name       string
+		amount     float64
+		fromCcy    string
+		toCcy      string
+		wantFeeMin float64
+		wantFeeMax float64
 	}{
 		{"USD→NGN standard", 500, "USD", "NGN", 2.0, 25.0},
 		{"USD→GHS standard", 200, "USD", "GHS", 1.0, 15.0},
@@ -44,11 +44,11 @@ func TestCorridorEngine_FeeCalculation(t *testing.T) {
 
 func TestCorridorEngine_SpreadBounds(t *testing.T) {
 	tests := []struct {
-		pair      string
-		wantMin   float64
-		wantMax   float64
+		pair    string
+		wantMin float64
+		wantMax float64
 	}{
-		{"USDNGN", 0.001, 0.05},  // 0.1% to 5%
+		{"USDNGN", 0.001, 0.05}, // 0.1% to 5%
 		{"USDGHS", 0.001, 0.05},
 		{"USDKES", 0.001, 0.04},
 		{"EURUSD", 0.0001, 0.01}, // tighter for major pairs
@@ -69,11 +69,11 @@ func TestCorridorEngine_SpreadBounds(t *testing.T) {
 
 func TestCorridorEngine_HealthScore(t *testing.T) {
 	tests := []struct {
-		name          string
-		successRate   float64
-		avgLatencyMs  float64
-		wantScoreMin  float64
-		wantScoreMax  float64
+		name         string
+		successRate  float64
+		avgLatencyMs float64
+		wantScoreMin float64
+		wantScoreMax float64
 	}{
 		{"excellent corridor", 0.999, 200, 90, 100},
 		{"good corridor", 0.97, 500, 70, 90},

@@ -35,6 +35,25 @@ from typing import Optional
 
 import numpy as np
 
+# ── Shared HTTP clients (SPEC-wave14 §4.6) ────────────────────────────────────
+# Timeout-keyed pool of module-level AsyncClients: outbound calls previously
+# constructed a fresh client per request (TCP/TLS + pool setup each time).
+# Clients live for the process lifetime; pools are capped at 100 connections.
+_http_clients: dict = {}
+
+
+def get_http_client(timeout: float = 5.0, **kwargs) -> httpx.AsyncClient:
+    key = (float(timeout), tuple(sorted(kwargs.items())))
+    client = _http_clients.get(key)
+    if client is None:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout),
+            limits=httpx.Limits(max_connections=100),
+            **kwargs,
+        )
+        _http_clients[key] = client
+    return client
+
 logger = logging.getLogger("kyc.liveness")
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -671,44 +690,43 @@ async def iproov_passive_liveness(user_id: int, selfie_base64: str) -> dict:
         return {"provider": "iproov", "available": False}
 
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=30) as client:
-            # Step 1: Get a token
-            token_resp = await client.post(
-                f"{IPROOV_BASE_URL}/claim/enrol/token",
-                json={
-                    "api_key":    IPROOV_API_KEY,
-                    "secret":     IPROOV_API_SECRET,
-                    "resource":   f"remitflow_kyc_{user_id}",
-                    "assurance_type": "genuine_presence",
-                },
-            )
-            if token_resp.status_code != 200:
-                return {"provider": "iproov", "error": f"token_error_{token_resp.status_code}"}
+        client = get_http_client(timeout=30)  # shared client (SPEC-wave14 §4.6)
+        # Step 1: Get a token
+        token_resp = await client.post(
+            f"{IPROOV_BASE_URL}/claim/enrol/token",
+            json={
+                "api_key":    IPROOV_API_KEY,
+                "secret":     IPROOV_API_SECRET,
+                "resource":   f"remitflow_kyc_{user_id}",
+                "assurance_type": "genuine_presence",
+            },
+        )
+        if token_resp.status_code != 200:
+            return {"provider": "iproov", "error": f"token_error_{token_resp.status_code}"}
 
-            token = token_resp.json().get("token")
+        token = token_resp.json().get("token")
 
-            # Step 2: Validate with selfie
-            validate_resp = await client.post(
-                f"{IPROOV_BASE_URL}/claim/enrol/validate",
-                json={
-                    "api_key": IPROOV_API_KEY,
-                    "secret":  IPROOV_API_SECRET,
-                    "token":   token,
-                    "image":   selfie_base64,
-                },
-            )
+        # Step 2: Validate with selfie
+        validate_resp = await client.post(
+            f"{IPROOV_BASE_URL}/claim/enrol/validate",
+            json={
+                "api_key": IPROOV_API_KEY,
+                "secret":  IPROOV_API_SECRET,
+                "token":   token,
+                "image":   selfie_base64,
+            },
+        )
 
-            if validate_resp.status_code == 200:
-                data = validate_resp.json()
-                return {
-                    "provider":    "iproov",
-                    "is_live":     data.get("passed", False),
-                    "confidence":  data.get("confidence", 0.0),
-                    "token":       token,
-                }
+        if validate_resp.status_code == 200:
+            data = validate_resp.json()
+            return {
+                "provider":    "iproov",
+                "is_live":     data.get("passed", False),
+                "confidence":  data.get("confidence", 0.0),
+                "token":       token,
+            }
 
-            return {"provider": "iproov", "error": f"validate_error_{validate_resp.status_code}"}
+        return {"provider": "iproov", "error": f"validate_error_{validate_resp.status_code}"}
 
     except Exception as e:
         logger.error(f"[Liveness] iProov error: {e}")
@@ -724,32 +742,31 @@ async def facetec_3d_liveness(user_id: int, session_token: str, facescan_base64:
         return {"provider": "facetec", "available": False}
 
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{FACETEC_BASE_URL}/liveness-3d",
-                headers={
-                    "X-Device-Key":     FACETEC_SDK_KEY,
-                    "Content-Type":     "application/json",
-                },
-                json={
-                    "faceScan":          facescan_base64,
-                    "sessionToken":      session_token,
-                    "lowQualityAuditTrailImage": "",
-                    "auditTrailImage":   "",
-                },
-            )
+        client = get_http_client(timeout=30)  # shared client (SPEC-wave14 §4.6)
+        resp = await client.post(
+            f"{FACETEC_BASE_URL}/liveness-3d",
+            headers={
+                "X-Device-Key":     FACETEC_SDK_KEY,
+                "Content-Type":     "application/json",
+            },
+            json={
+                "faceScan":          facescan_base64,
+                "sessionToken":      session_token,
+                "lowQualityAuditTrailImage": "",
+                "auditTrailImage":   "",
+            },
+        )
 
-            if resp.status_code == 200:
-                data = resp.json()
-                return {
-                    "provider":          "facetec",
-                    "is_live":           data.get("wasProcessed", False) and data.get("livenessStatus") == "faceScanLivenessCheckSucceeded",
-                    "confidence":        data.get("faceScanSecurityChecks", {}).get("replayCheckSucceeded", False) and 0.95 or 0.30,
-                    "face_scan_status":  data.get("faceScanStatus"),
-                }
+        if resp.status_code == 200:
+            data = resp.json()
+            return {
+                "provider":          "facetec",
+                "is_live":           data.get("wasProcessed", False) and data.get("livenessStatus") == "faceScanLivenessCheckSucceeded",
+                "confidence":        data.get("faceScanSecurityChecks", {}).get("replayCheckSucceeded", False) and 0.95 or 0.30,
+                "face_scan_status":  data.get("faceScanStatus"),
+            }
 
-            return {"provider": "facetec", "error": f"api_error_{resp.status_code}"}
+        return {"provider": "facetec", "error": f"api_error_{resp.status_code}"}
 
     except Exception as e:
         logger.error(f"[Liveness] FaceTec error: {e}")

@@ -4,24 +4,23 @@
 package main
 
 import (
-	"crypto/subtle"
-	"database/sql"
-	"log/slog"
-	_ "github.com/lib/pq"
 	"bytes"
 	"context"
+	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	_ "github.com/lib/pq"
 	"log"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"os"
-	"sync"
-	"time"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 )
-
 
 var _processStartTime = time.Now()
 
@@ -83,10 +82,10 @@ type RateLock struct {
 }
 
 type Portfolio struct {
-	UserID       int                      `json:"user_id"`
-	TotalAUM     float64                  `json:"total_aum_ngn"`
-	Holdings     []map[string]interface{} `json:"holdings"`
-	LastUpdated  time.Time                `json:"last_updated"`
+	UserID      int                      `json:"user_id"`
+	TotalAUM    float64                  `json:"total_aum_ngn"`
+	Holdings    []map[string]interface{} `json:"holdings"`
+	LastUpdated time.Time                `json:"last_updated"`
 }
 
 var (
@@ -150,6 +149,7 @@ func handleHNWQuote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req HNWQuoteRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -184,6 +184,7 @@ func handleHNWTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req HNWQuoteRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -227,6 +228,7 @@ func handleRateLock(w http.ResponseWriter, r *http.Request) {
 		AmountNGN    float64 `json:"amount_ngn"`
 		CorridorCode string  `json:"corridor_code"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -292,7 +294,6 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-
 // authMiddleware resolves INTERNAL_SERVICE_KEY once at startup and FAILS
 // CLOSED: there is no well-known default internal credential. Comparison is
 // constant-time.
@@ -320,7 +321,6 @@ func authMiddleware(next http.Handler) http.Handler {
 		w.Write([]byte(`{"error":"unauthorized"}`))
 	})
 }
-
 
 func initDB() error {
 	dbURL := os.Getenv("DATABASE_URL")
@@ -364,11 +364,14 @@ func initDB() error {
 
 // dbUpsert stores or updates a record in the service state table
 func dbUpsert(id string, data interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO hnw_routing_state (id, data, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
@@ -378,8 +381,11 @@ func dbUpsert(id string, data interface{}) error {
 
 // dbGet retrieves a record from the service state table
 func dbGet(id string, dest interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM hnw_routing_state WHERE id = $1", id).Scan(&jsonData)
+	err := db.QueryRowContext(ctx, "SELECT data FROM hnw_routing_state WHERE id = $1", id).Scan(&jsonData)
 	if err != nil {
 		return err
 	}
@@ -388,7 +394,10 @@ func dbGet(id string, dest interface{}) error {
 
 // dbList retrieves all records from the service state table
 func dbList(limit int) ([]json.RawMessage, error) {
-	rows, err := db.Query("SELECT data FROM hnw_routing_state ORDER BY updated_at DESC LIMIT $1", limit)
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT data FROM hnw_routing_state ORDER BY updated_at DESC LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -406,22 +415,27 @@ func dbList(limit int) ([]json.RawMessage, error) {
 
 // dbLogEvent stores an event in the events table
 func dbLogEvent(eventType string, payload interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("INSERT INTO hnw_routing_events (event_type, payload) VALUES ($1, $2)",
+	_, err = db.ExecContext(ctx, "INSERT INTO hnw_routing_events (event_type, payload) VALUES ($1, $2)",
 		eventType, jsonData)
 	return err
 }
 
-
 // loadFromDB populates in-memory state from database on startup (write-through cache warm)
 func loadFromDB() {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query("SELECT id, data FROM hnw_routing_state ORDER BY updated_at DESC LIMIT 1000")
+	rows, err := db.QueryContext(ctx, "SELECT id, data FROM hnw_routing_state ORDER BY updated_at DESC LIMIT 1000")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
@@ -469,11 +483,12 @@ func main() {
 	mux.HandleFunc("/portfolio/", handleGetPortfolio)
 	mux.HandleFunc("/hnw-profile/", handleGetPortfolio)
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      panicRecoveryMiddleware(authMiddleware(mux)),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              ":" + port,
+		Handler:           panicRecoveryMiddleware(authMiddleware(mux)),
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	sigCh := make(chan os.Signal, 1)

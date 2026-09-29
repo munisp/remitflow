@@ -2,18 +2,18 @@ package main
 
 import (
 	"bytes"
-	"database/sql"
-	"log/slog"
-	_ "github.com/lib/pq"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	_ "github.com/lib/pq"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,37 +29,36 @@ import (
 // Implements FedNow Service ISO 20022 message processing
 // Handles pacs.008 (Credit Transfer), pacs.002 (Status Report), camt.056 (Return Request)
 
-
 var _processStartTime = time.Now()
 
 var db *sql.DB
 
 type FedNowTransfer struct {
-	TransactionID string    `json:"transactionId"`
-	EndToEndID    string    `json:"endToEndId"`
-	Amount        float64   `json:"amount"`
-	Currency      string    `json:"currency"`
-	Status        string    `json:"status"`
-	CreatedAt     time.Time `json:"createdAt"`
+	TransactionID string     `json:"transactionId"`
+	EndToEndID    string     `json:"endToEndId"`
+	Amount        float64    `json:"amount"`
+	Currency      string     `json:"currency"`
+	Status        string     `json:"status"`
+	CreatedAt     time.Time  `json:"createdAt"`
 	SettledAt     *time.Time `json:"settledAt,omitempty"`
-	RoutingNumber string    `json:"creditorRoutingNumber"`
-	AccountNumber string    `json:"creditorAccountNumber"`
-	CreditorName  string    `json:"creditorName"`
-	ISO20022Msg   string    `json:"iso20022Message,omitempty"`
+	RoutingNumber string     `json:"creditorRoutingNumber"`
+	AccountNumber string     `json:"creditorAccountNumber"`
+	CreditorName  string     `json:"creditorName"`
+	ISO20022Msg   string     `json:"iso20022Message,omitempty"`
 	// Simulated is true ONLY for dev-mode simulated settlements — never in production.
-	Simulated     bool       `json:"simulated,omitempty"`
+	Simulated bool `json:"simulated,omitempty"`
 }
 
 type FedNowGateway struct {
-	mu          sync.RWMutex
-	transfers   map[string]*FedNowTransfer
-	metrics     *Metrics
-	kafkaURL    string
-	daprURL     string
-	maxAmount   float64
+	mu        sync.RWMutex
+	transfers map[string]*FedNowTransfer
+	metrics   *Metrics
+	kafkaURL  string
+	daprURL   string
+	maxAmount float64
 	// adapterURL is the real FedNow network adapter that submits pacs.008
 	// messages. Unset → no settlement is claimed unless dev simulation is on.
-	adapterURL  string
+	adapterURL string
 	// simulationAllowed is true ONLY when FEDNOW_SIMULATE_SETTLEMENT=true is
 	// explicitly set outside production.
 	simulationAllowed bool
@@ -68,19 +67,19 @@ type FedNowGateway struct {
 }
 
 type Metrics struct {
-	mu              sync.Mutex
-	TotalTransfers  int64   `json:"totalTransfers"`
-	SuccessCount    int64   `json:"successCount"`
-	FailureCount    int64   `json:"failureCount"`
-	TotalVolume     float64 `json:"totalVolumeUSD"`
-	AvgLatencyMs    float64 `json:"avgLatencyMs"`
-	latencySum      float64
+	mu             sync.Mutex
+	TotalTransfers int64   `json:"totalTransfers"`
+	SuccessCount   int64   `json:"successCount"`
+	FailureCount   int64   `json:"failureCount"`
+	TotalVolume    float64 `json:"totalVolumeUSD"`
+	AvgLatencyMs   float64 `json:"avgLatencyMs"`
+	latencySum     float64
 }
 
 type SubmitRequest struct {
-	MessageID           string `json:"messageId"`
-	CreationDateTime    string `json:"creationDateTime"`
-	PaymentInformation  struct {
+	MessageID          string `json:"messageId"`
+	CreationDateTime   string `json:"creationDateTime"`
+	PaymentInformation struct {
 		PaymentInformationID      string `json:"paymentInformationId"`
 		PaymentMethod             string `json:"paymentMethod"`
 		CreditTransferTransaction struct {
@@ -114,11 +113,11 @@ func NewFedNowGateway() *FedNowGateway {
 	}
 	isProd := os.Getenv("GO_ENV") == "production" || os.Getenv("NODE_ENV") == "production"
 	return &FedNowGateway{
-		transfers: make(map[string]*FedNowTransfer),
-		metrics:   &Metrics{},
-		kafkaURL:  getEnv("KAFKA_REST_URL", "http://localhost:8093"),
-		daprURL:   getEnv("DAPR_HTTP_URL", "http://localhost:3500"),
-		maxAmount: maxAmt,
+		transfers:         make(map[string]*FedNowTransfer),
+		metrics:           &Metrics{},
+		kafkaURL:          getEnv("KAFKA_REST_URL", "http://localhost:8093"),
+		daprURL:           getEnv("DAPR_HTTP_URL", "http://localhost:3500"),
+		maxAmount:         maxAmt,
 		adapterURL:        os.Getenv("FEDNOW_ADAPTER_URL"),
 		simulationAllowed: !isProd && os.Getenv("FEDNOW_SIMULATE_SETTLEMENT") == "true",
 		internalKey:       os.Getenv("INTERNAL_SERVICE_KEY"),
@@ -133,6 +132,7 @@ func (g *FedNowGateway) handleSubmit(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	var req SubmitRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid request: %v", err), http.StatusBadRequest)
 		return
@@ -307,6 +307,13 @@ func (g *FedNowGateway) handleSubmit(w http.ResponseWriter, r *http.Request) {
 // submitToAdapter posts the pacs.008 message to the configured FedNow network
 // adapter. Any failure is an error — the caller fails loud (502) rather than
 // pretending the transfer was accepted.
+// Shared outbound HTTP clients (wave-14 perf): per-call/DefaultClient usage had
+// no timeout ceiling on the money path and disabled explicit pooling budgets.
+var (
+	fednowAdapterHTTPClient = &http.Client{Timeout: 10 * time.Second}
+	fednowEventHTTPClient   = &http.Client{Timeout: 2 * time.Second}
+)
+
 func (g *FedNowGateway) submitToAdapter(t *FedNowTransfer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -317,7 +324,7 @@ func (g *FedNowGateway) submitToAdapter(t *FedNowTransfer) error {
 	}
 	req.Header.Set("Content-Type", "application/xml")
 	req.Header.Set("X-Transaction-Id", t.TransactionID)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := fednowAdapterHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -391,6 +398,7 @@ func (g *FedNowGateway) handleReturn(w http.ResponseWriter, r *http.Request) {
 		Reason        string `json:"reason"`
 		ReasonCode    string `json:"reasonCode"` // ISO 20022 return reason codes
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
@@ -475,7 +483,7 @@ func (g *FedNowGateway) publishEvent(topic string, data interface{}) {
 	// Try Dapr pub/sub first
 	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/v1.0/publish/pubsub/%s", g.daprURL, topic), strings.NewReader(string(payload)))
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := fednowEventHTTPClient
 	resp, err := client.Do(req)
 	if err == nil {
 		resp.Body.Close()
@@ -609,7 +617,6 @@ func getEnv(key, fallback string) string {
 
 var startTime = time.Now()
 
-
 func initDB() error {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -652,11 +659,14 @@ func initDB() error {
 
 // dbUpsert stores or updates a record in the service state table
 func dbUpsert(id string, data interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO fednow_gateway_state (id, data, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
@@ -666,8 +676,11 @@ func dbUpsert(id string, data interface{}) error {
 
 // dbGet retrieves a record from the service state table
 func dbGet(id string, dest interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM fednow_gateway_state WHERE id = $1", id).Scan(&jsonData)
+	err := db.QueryRowContext(ctx, "SELECT data FROM fednow_gateway_state WHERE id = $1", id).Scan(&jsonData)
 	if err != nil {
 		return err
 	}
@@ -676,7 +689,10 @@ func dbGet(id string, dest interface{}) error {
 
 // dbList retrieves all records from the service state table
 func dbList(limit int) ([]json.RawMessage, error) {
-	rows, err := db.Query("SELECT data FROM fednow_gateway_state ORDER BY updated_at DESC LIMIT $1", limit)
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT data FROM fednow_gateway_state ORDER BY updated_at DESC LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -694,22 +710,27 @@ func dbList(limit int) ([]json.RawMessage, error) {
 
 // dbLogEvent stores an event in the events table
 func dbLogEvent(eventType string, payload interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("INSERT INTO fednow_gateway_events (event_type, payload) VALUES ($1, $2)",
+	_, err = db.ExecContext(ctx, "INSERT INTO fednow_gateway_events (event_type, payload) VALUES ($1, $2)",
 		eventType, jsonData)
 	return err
 }
 
-
 // loadFromDB populates in-memory state from database on startup (write-through cache warm)
 func loadFromDB() {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query("SELECT id, data FROM fednow_gateway_state ORDER BY updated_at DESC LIMIT 1000")
+	rows, err := db.QueryContext(ctx, "SELECT id, data FROM fednow_gateway_state ORDER BY updated_at DESC LIMIT 1000")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
@@ -781,7 +802,6 @@ func main() {
 		}
 	}()
 
-	
 	// Periodic state persistence to PostgreSQL (write-through cache)
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)

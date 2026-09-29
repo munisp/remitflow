@@ -34,6 +34,26 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 import httpx
+
+# ── Shared HTTP clients (SPEC-wave14 §4.6) ────────────────────────────────────
+# Timeout-keyed pool of module-level AsyncClients: outbound calls previously
+# constructed a fresh client per request (TCP/TLS + pool setup each time).
+# Clients live for the process lifetime; pools are capped at 100 connections.
+_http_clients: dict = {}
+
+
+def get_http_client(timeout: float = 5.0, **kwargs) -> httpx.AsyncClient:
+    key = (float(timeout), tuple(sorted(kwargs.items())))
+    client = _http_clients.get(key)
+    if client is None:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout),
+            limits=httpx.Limits(max_connections=100),
+            **kwargs,
+        )
+        _http_clients[key] = client
+    return client
+
 from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -82,7 +102,7 @@ def _get_pg():
     global _pg_conn
     if _pg_conn is None or _pg_conn.closed:
         try:
-            _pg_conn = psycopg2.connect(_DB_URL)
+            _pg_conn = psycopg2.connect(_DB_URL, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
             _pg_conn.autocommit = True
             with _pg_conn.cursor() as cur:
                 cur.execute("""
@@ -199,27 +219,27 @@ async def get_db():
 # ─── OpenSearch Client ────────────────────────────────────────────────────────
 async def opensearch_index(index: str, doc_id: str, doc: dict) -> bool:
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.put(
-                f"{OPENSEARCH_URL}/{index}/_doc/{doc_id}",
-                json=doc,
-                headers={"Content-Type": "application/json"},
-            )
-            return resp.status_code in (200, 201)
+        client = get_http_client(timeout=5.0)  # shared client (SPEC-wave14 §4.6)
+        resp = await client.put(
+            f"{OPENSEARCH_URL}/{index}/_doc/{doc_id}",
+            json=doc,
+            headers={"Content-Type": "application/json"},
+        )
+        return resp.status_code in (200, 201)
     except Exception as e:
         logger.warning(f"OpenSearch index failed: {e}")
         return False
 
 async def opensearch_search(index: str, query: dict) -> dict:
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                f"{OPENSEARCH_URL}/{index}/_search",
-                json=query,
-                headers={"Content-Type": "application/json"},
-            )
-            if resp.status_code == 200:
-                return resp.json()
+        client = get_http_client(timeout=5.0)  # shared client (SPEC-wave14 §4.6)
+        resp = await client.post(
+            f"{OPENSEARCH_URL}/{index}/_search",
+            json=query,
+            headers={"Content-Type": "application/json"},
+        )
+        if resp.status_code == 200:
+            return resp.json()
     except Exception as e:
         logger.warning(f"OpenSearch search failed: {e}")
     return {"hits": {"hits": [], "total": {"value": 0}}}
@@ -227,27 +247,27 @@ async def opensearch_search(index: str, query: dict) -> dict:
 async def ensure_opensearch_index(index: str, mappings: dict):
     """Create OpenSearch index with mappings if it doesn't exist."""
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            check = await client.head(f"{OPENSEARCH_URL}/{index}")
-            if check.status_code == 404:
-                await client.put(
-                    f"{OPENSEARCH_URL}/{index}",
-                    json={"mappings": mappings},
-                    headers={"Content-Type": "application/json"},
-                )
-                logger.info(f"Created OpenSearch index: {index}")
+        client = get_http_client(timeout=5.0)  # shared client (SPEC-wave14 §4.6)
+        check = await client.head(f"{OPENSEARCH_URL}/{index}")
+        if check.status_code == 404:
+            await client.put(
+                f"{OPENSEARCH_URL}/{index}",
+                json={"mappings": mappings},
+                headers={"Content-Type": "application/json"},
+            )
+            logger.info(f"Created OpenSearch index: {index}")
     except Exception as e:
         logger.warning(f"OpenSearch index setup failed: {e}")
 
 # ─── Kafka Publisher ──────────────────────────────────────────────────────────
 async def publish_dapr_event(topic: str, data: dict):
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.post(
-                f"http://localhost:{DAPR_HTTP_PORT}/v1.0/publish/remitflow-pubsub/{topic}",
-                json={**data, "timestamp": datetime.now(timezone.utc).isoformat()},
-                headers={"Content-Type": "application/json"},
-            )
+        client = get_http_client(timeout=3.0)  # shared client (SPEC-wave14 §4.6)
+        await client.post(
+            f"http://localhost:{DAPR_HTTP_PORT}/v1.0/publish/remitflow-pubsub/{topic}",
+            json={**data, "timestamp": datetime.now(timezone.utc).isoformat()},
+            headers={"Content-Type": "application/json"},
+        )
     except Exception:
         logger.debug(f"Dapr publish skipped (not available): {topic}")
 
@@ -622,4 +642,4 @@ async def get_corridors():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, log_level="info", workers=int(os.getenv("UVICORN_WORKERS", "1")))  # SPEC-wave14 §4.6: env-configurable workers (default 1)

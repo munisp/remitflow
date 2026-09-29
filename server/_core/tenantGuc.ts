@@ -46,12 +46,14 @@ export async function applyTenantGuc(tx: any, opts?: { required?: boolean }): Pr
     }
     return;
   }
-  await tx.execute(sql`SELECT set_config('app.current_user_id', ${ctx.userId}, true)`);
-  await tx.execute(
-    ctx.tenantId !== null
-      ? sql`SELECT set_config('app.current_tenant_id', ${ctx.tenantId}, true)`
-      : sql`SELECT set_config('app.current_tenant_id', '', true)`,
-  );
+  // W14-C1: one round trip instead of three — identical semantics (all three
+  // GUCs are transaction-local, set before any query runs). An empty-string
+  // tenant id is preserved verbatim for tenant-less users.
   // RLS must never be bypassed on a request-scoped transaction.
-  await tx.execute(sql`SELECT set_config('app.bypass_rls', 'false', true)`);
+  await tx.execute(sql`
+    SELECT
+      set_config('app.current_user_id', ${ctx.userId}, true),
+      set_config('app.current_tenant_id', ${ctx.tenantId ?? ''}, true),
+      set_config('app.bypass_rls', 'false', true)
+  `);
 }

@@ -21,13 +21,35 @@ import * as Keychain from 'react-native-keychain';
 
 const SERVICE_PREFIX = 'com.remitflow.secure.';
 
-async function keychainAvailable(): Promise<boolean> {
-  try {
-    await Keychain.getSupportedBiometryType();
-    return true;
-  } catch {
-    return false;
+/**
+ * wave14 perf (H2): keystore reads/writes cross the native bridge. The
+ * session id is read on every tRPC batch; memoize values in module memory
+ * after the first read. The memo is only ever written/invalidated through
+ * secureSet/secureDelete below, and AuthContext funnels all session
+ * mutations through those two functions, so the memo cannot go stale.
+ * (Enforcement still happens server-side on every request — this cache is a
+ * lookup optimization only, not an auth decision cache.)
+ */
+const valueMemo = new Map<string, string | null>();
+
+/**
+ * Keystore availability cannot change during a process lifetime (it depends
+ * on hardware/OS keystore presence), so probe it once and reuse the result.
+ */
+let keychainAvailablePromise: Promise<boolean> | null = null;
+
+function keychainAvailable(): Promise<boolean> {
+  if (!keychainAvailablePromise) {
+    keychainAvailablePromise = (async () => {
+      try {
+        await Keychain.getSupportedBiometryType();
+        return true;
+      } catch {
+        return false;
+      }
+    })();
   }
+  return keychainAvailablePromise;
 }
 
 async function devFallbackSet(key: string, value: string): Promise<void> {
@@ -70,9 +92,11 @@ export async function secureSet(key: string, value: string): Promise<void> {
     } catch {
       // ignore
     }
+    valueMemo.set(key, value);
     return;
   }
   await devFallbackSet(key, value);
+  valueMemo.set(key, value);
 }
 
 /**
@@ -80,11 +104,17 @@ export async function secureSet(key: string, value: string): Promise<void> {
  * into the keystore on first read and removes the plaintext copy.
  */
 export async function secureGet(key: string): Promise<string | null> {
+  // wave14 perf (H2): serve from module memory after the first read — avoids
+  // a native keystore round trip on every tRPC batch header build.
+  if (valueMemo.has(key)) {
+    return valueMemo.get(key) ?? null;
+  }
   if (await keychainAvailable()) {
     const creds = await Keychain.getGenericPassword({
       service: SERVICE_PREFIX + key,
     });
     if (creds && typeof creds !== 'boolean') {
+      valueMemo.set(key, creds.password);
       return creds.password;
     }
     // Legacy migration from plaintext AsyncStorage.
@@ -105,15 +135,22 @@ export async function secureGet(key: string): Promise<string | null> {
       } catch {
         // ignore
       }
+      valueMemo.set(key, legacy);
       return legacy;
     }
+    valueMemo.set(key, null);
     return null;
   }
-  return devFallbackGet(key);
+  const fallback = await devFallbackGet(key);
+  valueMemo.set(key, fallback);
+  return fallback;
 }
 
 /** Delete a sensitive value from both the keystore and any legacy location. */
 export async function secureDelete(key: string): Promise<void> {
+  // Invalidate the memo first so no reader can observe a stale value even if
+  // the keystore delete below fails.
+  valueMemo.delete(key);
   if (await keychainAvailable()) {
     try {
       await Keychain.resetGenericPassword({ service: SERVICE_PREFIX + key });

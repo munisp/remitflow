@@ -27,13 +27,13 @@
 package main
 
 import (
-	"database/sql"
-	"log/slog"
-	_ "github.com/lib/pq"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	_ "github.com/lib/pq"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -45,7 +45,6 @@ import (
 )
 
 // ── Config ────────────────────────────────────────────────────────────────────
-
 
 var _processStartTime = time.Now()
 
@@ -107,38 +106,38 @@ var PAPSSCorridors = map[string]string{
 }
 
 type PAPSSTransferRequest struct {
-	TransferID      string  `json:"transferId" binding:"required"`
-	SenderCountry   string  `json:"senderCountry" binding:"required"`
-	ReceiverCountry string  `json:"receiverCountry" binding:"required"`
-	SendAmount      float64 `json:"sendAmount" binding:"required,gt=0"`
-	SendCurrency    string  `json:"sendCurrency" binding:"required"`
-	ReceiveCurrency string  `json:"receiveCurrency" binding:"required"`
-	SenderAccount   string  `json:"senderAccount" binding:"required"`
-	ReceiverAccount string  `json:"receiverAccount" binding:"required"`
-	SenderBankCode  string  `json:"senderBankCode"`
-	ReceiverBankCode string `json:"receiverBankCode"`
-	SenderName      string  `json:"senderName"`
-	ReceiverName    string  `json:"receiverName"`
-	Narration       string  `json:"narration"`
-	UserID          string  `json:"userId"`
-	IdempotencyKey  string  `json:"idempotencyKey" binding:"required"`
+	TransferID       string  `json:"transferId" binding:"required"`
+	SenderCountry    string  `json:"senderCountry" binding:"required"`
+	ReceiverCountry  string  `json:"receiverCountry" binding:"required"`
+	SendAmount       float64 `json:"sendAmount" binding:"required,gt=0"`
+	SendCurrency     string  `json:"sendCurrency" binding:"required"`
+	ReceiveCurrency  string  `json:"receiveCurrency" binding:"required"`
+	SenderAccount    string  `json:"senderAccount" binding:"required"`
+	ReceiverAccount  string  `json:"receiverAccount" binding:"required"`
+	SenderBankCode   string  `json:"senderBankCode"`
+	ReceiverBankCode string  `json:"receiverBankCode"`
+	SenderName       string  `json:"senderName"`
+	ReceiverName     string  `json:"receiverName"`
+	Narration        string  `json:"narration"`
+	UserID           string  `json:"userId"`
+	IdempotencyKey   string  `json:"idempotencyKey" binding:"required"`
 }
 
 type PAPSSTransferResponse struct {
-	TransferID      string  `json:"transferId"`
-	PAPSSRef        string  `json:"papssRef"`
-	Status          string  `json:"status"`
-	ReceiveAmount   float64 `json:"receiveAmount"`
-	ExchangeRate    float64 `json:"exchangeRate"`
-	SettlementTime  string  `json:"settlementTime"`
-	MojaloopRouted  bool    `json:"mojaloopRouted"`
-	GhIPSSRouted    bool    `json:"ghipssRouted"`
-	Message         string  `json:"message"`
+	TransferID     string  `json:"transferId"`
+	PAPSSRef       string  `json:"papssRef"`
+	Status         string  `json:"status"`
+	ReceiveAmount  float64 `json:"receiveAmount"`
+	ExchangeRate   float64 `json:"exchangeRate"`
+	SettlementTime string  `json:"settlementTime"`
+	MojaloopRouted bool    `json:"mojaloopRouted"`
+	GhIPSSRouted   bool    `json:"ghipssRouted"`
+	Message        string  `json:"message"`
 }
 
 type PAPSSNettingRequest struct {
 	SettlementDate string `json:"settlementDate" binding:"required"` // YYYY-MM-DD
-	Corridor       string `json:"corridor"`                           // e.g. "NG-GH" or "all"
+	Corridor       string `json:"corridor"`                          // e.g. "NG-GH" or "all"
 }
 
 // ── Middleware helpers ────────────────────────────────────────────────────────
@@ -243,9 +242,9 @@ func triggerTemporalWorkflow(cfg Config, workflowType, workflowID string, input 
 func routeViaMojaloop(cfg Config, req PAPSSTransferRequest) bool {
 	body, _ := json.Marshal(map[string]any{
 		"transferId": req.TransferID, "payerFsp": "remitflow",
-		"payeeFsp":   req.ReceiverCountry + "-papss-bank",
-		"amount":     fmt.Sprintf("%.2f", req.SendAmount),
-		"currency":   req.SendCurrency, "ilpPacket": "PAPSS_ROUTED",
+		"payeeFsp": req.ReceiverCountry + "-papss-bank",
+		"amount":   fmt.Sprintf("%.2f", req.SendAmount),
+		"currency": req.SendCurrency, "ilpPacket": "PAPSS_ROUTED",
 		"condition":  uuid.New().String(),
 		"expiration": time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339),
 	})
@@ -301,7 +300,7 @@ func initiateTransfer(cfg Config) gin.HandlerFunc {
 			reverseKey := req.ReceiverCountry + "-" + req.SenderCountry
 			if _, ok := PAPSSCorridors[reverseKey]; !ok {
 				c.JSON(http.StatusBadRequest, gin.H{
-					"error":   fmt.Sprintf("Unsupported PAPSS corridor: %s", corridorKey),
+					"error":     fmt.Sprintf("Unsupported PAPSS corridor: %s", corridorKey),
 					"supported": PAPSSCorridors,
 				})
 				return
@@ -334,7 +333,7 @@ func initiateTransfer(cfg Config) gin.HandlerFunc {
 			"transferId": req.TransferID, "papssRef": papssRef,
 			"sendAmount": req.SendAmount, "sendCurrency": req.SendCurrency,
 			"receiveCurrency": req.ReceiveCurrency,
-			"corridor": corridorKey, "mojaloopRouted": mojaloopRouted,
+			"corridor":        corridorKey, "mojaloopRouted": mojaloopRouted,
 			"ghipssRouted": ghipssRouted,
 		})
 
@@ -433,9 +432,9 @@ func getCorridors() gin.HandlerFunc {
 			})
 		}
 		c.JSON(http.StatusOK, gin.H{
-			"corridors": corridors,
-			"count":     len(corridors),
-			"operator":  "Afreximbank",
+			"corridors":  corridors,
+			"count":      len(corridors),
+			"operator":   "Afreximbank",
 			"settlement": "T+0 multilateral netting",
 		})
 	}
@@ -462,7 +461,6 @@ func healthCheck(cfg Config) gin.HandlerFunc {
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
-
 
 func initDB() error {
 	dbURL := os.Getenv("DATABASE_URL")
@@ -506,11 +504,14 @@ func initDB() error {
 
 // dbUpsert stores or updates a record in the service state table
 func dbUpsert(id string, data interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO papss_service_state (id, data, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
@@ -520,8 +521,11 @@ func dbUpsert(id string, data interface{}) error {
 
 // dbGet retrieves a record from the service state table
 func dbGet(id string, dest interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM papss_service_state WHERE id = $1", id).Scan(&jsonData)
+	err := db.QueryRowContext(ctx, "SELECT data FROM papss_service_state WHERE id = $1", id).Scan(&jsonData)
 	if err != nil {
 		return err
 	}
@@ -530,7 +534,10 @@ func dbGet(id string, dest interface{}) error {
 
 // dbList retrieves all records from the service state table
 func dbList(limit int) ([]json.RawMessage, error) {
-	rows, err := db.Query("SELECT data FROM papss_service_state ORDER BY updated_at DESC LIMIT $1", limit)
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT data FROM papss_service_state ORDER BY updated_at DESC LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -548,22 +555,27 @@ func dbList(limit int) ([]json.RawMessage, error) {
 
 // dbLogEvent stores an event in the events table
 func dbLogEvent(eventType string, payload interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("INSERT INTO papss_service_events (event_type, payload) VALUES ($1, $2)",
+	_, err = db.ExecContext(ctx, "INSERT INTO papss_service_events (event_type, payload) VALUES ($1, $2)",
 		eventType, jsonData)
 	return err
 }
 
-
 // loadFromDB populates in-memory state from database on startup (write-through cache warm)
 func loadFromDB() {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query("SELECT id, data FROM papss_service_state ORDER BY updated_at DESC LIMIT 1000")
+	rows, err := db.QueryContext(ctx, "SELECT id, data FROM papss_service_state ORDER BY updated_at DESC LIMIT 1000")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
@@ -610,7 +622,7 @@ func main() {
 		})
 	})
 
-	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
+	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() {
 		log.Printf("[PAPSS] Service ready on :%s | PAPSS: %s | Mojaloop: %s | GhIPSS: %s",
 			cfg.Port, cfg.PAPSSEndpoint, cfg.MojaloopHubURL, cfg.GhIPSSURL)
@@ -619,7 +631,6 @@ func main() {
 		}
 	}()
 
-	
 	// Periodic state persistence to PostgreSQL (write-through cache)
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)

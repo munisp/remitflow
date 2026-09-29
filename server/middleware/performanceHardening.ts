@@ -240,11 +240,13 @@ interface CacheOptions {
 
 let redisAvailable = true;
 
+// W14: was `(redis as ...).redisClient` — that export never existed, so this
+// cache was permanently dead. Wire to the real ioredis singleton accessor.
 async function getRedisClient() {
   if (!redisAvailable) return null;
   try {
     const redis = await import("./redis.js");
-    return (redis as Record<string, unknown>).redisClient || null;
+    return redis.getRedisClient();
   } catch {
     redisAvailable = false;
     return null;
@@ -255,7 +257,7 @@ export async function cacheGet<T>(key: string): Promise<T | null> {
   const client = await getRedisClient();
   if (!client) return null;
   try {
-    const data = await (client as Record<string, Function>).get(`cache:${key}`);
+    const data = await client.get(`cache:${key}`);
     return data ? JSON.parse(data as string) : null;
   } catch {
     return null;
@@ -266,11 +268,8 @@ export async function cacheSet(key: string, value: unknown, ttlSeconds: number):
   const client = await getRedisClient();
   if (!client) return;
   try {
-    await (client as Record<string, Function>).set(
-      `cache:${key}`,
-      JSON.stringify(value),
-      { EX: ttlSeconds }
-    );
+    // ioredis signature: SET key value EX seconds
+    await client.set(`cache:${key}`, JSON.stringify(value), "EX", ttlSeconds);
   } catch {
     // Cache write failure is non-fatal
   }
@@ -280,10 +279,13 @@ export async function cacheInvalidate(pattern: string): Promise<void> {
   const client = await getRedisClient();
   if (!client) return;
   try {
-    const keys = await (client as Record<string, Function>).keys(`cache:${pattern}`);
-    if (Array.isArray(keys) && keys.length > 0) {
-      await (client as Record<string, Function>).del(...keys);
-    }
+    // W14: cursor SCAN + batched DEL instead of blocking KEYS.
+    let cursor = "0";
+    do {
+      const [next, keys] = await client.scan(cursor, "MATCH", `cache:${pattern}`, "COUNT", 100);
+      cursor = next;
+      if (keys.length > 0) await client.del(...keys);
+    } while (cursor !== "0");
   } catch {
     // Cache invalidation failure is non-fatal
   }

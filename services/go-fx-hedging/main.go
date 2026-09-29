@@ -27,7 +27,9 @@ import (
 )
 
 func getEnv(k, d string) string {
-	if v := os.Getenv(k); v != "" { return v }
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
 	return d
 }
 
@@ -35,31 +37,31 @@ var port = getEnv("PORT", "8140")
 
 // ── Metrics ───────────────────────────────────────────────────────────────────
 var (
-	forwardsTotal   atomic.Int64
-	optionsTotal    atomic.Int64
-	autoHedgesTotal atomic.Int64
+	forwardsTotal    atomic.Int64
+	optionsTotal     atomic.Int64
+	autoHedgesTotal  atomic.Int64
 	totalExposureUSD atomic.Int64 // cents
 )
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type ForwardContract struct {
-	ID              string    `json:"id"`
-	UserID          int64     `json:"user_id"`
-	FromCurrency    string    `json:"from_currency"`
-	ToCurrency      string    `json:"to_currency"`
-	NotionalUSD     float64   `json:"notional_usd"`
-	ForwardRate     float64   `json:"forward_rate"`
-	SpotRateAtEntry float64   `json:"spot_rate_at_entry"`
-	SettlementDate  int64     `json:"settlement_date"`
-	Status          string    `json:"status"` // active | settled | cancelled
-	PnL             float64   `json:"pnl_usd"`
-	CreatedAt       int64     `json:"created_at"`
+	ID              string  `json:"id"`
+	UserID          int64   `json:"user_id"`
+	FromCurrency    string  `json:"from_currency"`
+	ToCurrency      string  `json:"to_currency"`
+	NotionalUSD     float64 `json:"notional_usd"`
+	ForwardRate     float64 `json:"forward_rate"`
+	SpotRateAtEntry float64 `json:"spot_rate_at_entry"`
+	SettlementDate  int64   `json:"settlement_date"`
+	Status          string  `json:"status"` // active | settled | cancelled
+	PnL             float64 `json:"pnl_usd"`
+	CreatedAt       int64   `json:"created_at"`
 	// Validated risk-contract fields used by the hedging engine.
-	Notional        float64   `json:"notional,omitempty"`
-	CurrencyPair    string    `json:"currency_pair,omitempty"`
-	ExpiryDate      time.Time `json:"expiry_date,omitempty"`
-	ContractRate    float64   `json:"contract_rate,omitempty"`
-	Direction       string    `json:"direction,omitempty"`
+	Notional     float64   `json:"notional,omitempty"`
+	CurrencyPair string    `json:"currency_pair,omitempty"`
+	ExpiryDate   time.Time `json:"expiry_date,omitempty"`
+	ContractRate float64   `json:"contract_rate,omitempty"`
+	Direction    string    `json:"direction,omitempty"`
 }
 
 type FxOption struct {
@@ -82,25 +84,25 @@ type FxOption struct {
 }
 
 type HedgeExposure struct {
-	Currency      string  `json:"currency"`
-	GrossLong     float64 `json:"gross_long_usd"`
-	GrossShort    float64 `json:"gross_short_usd"`
-	NetExposure   float64 `json:"net_exposure_usd"`
-	HedgeRatio    float64 `json:"hedge_ratio_pct"`
-	ForwardCover  float64 `json:"forward_cover_usd"`
-	OptionCover   float64 `json:"option_cover_usd"`
+	Currency     string  `json:"currency"`
+	GrossLong    float64 `json:"gross_long_usd"`
+	GrossShort   float64 `json:"gross_short_usd"`
+	NetExposure  float64 `json:"net_exposure_usd"`
+	HedgeRatio   float64 `json:"hedge_ratio_pct"`
+	ForwardCover float64 `json:"forward_cover_usd"`
+	OptionCover  float64 `json:"option_cover_usd"`
 }
 
 // ── State ─────────────────────────────────────────────────────────────────────
 var (
-	mu        sync.RWMutex
-	forwards  = make(map[string]*ForwardContract)
-	options   = make(map[string]*FxOption)
+	mu       sync.RWMutex
+	forwards = make(map[string]*ForwardContract)
+	options  = make(map[string]*FxOption)
 	// Simulated live FX rates
 	spotRates = map[string]float64{
 		"USD/NGN": 1605.50, "USD/GHS": 15.80, "USD/KES": 129.50,
-		"USD/ZAR": 18.45,   "USD/EUR": 0.921, "USD/GBP": 0.789,
-		"USD/AED": 3.673,   "USD/CNY": 7.245, "USD/INR": 83.50,
+		"USD/ZAR": 18.45, "USD/EUR": 0.921, "USD/GBP": 0.789,
+		"USD/AED": 3.673, "USD/CNY": 7.245, "USD/INR": 83.50,
 	}
 )
 
@@ -110,7 +112,9 @@ func normalCDF(x float64) float64 {
 }
 
 func blackScholes(optType string, spot, strike, r, sigma, T float64) (price, delta, gamma, theta, vega float64) {
-	if T <= 0 { return 0, 0, 0, 0, 0 }
+	if T <= 0 {
+		return 0, 0, 0, 0, 0
+	}
 	d1 := (math.Log(spot/strike) + (r+0.5*sigma*sigma)*T) / (sigma * math.Sqrt(T))
 	d2 := d1 - sigma*math.Sqrt(T)
 	nd1 := normalCDF(d1)
@@ -126,25 +130,34 @@ func blackScholes(optType string, spot, strike, r, sigma, T float64) (price, del
 	}
 	gamma = npd1 / (spot * sigma * math.Sqrt(T))
 	theta = -(spot*npd1*sigma)/(2*math.Sqrt(T)) - r*strike*math.Exp(-r*T)*nd2
-	vega  = spot * npd1 * math.Sqrt(T)
+	vega = spot * npd1 * math.Sqrt(T)
 	return
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 func createForwardHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", 405); return }
-	var req struct {
-		UserID         int64   `json:"user_id"`
-		FromCurrency   string  `json:"from_currency"`
-		ToCurrency     string  `json:"to_currency"`
-		NotionalUSD    float64 `json:"notional_usd"`
-		DaysToSettle   int     `json:"days_to_settle"`
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", 405)
+		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, "Invalid body", 400); return }
+	var req struct {
+		UserID       int64   `json:"user_id"`
+		FromCurrency string  `json:"from_currency"`
+		ToCurrency   string  `json:"to_currency"`
+		NotionalUSD  float64 `json:"notional_usd"`
+		DaysToSettle int     `json:"days_to_settle"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid body", 400)
+		return
+	}
 
 	pair := req.FromCurrency + "/" + req.ToCurrency
 	spot, ok := spotRates[pair]
-	if !ok { spot = 1.0 }
+	if !ok {
+		spot = 1.0
+	}
 
 	// Forward rate = spot * e^(r_domestic - r_foreign) * T
 	// Simplified: add a small forward premium
@@ -156,8 +169,8 @@ func createForwardHandler(w http.ResponseWriter, r *http.Request) {
 		FromCurrency: req.FromCurrency, ToCurrency: req.ToCurrency,
 		NotionalUSD: req.NotionalUSD, ForwardRate: forwardRate,
 		SpotRateAtEntry: spot,
-		SettlementDate: time.Now().Add(time.Duration(req.DaysToSettle) * 24 * time.Hour).Unix(),
-		Status: "active", PnL: 0, CreatedAt: time.Now().Unix(),
+		SettlementDate:  time.Now().Add(time.Duration(req.DaysToSettle) * 24 * time.Hour).Unix(),
+		Status:          "active", PnL: 0, CreatedAt: time.Now().Unix(),
 	}
 
 	mu.Lock()
@@ -172,7 +185,10 @@ func createForwardHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func createOptionHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", 405); return }
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
 	var req struct {
 		UserID       int64   `json:"user_id"`
 		OptionType   string  `json:"option_type"`
@@ -183,12 +199,20 @@ func createOptionHandler(w http.ResponseWriter, r *http.Request) {
 		DaysToExpiry int     `json:"days_to_expiry"`
 		Volatility   float64 `json:"volatility"` // annualized, e.g. 0.12
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, "Invalid body", 400); return }
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid body", 400)
+		return
+	}
 
 	pair := req.FromCurrency + "/" + req.ToCurrency
 	spot, ok := spotRates[pair]
-	if !ok { spot = 1.0 }
-	if req.Volatility == 0 { req.Volatility = 0.12 }
+	if !ok {
+		spot = 1.0
+	}
+	if req.Volatility == 0 {
+		req.Volatility = 0.12
+	}
 	T := float64(req.DaysToExpiry) / 365.0
 
 	price, delta, gamma, theta, vega := blackScholes(req.OptionType, spot, req.Strike, 0.05, req.Volatility, T)
@@ -198,9 +222,9 @@ func createOptionHandler(w http.ResponseWriter, r *http.Request) {
 		ID: uuid.New().String(), UserID: req.UserID,
 		OptionType: req.OptionType, FromCurrency: req.FromCurrency, ToCurrency: req.ToCurrency,
 		Notional: req.Notional, Strike: req.Strike, SpotAtEntry: spot,
-		Premium: math.Round(premium*100)/100, Expiry: time.Now().Add(time.Duration(req.DaysToExpiry)*24*time.Hour).Unix(),
-		Delta: math.Round(delta*10000)/10000, Gamma: math.Round(gamma*10000)/10000,
-		Theta: math.Round(theta*10000)/10000, Vega: math.Round(vega*10000)/10000,
+		Premium: math.Round(premium*100) / 100, Expiry: time.Now().Add(time.Duration(req.DaysToExpiry) * 24 * time.Hour).Unix(),
+		Delta: math.Round(delta*10000) / 10000, Gamma: math.Round(gamma*10000) / 10000,
+		Theta: math.Round(theta*10000) / 10000, Vega: math.Round(vega*10000) / 10000,
 		Status: "active", CreatedAt: time.Now().Unix(),
 	}
 
@@ -220,15 +244,19 @@ func exposureHandler(w http.ResponseWriter, r *http.Request) {
 
 	exposures := make(map[string]*HedgeExposure)
 	for _, f := range forwards {
-		if f.Status != "active" { continue }
+		if f.Status != "active" {
+			continue
+		}
 		if _, ok := exposures[f.ToCurrency]; !ok {
 			exposures[f.ToCurrency] = &HedgeExposure{Currency: f.ToCurrency}
 		}
 		exposures[f.ToCurrency].ForwardCover += f.NotionalUSD
-		exposures[f.ToCurrency].GrossLong    += f.NotionalUSD
+		exposures[f.ToCurrency].GrossLong += f.NotionalUSD
 	}
 	for _, o := range options {
-		if o.Status != "active" { continue }
+		if o.Status != "active" {
+			continue
+		}
 		if _, ok := exposures[o.ToCurrency]; !ok {
 			exposures[o.ToCurrency] = &HedgeExposure{Currency: o.ToCurrency}
 		}
@@ -236,12 +264,16 @@ func exposureHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, e := range exposures {
 		totalCover := e.ForwardCover + e.OptionCover
-		if e.GrossLong > 0 { e.HedgeRatio = math.Round(totalCover/e.GrossLong*10000)/100 }
+		if e.GrossLong > 0 {
+			e.HedgeRatio = math.Round(totalCover/e.GrossLong*10000) / 100
+		}
 		e.NetExposure = e.GrossLong - totalCover
 	}
 
 	result := make([]*HedgeExposure, 0, len(exposures))
-	for _, e := range exposures { result = append(result, e) }
+	for _, e := range exposures {
+		result = append(result, e)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -281,16 +313,19 @@ func main() {
 	slog.Info("[FXHedging] Starting", "port", port)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health",           healthHandler)
-	mux.HandleFunc("/livez",            func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/readyz",           func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/metrics",          metricsHandler)
-	mux.HandleFunc("/fx/forward",       createForwardHandler)
-	mux.HandleFunc("/fx/option",        createOptionHandler)
-	mux.HandleFunc("/fx/exposure",      exposureHandler)
-	mux.HandleFunc("/fx/spot",          spotRatesHandler)
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/metrics", metricsHandler)
+	mux.HandleFunc("/fx/forward", createForwardHandler)
+	mux.HandleFunc("/fx/option", createOptionHandler)
+	mux.HandleFunc("/fx/exposure", exposureHandler)
+	mux.HandleFunc("/fx/spot", spotRatesHandler)
 
-	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second}
+	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Addr: ":" + port, Handler: mux, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second}
 	slog.Info("[FXHedging] Ready", "addr", srv.Addr)
-	if err := srv.ListenAndServe(); err != nil { slog.Error("Fatal", "err", err); os.Exit(1) }
+	if err := srv.ListenAndServe(); err != nil {
+		slog.Error("Fatal", "err", err)
+		os.Exit(1)
+	}
 }

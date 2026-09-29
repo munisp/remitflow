@@ -24,32 +24,32 @@ func TestBlackScholes_CallOption(t *testing.T) {
 		wantMax    float64
 	}{
 		{
-			name:       "ATM call option",
-			spot:       100.0, strike: 100.0,
+			name: "ATM call option",
+			spot: 100.0, strike: 100.0,
 			riskFree: 0.05, volatility: 0.20,
 			timeToExp: 1.0,
-			wantMin: 8.0, wantMax: 15.0, // ~10.45 for these inputs
+			wantMin:   8.0, wantMax: 15.0, // ~10.45 for these inputs
 		},
 		{
-			name:       "deep ITM call",
-			spot:       120.0, strike: 100.0,
+			name: "deep ITM call",
+			spot: 120.0, strike: 100.0,
 			riskFree: 0.05, volatility: 0.20,
 			timeToExp: 1.0,
-			wantMin: 20.0, wantMax: 30.0,
+			wantMin:   20.0, wantMax: 30.0,
 		},
 		{
-			name:       "deep OTM call",
-			spot:       80.0, strike: 100.0,
+			name: "deep OTM call",
+			spot: 80.0, strike: 100.0,
 			riskFree: 0.05, volatility: 0.20,
 			timeToExp: 1.0,
-			wantMin: 0.0, wantMax: 5.0,
+			wantMin:   0.0, wantMax: 5.0,
 		},
 		{
-			name:       "zero time to expiry",
-			spot:       105.0, strike: 100.0,
+			name: "zero time to expiry",
+			spot: 105.0, strike: 100.0,
 			riskFree: 0.05, volatility: 0.20,
 			timeToExp: 0.0,
-			wantMin: 5.0, wantMax: 5.01, // intrinsic value only
+			wantMin:   5.0, wantMax: 5.01, // intrinsic value only
 		},
 	}
 
@@ -82,11 +82,11 @@ func TestBlackScholes_PutCallParity(t *testing.T) {
 
 func TestFXHedging_ForwardContractValidation(t *testing.T) {
 	tests := []struct {
-		name       string
-		notional   float64
-		currency   string
-		daysToExp  int
-		wantErr    bool
+		name      string
+		notional  float64
+		currency  string
+		daysToExp int
+		wantErr   bool
 	}{
 		{"valid 30-day forward", 1_000_000, "USDNGN", 30, false},
 		{"valid 90-day forward", 5_000_000, "USDGHS", 90, false},
@@ -101,11 +101,11 @@ func TestFXHedging_ForwardContractValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validateForwardContract(ForwardContract{
-				Notional:         tt.notional,
-				CurrencyPair:     tt.currency,
-				ExpiryDate:       time.Now().AddDate(0, 0, tt.daysToExp),
-				ContractRate:     1500.0,
-				Direction:        "buy",
+				Notional:     tt.notional,
+				CurrencyPair: tt.currency,
+				ExpiryDate:   time.Now().AddDate(0, 0, tt.daysToExp),
+				ContractRate: 1500.0,
+				Direction:    "buy",
 			})
 			if tt.wantErr && err == nil {
 				t.Error("expected error but got nil")
@@ -194,10 +194,10 @@ func TestFXHedging_AutoHedgeThreshold(t *testing.T) {
 
 func TestFXHedging_HedgeCoverageRatio(t *testing.T) {
 	tests := []struct {
-		name       string
-		hedged     float64
-		exposure   float64
-		wantRatio  float64
+		name      string
+		hedged    float64
+		exposure  float64
+		wantRatio float64
 	}{
 		{"fully hedged", 1_000_000, 1_000_000, 1.0},
 		{"50% hedged", 500_000, 1_000_000, 0.5},

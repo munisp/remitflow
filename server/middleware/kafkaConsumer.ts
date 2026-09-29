@@ -74,17 +74,16 @@ const handlers: ConsumerHandler[] = [
     topic: KAFKA_TOPICS.KYC_EVENTS,
     description: "KYC workflow triggers — delegates to KYC event consumer service",
     handler: async (msg) => {
-      // Forward to KYC event consumer service
+      // Forward to KYC event consumer service. W14: 2s timeout + THROW on
+      // failure so withHandlerRetry/DLQ semantics engage (was: swallowed).
       const url = process.env.KYC_EVENT_CONSUMER_URL || "http://localhost:8120";
-      try {
-        await fetch(`${url}/events`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ data: msg }),
-        });
-      } catch {
-        // KYC event consumer handles its own persistence
-      }
+      const res = await fetch(`${url}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: msg }),
+        signal: AbortSignal.timeout(2000),
+      });
+      if (!res.ok) throw new Error(`KYC event consumer returned ${res.status}`);
     },
   },
   {
@@ -95,16 +94,13 @@ const handlers: ConsumerHandler[] = [
       const quote = msg.quoteCurrency as string;
       const rate = msg.rate as number;
       if (base && quote && rate) {
-        // Update Redis rate cache if available
+        // Update Redis rate cache if available. W14: use the real
+        // getRedisClient() (the old `redis.redisClient` export never existed).
         try {
-          const redis = await import("../middleware/redis.js");
-          const client = (redis as Record<string, unknown>).redisClient;
-          if (client && typeof (client as Record<string, Function>).set === "function") {
-            await (client as Record<string, Function>).set(
-              `fx:${base}:${quote}`,
-              String(rate),
-              { EX: 300 }
-            );
+          const { getRedisClient } = await import("../middleware/redis.js");
+          const client = getRedisClient();
+          if (client) {
+            await client.set(`fx:${base}:${quote}`, String(rate), "EX", 300);
           }
         } catch {
           // Redis unavailable — rate will be fetched on next request
@@ -134,17 +130,16 @@ const handlers: ConsumerHandler[] = [
       const userId = msg.userId as number;
       const title = msg.title as string;
       if (!userId || !title) return;
-      // Notification dispatch handled by push notification service
-      try {
-        const pushUrl = process.env.PUSH_NOTIFICATION_URL || "http://localhost:8140";
-        await fetch(`${pushUrl}/send`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(msg),
-        });
-      } catch {
-        // Push service unavailable — notification will be available in-app
-      }
+      // Notification dispatch handled by push notification service. W14: 2s
+      // timeout + THROW on failure so retry/DLQ engages (was: swallowed).
+      const pushUrl = process.env.PUSH_NOTIFICATION_URL || "http://localhost:8140";
+      const res = await fetch(`${pushUrl}/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(msg),
+        signal: AbortSignal.timeout(2000),
+      });
+      if (!res.ok) throw new Error(`Push notification service returned ${res.status}`);
     },
   },
   {
@@ -625,42 +620,57 @@ export async function startKafkaConsumers(): Promise<void> {
       // Manual offset management: an offset is only committed after the handler
       // succeeds (with retries) or after the message is safely parked in the DLQ.
       autoCommit: false,
-      eachMessage: async ({ topic, partition, message }) => {
+      // W14: batch consumption — up to 3 partitions in parallel, heartbeat
+      // between messages, one commitOffsetsIfNecessary per batch. Poison-message
+      // semantics unchanged: withHandlerRetry backoff -> DLQ -> resolveOffset.
+      partitionsConsumedConcurrently: 3,
+      eachBatch: async ({ batch, resolveOffset, heartbeat, commitOffsetsIfNecessary, isRunning, isStale }) => {
+        const { topic, partition } = batch;
         const handler = handlerMap.get(topic);
-        if (!handler || !message.value) {
-          await commitOffset(consumer, topic, partition, message.offset);
-          return;
-        }
-
-        const ctx = { topic, partition, offset: message.offset };
-        try {
-          const parsed = JSON.parse(message.value.toString());
-          await withHandlerRetry(() => handler(parsed), ctx);
-          await commitOffset(consumer, topic, partition, message.offset);
-          _stats.messagesProcessed++;
-          _stats.lastMessageAt = new Date().toISOString();
-        } catch (err) {
-          _stats.messagesErrored++;
-          const errMsg = err instanceof Error ? err.message : String(err);
-          logger.error({ ...ctx, err: errMsg }, `[Kafka] Handler exhausted retries [${topic}] — routing to DLQ`);
+        for (const message of batch.messages) {
+          if (!isRunning() || isStale()) break; // rebalanced/stopping — leave offsets uncommitted
+          const ctx = { topic, partition, offset: message.offset };
           try {
-            await sendToDLQ(
-              topic,
-              message.key?.toString() ?? "unknown",
-              message.value.toString(),
-              errMsg,
-            );
-            // Message is durably parked in remitflow.dlq — safe to commit.
-            await commitOffset(consumer, topic, partition, message.offset);
-            _stats.messagesSentToDlq++;
-          } catch (dlqErr) {
-            // DLQ unavailable — do NOT commit; the message will be redelivered.
-            logger.error(
-              { ...ctx, err: (dlqErr as Error).message },
-              "[Kafka] DLQ routing failed — offset not committed, message will be redelivered",
-            );
+            if (!handler || !message.value) {
+              resolveOffset(message.offset);
+              continue;
+            }
+            const parsed = JSON.parse(message.value.toString());
+            await withHandlerRetry(() => handler(parsed), ctx);
+            resolveOffset(message.offset);
+            _stats.messagesProcessed++;
+            _stats.lastMessageAt = new Date().toISOString();
+          } catch (err) {
+            _stats.messagesErrored++;
+            const errMsg = err instanceof Error ? err.message : String(err);
+            logger.error({ ...ctx, err: errMsg }, `[Kafka] Handler exhausted retries [${topic}] — routing to DLQ`);
+            try {
+              await sendToDLQ(
+                topic,
+                message.key?.toString() ?? "unknown",
+                message.value!.toString(),
+                errMsg,
+              );
+              // Message is durably parked in remitflow.dlq — safe to commit.
+              resolveOffset(message.offset);
+              _stats.messagesSentToDlq++;
+            } catch (dlqErr) {
+              // DLQ unavailable — do NOT resolve; stop the batch here so no
+              // later offset in this partition can be committed past it.
+              logger.error(
+                { ...ctx, err: (dlqErr as Error).message },
+                "[Kafka] DLQ routing failed — offset not committed, message will be redelivered",
+              );
+              break;
+            }
+          } finally {
+            await heartbeat().catch(() => {});
           }
         }
+        // Single commit per batch (commits all offsets resolved above).
+        await commitOffsetsIfNecessary().catch((err: unknown) => {
+          logger.warn({ topic, partition, err: (err as Error)?.message }, "[Kafka] batch offset commit failed — offsets will be recommitted on rebalance");
+        });
       },
     });
 

@@ -60,17 +60,19 @@ async function runEodClose(): Promise<{ tenants: number; expiredBatches: number 
       "[BDC] EOD sweep: NFEM batches exceeded 24h liquidation deadline — force liquidation required",
     );
     try {
-      const { KAFKA_TOPICS, publishEvent } = await import("../middleware/kafka.js");
-      for (const b of expired) {
-        await publishEvent(KAFKA_TOPICS.BDC_NFEM_ALERTS, `bdc-nfem-expired-${b.id}`, {
+      // W14: single producer batch for all expired-batch alerts.
+      const { KAFKA_TOPICS, publishBatch } = await import("../middleware/kafka.js");
+      await publishBatch(KAFKA_TOPICS.BDC_NFEM_ALERTS, expired.map((b) => ({
+        key: `bdc-nfem-expired-${b.id}`,
+        payload: {
           type: "NFEM_BATCH_EXPIRED",
           batchId: b.id,
           tenantId: b.tenant_id,
           amountUsd: b.amount_usd,
           source: "bdc-scheduler-eod",
           task: { type: "manual_liquidation", batchId: b.id },
-        });
-      }
+        },
+      })));
     } catch (err) {
       logger.warn({ errMsg: (err as Error)?.message }, "[BDC] EOD Kafka alert publish failed (non-blocking)");
     }

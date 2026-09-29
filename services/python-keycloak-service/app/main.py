@@ -24,6 +24,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 import httpx
+
+# ── Shared HTTP clients (SPEC-wave14 §4.6) ────────────────────────────────────
+# Timeout-keyed pool of module-level AsyncClients: outbound calls previously
+# constructed a fresh client per request (TCP/TLS + pool setup each time).
+# Clients live for the process lifetime; pools are capped at 100 connections.
+_http_clients: dict = {}
+
+
+def get_http_client(timeout: float = 5.0, **kwargs) -> httpx.AsyncClient:
+    key = (float(timeout), tuple(sorted(kwargs.items())))
+    client = _http_clients.get(key)
+    if client is None:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout),
+            limits=httpx.Limits(max_connections=100),
+            **kwargs,
+        )
+        _http_clients[key] = client
+    return client
+
 import logging
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 from starlette.responses import Response
@@ -106,75 +126,75 @@ class KeycloakClient:
         if self._admin_token and time.time() < self._token_expiry - 30:
             return self._admin_token
 
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
-                f"{self.base_url}/realms/master/protocol/openid-connect/token",
-                data={
-                    "grant_type": "password",
-                    "client_id": "admin-cli",
-                    "username": KEYCLOAK_ADMIN_USER,
-                    "password": KEYCLOAK_ADMIN_PASSWORD,
-                }
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                self._admin_token = data["access_token"]
-                self._token_expiry = time.time() + data.get("expires_in", 300)
-                return self._admin_token
-            else:
-                logger.warning(f"Keycloak admin token failed: {resp.status_code} — using mock mode")
-                return "mock-admin-token"
+        client = get_http_client(timeout=10)  # shared client (SPEC-wave14 §4.6)
+        resp = await client.post(
+            f"{self.base_url}/realms/master/protocol/openid-connect/token",
+            data={
+                "grant_type": "password",
+                "client_id": "admin-cli",
+                "username": KEYCLOAK_ADMIN_USER,
+                "password": KEYCLOAK_ADMIN_PASSWORD,
+            }
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            self._admin_token = data["access_token"]
+            self._token_expiry = time.time() + data.get("expires_in", 300)
+            return self._admin_token
+        else:
+            logger.warning(f"Keycloak admin token failed: {resp.status_code} — using mock mode")
+            return "mock-admin-token"
 
     async def create_user(self, req: UserProvisionRequest) -> dict:
         token = await self.get_admin_token()
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
-                f"{self.base_url}/admin/realms/{self.realm}/users",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json={
-                    "username": req.username,
-                    "email": req.email,
-                    "firstName": req.first_name,
-                    "lastName": req.last_name,
-                    "enabled": req.enabled,
-                    "emailVerified": True,
-                    "attributes": {
-                        "remitflow_user_id": [str(req.user_id)],
-                        "created_at": [datetime.now(timezone.utc).isoformat()],
-                    },
-                    "credentials": [{
-                        "type": "password",
-                        "value": secrets.token_urlsafe(16),
-                        "temporary": True,
-                    }]
-                }
-            )
-            if resp.status_code in (201, 409):
-                return {"provisioned": True, "username": req.username, "realm": self.realm}
-            logger.warning(f"Keycloak create user: {resp.status_code} — mock mode")
-            return {"provisioned": True, "username": req.username, "mock": True}
+        client = get_http_client(timeout=10)  # shared client (SPEC-wave14 §4.6)
+        resp = await client.post(
+            f"{self.base_url}/admin/realms/{self.realm}/users",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "username": req.username,
+                "email": req.email,
+                "firstName": req.first_name,
+                "lastName": req.last_name,
+                "enabled": req.enabled,
+                "emailVerified": True,
+                "attributes": {
+                    "remitflow_user_id": [str(req.user_id)],
+                    "created_at": [datetime.now(timezone.utc).isoformat()],
+                },
+                "credentials": [{
+                    "type": "password",
+                    "value": secrets.token_urlsafe(16),
+                    "temporary": True,
+                }]
+            }
+        )
+        if resp.status_code in (201, 409):
+            return {"provisioned": True, "username": req.username, "realm": self.realm}
+        logger.warning(f"Keycloak create user: {resp.status_code} — mock mode")
+        return {"provisioned": True, "username": req.username, "mock": True}
 
     async def disable_user(self, keycloak_user_id: str) -> dict:
         token = await self.get_admin_token()
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.put(
-                f"{self.base_url}/admin/realms/{self.realm}/users/{keycloak_user_id}",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json={"enabled": False}
-            )
-            return {"disabled": resp.status_code in (200, 204), "user_id": keycloak_user_id}
+        client = get_http_client(timeout=10)  # shared client (SPEC-wave14 §4.6)
+        resp = await client.put(
+            f"{self.base_url}/admin/realms/{self.realm}/users/{keycloak_user_id}",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"enabled": False}
+        )
+        return {"disabled": resp.status_code in (200, 204), "user_id": keycloak_user_id}
 
     async def get_user_by_email(self, email: str) -> Optional[dict]:
         token = await self.get_admin_token()
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                f"{self.base_url}/admin/realms/{self.realm}/users",
-                headers={"Authorization": f"Bearer {token}"},
-                params={"email": email, "exact": "true"}
-            )
-            if resp.status_code == 200:
-                users = resp.json()
-                return users[0] if users else None
+        client = get_http_client(timeout=10)  # shared client (SPEC-wave14 §4.6)
+        resp = await client.get(
+            f"{self.base_url}/admin/realms/{self.realm}/users",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"email": email, "exact": "true"}
+        )
+        if resp.status_code == 200:
+            users = resp.json()
+            return users[0] if users else None
         return None
 
     async def assign_roles(self, keycloak_user_id: str, roles: List[str]) -> dict:
@@ -227,7 +247,7 @@ def _get_pg():
     global _pg_conn
     if _pg_conn is None or _pg_conn.closed:
         try:
-            _pg_conn = psycopg2.connect(_DB_URL)
+            _pg_conn = psycopg2.connect(_DB_URL, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
             _pg_conn.autocommit = True
             with _pg_conn.cursor() as cur:
                 cur.execute("""
@@ -282,10 +302,10 @@ app.add_middleware(
 async def health():
     # Probe Keycloak OIDC discovery endpoint
     try:
-        async with httpx.AsyncClient(timeout=3) as c:
-            r = await c.get(f"{KEYCLOAK_URL}/realms/{KEYCLOAK_REALM}/.well-known/openid-configuration")
-            kc_up = r.status_code == 200
-            kc_connection_up.set(1 if kc_up else 0)
+        c = get_http_client(timeout=3)  # shared client (SPEC-wave14 §4.6)
+        r = await c.get(f"{KEYCLOAK_URL}/realms/{KEYCLOAK_REALM}/.well-known/openid-configuration")
+        kc_up = r.status_code == 200
+        kc_connection_up.set(1 if kc_up else 0)
     except Exception:
         kc_up = False
         kc_connection_up.set(0)
@@ -383,4 +403,4 @@ async def realm_stats(_=Depends(verify_api_key)):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8099"))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info", workers=int(os.getenv("UVICORN_WORKERS", "1")))  # SPEC-wave14 §4.6: env-configurable workers (default 1)

@@ -26,7 +26,9 @@ import (
 )
 
 func getEnv(k, d string) string {
-	if v := os.Getenv(k); v != "" { return v }
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
 	return d
 }
 
@@ -34,15 +36,17 @@ var port = getEnv("PORT", "8145")
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type ExperimentType string
+
 const (
-	LatencyInjection  ExperimentType = "latency"
-	ErrorInjection    ExperimentType = "error"
-	NetworkPartition  ExperimentType = "network_partition"
+	LatencyInjection   ExperimentType = "latency"
+	ErrorInjection     ExperimentType = "error"
+	NetworkPartition   ExperimentType = "network_partition"
 	ResourceExhaustion ExperimentType = "resource_exhaustion"
-	ServiceKill       ExperimentType = "service_kill"
+	ServiceKill        ExperimentType = "service_kill"
 )
 
 type ExperimentStatus string
+
 const (
 	StatusPending  ExperimentStatus = "pending"
 	StatusRunning  ExperimentStatus = "running"
@@ -65,10 +69,10 @@ type ChaosExperiment struct {
 }
 
 type ExperimentConfig struct {
-	DurationSeconds  int     `json:"duration_seconds"`
-	LatencyMs        int     `json:"latency_ms,omitempty"`
-	ErrorRate        float64 `json:"error_rate,omitempty"`    // 0.0–1.0
-	ErrorCode        int     `json:"error_code,omitempty"`
+	DurationSeconds  int      `json:"duration_seconds"`
+	LatencyMs        int      `json:"latency_ms,omitempty"`
+	ErrorRate        float64  `json:"error_rate,omitempty"` // 0.0–1.0
+	ErrorCode        int      `json:"error_code,omitempty"`
 	PartitionTargets []string `json:"partition_targets,omitempty"`
 }
 
@@ -155,7 +159,10 @@ func completeExperiment(exp *ChaosExperiment) {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 func createExperimentHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", 405); return }
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
 	var req struct {
 		Name          string           `json:"name"`
 		Type          ExperimentType   `json:"type"`
@@ -164,14 +171,22 @@ func createExperimentHandler(w http.ResponseWriter, r *http.Request) {
 		BlastRadius   BlastRadius      `json:"blast_radius"`
 		RunNow        bool             `json:"run_now"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, "Invalid body", 400); return }
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid body", 400)
+		return
+	}
 
 	// Safety guard: max 60s duration
-	if req.Config.DurationSeconds > 60 { req.Config.DurationSeconds = 60 }
-	if req.Config.ErrorRate > 0.5 { req.Config.ErrorRate = 0.5 } // max 50% error rate
+	if req.Config.DurationSeconds > 60 {
+		req.Config.DurationSeconds = 60
+	}
+	if req.Config.ErrorRate > 0.5 {
+		req.Config.ErrorRate = 0.5
+	} // max 50% error rate
 
 	exp := &ChaosExperiment{
-		ID: fmt.Sprintf("chaos-%d", time.Now().UnixMilli()),
+		ID:   fmt.Sprintf("chaos-%d", time.Now().UnixMilli()),
 		Name: req.Name, Type: req.Type, TargetService: req.TargetService,
 		Config: req.Config, Status: StatusPending,
 		CreatedAt: time.Now().UnixMilli(), BlastRadius: req.BlastRadius,
@@ -181,7 +196,9 @@ func createExperimentHandler(w http.ResponseWriter, r *http.Request) {
 	state.experiments[exp.ID] = exp
 	state.mu.Unlock()
 
-	if req.RunNow { go runExperiment(exp) }
+	if req.RunNow {
+		go runExperiment(exp)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(201)
@@ -189,20 +206,32 @@ func createExperimentHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func startExperimentHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", 405); return }
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
 	id := r.URL.Query().Get("id")
 	state.mu.RLock()
 	exp, ok := state.experiments[id]
 	state.mu.RUnlock()
-	if !ok { http.Error(w, "Experiment not found", 404); return }
-	if exp.Status != StatusPending { http.Error(w, "Experiment not in pending state", 409); return }
+	if !ok {
+		http.Error(w, "Experiment not found", 404)
+		return
+	}
+	if exp.Status != StatusPending {
+		http.Error(w, "Experiment not in pending state", 409)
+		return
+	}
 	go runExperiment(exp)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(exp)
 }
 
 func abortExperimentHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { http.Error(w, "Method not allowed", 405); return }
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
 	id := r.URL.Query().Get("id")
 	state.mu.Lock()
 	exp, ok := state.experiments[id]
@@ -214,7 +243,10 @@ func abortExperimentHandler(w http.ResponseWriter, r *http.Request) {
 		activeExperiments.Add(-1)
 	}
 	state.mu.Unlock()
-	if !ok { http.Error(w, "Experiment not found", 404); return }
+	if !ok {
+		http.Error(w, "Experiment not found", 404)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(exp)
 }
@@ -222,7 +254,9 @@ func abortExperimentHandler(w http.ResponseWriter, r *http.Request) {
 func listExperimentsHandler(w http.ResponseWriter, r *http.Request) {
 	state.mu.RLock()
 	exps := make([]*ChaosExperiment, 0, len(state.experiments))
-	for _, e := range state.experiments { exps = append(exps, e) }
+	for _, e := range state.experiments {
+		exps = append(exps, e)
+	}
 	state.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"experiments": exps, "total": len(exps)})
@@ -267,17 +301,20 @@ func main() {
 	slog.Info("[ChaosEngine] Starting", "port", port)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health",               healthHandler)
-	mux.HandleFunc("/livez",                func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/readyz",               func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/metrics",              metricsHandler)
-	mux.HandleFunc("/chaos/experiments",    listExperimentsHandler)
-	mux.HandleFunc("/chaos/create",         createExperimentHandler)
-	mux.HandleFunc("/chaos/start",          startExperimentHandler)
-	mux.HandleFunc("/chaos/abort",          abortExperimentHandler)
-	mux.HandleFunc("/chaos/active",         checkActiveHandler)
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/metrics", metricsHandler)
+	mux.HandleFunc("/chaos/experiments", listExperimentsHandler)
+	mux.HandleFunc("/chaos/create", createExperimentHandler)
+	mux.HandleFunc("/chaos/start", startExperimentHandler)
+	mux.HandleFunc("/chaos/abort", abortExperimentHandler)
+	mux.HandleFunc("/chaos/active", checkActiveHandler)
 
-	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second}
+	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Addr: ":" + port, Handler: mux, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second}
 	slog.Info("[ChaosEngine] Ready", "addr", srv.Addr)
-	if err := srv.ListenAndServe(); err != nil { slog.Error("Fatal", "err", err); os.Exit(1) }
+	if err := srv.ListenAndServe(); err != nil {
+		slog.Error("Fatal", "err", err)
+		os.Exit(1)
+	}
 }

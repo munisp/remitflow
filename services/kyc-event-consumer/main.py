@@ -41,6 +41,33 @@ import psycopg2.extras
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("kyc-event-consumer")
 
+# ─── Shared HTTP client (SPEC-wave14 §4.6) ────────────────────────────────────
+# One lazily-created module-level AsyncClient shared by the Temporal and Dapr
+# call sites — no per-event client construction (TCP/TLS + pool setup per event
+# was the dominant per-event cost). Default timeout 5s; the Temporal start
+# call passes a per-request 10s override.
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(5.0),
+            limits=httpx.Limits(max_connections=100),
+        )
+    return _http_client
+
+
+# ─── Bounded processing concurrency (SPEC-wave14 §4.3) ────────────────────────
+# Events were processed strictly serially inside the consumer loop; a single
+# slow Temporal/DB call stalled the whole partition. Processing is now
+# dispatched to bounded concurrent tasks; the semaphore acquire happens BEFORE
+# dispatch so a full window back-pressures consumption instead of growing an
+# unbounded task set.
+MAX_CONCURRENT_EVENTS = int(os.getenv("MAX_CONCURRENT_EVENTS", "16"))
+_event_slots = asyncio.Semaphore(MAX_CONCURRENT_EVENTS)
+
 app = FastAPI(title="RemitFlow KYC Event Consumer", version="1.0.0")
 
 # ─── Config ──────────────────────────────────────────────────────────────────
@@ -219,35 +246,36 @@ async def start_kyc_workflow(
     workflow_id = f"kyc-{customer_id}-{trigger_type}-{int(time.time())}"
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{TEMPORAL_URL}/api/v1/namespaces/{TEMPORAL_NAMESPACE}/workflows/{workflow_id}",
-                json={
-                    "workflowType": {"name": "KYCVerificationWorkflow"},
-                    "taskQueue": {"name": TEMPORAL_TASK_QUEUE},
-                    "input": {
-                        "payloads": [
-                            {
-                                "metadata": {"encoding": "json/plain"},
-                                "data": json.dumps({
-                                    "userId": int(customer_id) if customer_id.isdigit() else 0,
-                                    "kycLevel": kyc_level,
-                                    "triggerType": trigger_type,
-                                    "triggerMetadata": metadata,
-                                }).encode().hex(),
-                            }
-                        ]
-                    },
-                    "workflowExecutionTimeout": "86400s",
-                    "workflowRunTimeout": "3600s",
+        client = get_http_client()
+        resp = await client.post(
+            f"{TEMPORAL_URL}/api/v1/namespaces/{TEMPORAL_NAMESPACE}/workflows/{workflow_id}",
+            json={
+                "workflowType": {"name": "KYCVerificationWorkflow"},
+                "taskQueue": {"name": TEMPORAL_TASK_QUEUE},
+                "input": {
+                    "payloads": [
+                        {
+                            "metadata": {"encoding": "json/plain"},
+                            "data": json.dumps({
+                                "userId": int(customer_id) if customer_id.isdigit() else 0,
+                                "kycLevel": kyc_level,
+                                "triggerType": trigger_type,
+                                "triggerMetadata": metadata,
+                            }).encode().hex(),
+                        }
+                    ]
                 },
-            )
-            if resp.status_code in (200, 201, 409):
-                logger.info(f"Started KYC workflow {workflow_id} for customer {customer_id} (level={kyc_level})")
-                return workflow_id
-            else:
-                logger.error(f"Temporal returned {resp.status_code}: {resp.text[:200]}")
-                return None
+                "workflowExecutionTimeout": "86400s",
+                "workflowRunTimeout": "3600s",
+            },
+            timeout=10.0,
+        )
+        if resp.status_code in (200, 201, 409):
+            logger.info(f"Started KYC workflow {workflow_id} for customer {customer_id} (level={kyc_level})")
+            return workflow_id
+        else:
+            logger.error(f"Temporal returned {resp.status_code}: {resp.text[:200]}")
+            return None
     except Exception as e:
         logger.error(f"Failed to start KYC workflow: {e}")
         return None
@@ -284,7 +312,12 @@ async def mark_kyb_review_under_review(
         return None
 
     def _update() -> int:
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        # statement_timeout (5s) so a locked row can never park a worker
+        # thread indefinitely (SPEC-wave14 §4.6). Runs via asyncio.to_thread —
+        # never on the event loop.
+        with psycopg2.connect(
+            DATABASE_URL, connect_timeout=5, options="-c statement_timeout=5000"
+        ) as conn:
             with conn.cursor() as cur:
                 if company_id.isdigit():
                     cur.execute(
@@ -348,11 +381,11 @@ async def log_trigger_event(
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(
-                f"http://localhost:{DAPR_HTTP_PORT}/v1.0/publish/remitflow-pubsub/kyc.trigger.audit",
-                json=event,
-            )
+        client = get_http_client()
+        await client.post(
+            f"http://localhost:{DAPR_HTTP_PORT}/v1.0/publish/remitflow-pubsub/kyc.trigger.audit",
+            json=event,
+        )
     except Exception as e:
         logger.debug(f"Dapr audit publish failed (non-critical): {e}")
 
@@ -419,7 +452,11 @@ async def process_event(raw_event: Dict[str, Any]):
         return
 
     # ── Cooldown check ────────────────────────────────────────────────────
-    if cooldown_mgr.is_in_cooldown(target_id, event_type, rule["cooldown_hours"]):
+    # redis-py is synchronous — run cooldown reads/writes in a worker thread
+    # so the event loop is never blocked (SPEC-wave14 §4.3).
+    if await asyncio.to_thread(
+        cooldown_mgr.is_in_cooldown, target_id, event_type, rule["cooldown_hours"]
+    ):
         _stats["events_skipped_cooldown"] += 1
         logger.info(f"Cooldown active for {target_id}/{event_type} — skipping")
         await log_trigger_event(target_id, event_type, "", None, skipped=True, skip_reason="cooldown")
@@ -438,7 +475,9 @@ async def process_event(raw_event: Dict[str, Any]):
 
     if workflow_id:
         _stats["events_triggered"] += 1
-        cooldown_mgr.record_trigger(target_id, event_type, rule["cooldown_hours"])
+        await asyncio.to_thread(
+            cooldown_mgr.record_trigger, target_id, event_type, rule["cooldown_hours"]
+        )
         logger.info(f"Triggered {kyc_level} KYC for {target_id} via {event_type} → workflow={workflow_id}")
     else:
         _stats["events_errored"] += 1
@@ -450,6 +489,10 @@ async def process_event(raw_event: Dict[str, Any]):
 # ─── Kafka Consumer Loop ─────────────────────────────────────────────────────
 
 _consumer_task: Optional[asyncio.Task] = None
+
+# Strong references to in-flight processing tasks (prevents GC of create_task
+# results; used only for bookkeeping).
+_inflight: set = set()
 
 
 async def consume_loop():
@@ -469,16 +512,29 @@ async def consume_loop():
         value_deserializer=lambda m: json.loads(m.decode("utf-8")),
     )
 
+    async def _dispatch(value):
+        """Process one event, always releasing the concurrency slot."""
+        try:
+            await process_event(value)
+        except Exception as e:
+            _stats["events_errored"] += 1
+            logger.error(f"Error processing event: {e}", exc_info=True)
+        finally:
+            _event_slots.release()
+
     while True:
         try:
             await consumer.start()
             logger.info(f"Kafka consumer started — subscribed to {TOPICS}")
             async for msg in consumer:
-                try:
-                    await process_event(msg.value)
-                except Exception as e:
-                    _stats["events_errored"] += 1
-                    logger.error(f"Error processing event: {e}", exc_info=True)
+                # Bounded concurrency: acquire a slot BEFORE dispatch so a
+                # full window (16 in-flight) back-pressures consumption
+                # instead of growing an unbounded task set. Slot is released
+                # in _dispatch's finally.
+                await _event_slots.acquire()
+                task = asyncio.create_task(_dispatch(msg.value))
+                _inflight.add(task)
+                task.add_done_callback(_inflight.discard)
         except Exception as e:
             logger.error(f"Kafka consumer error — reconnecting in 5s: {e}")
             await asyncio.sleep(5)
@@ -560,12 +616,20 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    global _http_client
     if _consumer_task:
         _consumer_task.cancel()
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
     logger.info("KYC Event Consumer stopped")
 
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8120"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # SPEC-wave14 §4.6: env-configurable workers (default 1 — note the Kafka
+    # consumer loop and shared client are per-worker; keep 1 unless running
+    # with a consumer group that tolerates per-worker subscriptions).
+    workers = int(os.getenv("UVICORN_WORKERS", "1"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, workers=workers)

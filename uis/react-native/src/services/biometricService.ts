@@ -66,10 +66,11 @@ export async function enableBiometricLogin(sessionToken: string): Promise<boolea
     });
     if (!success || !signature) return false;
     // Store the session token and public key
-    await AsyncStorage.multiSet([
-      [BIOMETRIC_ENABLED_KEY, "true"],
-      [BIOMETRIC_SESSION_KEY, JSON.stringify({ sessionToken, publicKey, signature })],
-    ]);
+    // (async-storage 3.x: multiSet was renamed to setMany with an object arg)
+    await AsyncStorage.setMany({
+      [BIOMETRIC_ENABLED_KEY]: "true",
+      [BIOMETRIC_SESSION_KEY]: JSON.stringify({ sessionToken, publicKey, signature }),
+    });
     return true;
   } catch {
     return false;
@@ -113,7 +114,8 @@ export async function isBiometricLoginEnabled(): Promise<boolean> {
 export async function disableBiometricLogin(): Promise<void> {
   try {
     await rnBiometrics.deleteKeys();
-    await AsyncStorage.multiRemove([BIOMETRIC_ENABLED_KEY, BIOMETRIC_SESSION_KEY]);
+    // (async-storage 3.x: multiRemove was renamed to removeMany)
+    await AsyncStorage.removeMany([BIOMETRIC_ENABLED_KEY, BIOMETRIC_SESSION_KEY]);
   } catch {
     // ignore
   }

@@ -5,11 +5,12 @@ package main
 
 import (
 	"database/sql"
+	"math/rand"
 
-	_ "github.com/lib/pq"
 	"context"
 	"encoding/json"
 	"fmt"
+	_ "github.com/lib/pq"
 	"log"
 	"math"
 	"net/http"
@@ -193,35 +194,39 @@ func (rl *RateLimiter) Allow(key string, maxRequests int, windowSec int) bool {
 
 	if len(valid) >= maxRequests {
 		rl.windows[key] = valid
-		if db != nil { go func() { _ = dbUpsert("rl:"+key, valid) }() }
+		if db != nil {
+			go func() { _ = dbUpsert("rl:"+key, valid) }()
+		}
 		return false
 	}
 
 	rl.windows[key] = append(valid, now)
-	if db != nil { go func() { _ = dbUpsert("rl:"+key, rl.windows[key]) }() }
+	if db != nil {
+		go func() { _ = dbUpsert("rl:"+key, rl.windows[key]) }()
+	}
 	return true
 }
 
 // ── Travel Rule (FATF R.16) ─────────────────────────────────────────────────
 
 type TravelRulePayload struct {
-	SenderName       string  `json:"sender_name"`
-	SenderCountry    string  `json:"sender_country"`
-	SenderID         string  `json:"sender_id"`
-	ReceiverName     string  `json:"receiver_name"`
-	ReceiverCountry  string  `json:"receiver_country"`
-	ReceiverFSP      string  `json:"receiver_fsp"`
-	Amount           float64 `json:"amount"`
-	Currency         string  `json:"currency"`
-	AmountUSD        float64 `json:"amount_usd"`
-	TransferID       string  `json:"transfer_id"`
+	SenderName      string  `json:"sender_name"`
+	SenderCountry   string  `json:"sender_country"`
+	SenderID        string  `json:"sender_id"`
+	ReceiverName    string  `json:"receiver_name"`
+	ReceiverCountry string  `json:"receiver_country"`
+	ReceiverFSP     string  `json:"receiver_fsp"`
+	Amount          float64 `json:"amount"`
+	Currency        string  `json:"currency"`
+	AmountUSD       float64 `json:"amount_usd"`
+	TransferID      string  `json:"transfer_id"`
 }
 
 type TravelRuleResult struct {
-	Required    bool   `json:"required"`
-	Compliant   bool   `json:"compliant"`
-	MissingData []string `json:"missing_data,omitempty"`
-	VASPExchange bool  `json:"vasp_exchange"`
+	Required     bool     `json:"required"`
+	Compliant    bool     `json:"compliant"`
+	MissingData  []string `json:"missing_data,omitempty"`
+	VASPExchange bool     `json:"vasp_exchange"`
 }
 
 func checkTravelRule(p TravelRulePayload) TravelRuleResult {
@@ -252,9 +257,9 @@ func checkTravelRule(p TravelRulePayload) TravelRuleResult {
 	}
 
 	return TravelRuleResult{
-		Required:    true,
-		Compliant:   len(missing) == 0,
-		MissingData: missing,
+		Required:     true,
+		Compliant:    len(missing) == 0,
+		MissingData:  missing,
 		VASPExchange: isCrossBorder,
 	}
 }
@@ -269,20 +274,20 @@ type BatchItem struct {
 }
 
 type BatchResult struct {
-	TotalItems   int     `json:"total_items"`
-	TotalAmount  float64 `json:"total_amount"`
-	Passed       int     `json:"passed"`
-	Blocked      int     `json:"blocked"`
-	Items        []BatchItemResult `json:"items"`
+	TotalItems  int               `json:"total_items"`
+	TotalAmount float64           `json:"total_amount"`
+	Passed      int               `json:"passed"`
+	Blocked     int               `json:"blocked"`
+	Items       []BatchItemResult `json:"items"`
 }
 
 type BatchItemResult struct {
-	Alias           string  `json:"alias"`
-	Amount          float64 `json:"amount"`
-	SanctionsCheck  string  `json:"sanctions_check"`
-	RateLimitCheck  string  `json:"rate_limit_check"`
-	TierLimitCheck  string  `json:"tier_limit_check"`
-	Status          string  `json:"status"` // passed, blocked_sanctions, blocked_limit, blocked_rate
+	Alias          string  `json:"alias"`
+	Amount         float64 `json:"amount"`
+	SanctionsCheck string  `json:"sanctions_check"`
+	RateLimitCheck string  `json:"rate_limit_check"`
+	TierLimitCheck string  `json:"tier_limit_check"`
+	Status         string  `json:"status"` // passed, blocked_sanctions, blocked_limit, blocked_rate
 }
 
 // ── HTTP Handlers ───────────────────────────────────────────────────────────
@@ -296,6 +301,7 @@ func handleSanctionsScreen(w http.ResponseWriter, r *http.Request) {
 		Name    string `json:"name"`
 		Country string `json:"country"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", 400)
 		return
@@ -320,11 +326,12 @@ func handleKYCTierCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		KYCTier       string  `json:"kyc_tier"`
-		Amount        float64 `json:"amount"`
-		DailyTotal    float64 `json:"daily_total"`
-		MonthlyTotal  float64 `json:"monthly_total"`
+		KYCTier      string  `json:"kyc_tier"`
+		Amount       float64 `json:"amount"`
+		DailyTotal   float64 `json:"daily_total"`
+		MonthlyTotal float64 `json:"monthly_total"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", 400)
 		return
@@ -368,6 +375,7 @@ func handleRateLimit(w http.ResponseWriter, r *http.Request) {
 		MaxRequests int    `json:"max_requests"`
 		WindowSec   int    `json:"window_sec"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", 400)
 		return
@@ -395,6 +403,7 @@ func handleTravelRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req TravelRulePayload
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", 400)
 		return
@@ -415,6 +424,7 @@ func handleBatchScreen(w http.ResponseWriter, r *http.Request) {
 		KYCTier  string      `json:"kyc_tier"`
 		Items    []BatchItem `json:"items"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", 400)
 		return
@@ -493,6 +503,9 @@ func initDB() {
 }
 
 func dbUpsert(id string, value interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return fmt.Errorf("db not connected")
 	}
@@ -500,7 +513,7 @@ func dbUpsert(id string, value interface{}) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(
+	_, err = db.ExecContext(ctx,
 		"INSERT INTO p2p_sanctions_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()",
 		id, data,
 	)
@@ -508,19 +521,25 @@ func dbUpsert(id string, value interface{}) error {
 }
 
 func dbGet(id string) ([]byte, error) {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return nil, fmt.Errorf("db not connected")
 	}
 	var data []byte
-	err := db.QueryRow("SELECT data FROM p2p_sanctions_state WHERE id = $1", id).Scan(&data)
+	err := db.QueryRowContext(ctx, "SELECT data FROM p2p_sanctions_state WHERE id = $1", id).Scan(&data)
 	return data, err
 }
 
 func loadFromDB() {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query("SELECT id, data FROM p2p_sanctions_state ORDER BY updated_at DESC LIMIT 1000")
+	rows, err := db.QueryContext(ctx, "SELECT id, data FROM p2p_sanctions_state ORDER BY updated_at DESC LIMIT 1000")
 	if err != nil {
 		log.Printf("WARN: failed to load state from DB: %v", err)
 		return
@@ -548,10 +567,12 @@ func main() {
 	// Load sanctions list
 	sanctionsList.Load()
 
-	// Refresh sanctions list every hour
+	// Refresh sanctions list every hour. Wave-14 perf: jitter the interval
+	// (1h ± up to 10m) so replicas do not hammer the upstream source in sync
+	// (thundering herd on restart/deploy).
 	go func() {
 		for {
-			time.Sleep(1 * time.Hour)
+			time.Sleep(time.Hour + time.Duration(rand.Int63n(int64(10*time.Minute))))
 			sanctionsList.Load()
 		}
 	}()
@@ -565,11 +586,12 @@ func main() {
 	mux.HandleFunc("/health", handleHealth)
 
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	sigCh := make(chan os.Signal, 1)

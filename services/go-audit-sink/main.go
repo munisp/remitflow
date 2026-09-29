@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,7 +14,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -37,11 +40,11 @@ type AuditEntry struct {
 
 // MakerCheckerAudit tracks dual-authorization decisions
 type MakerCheckerAudit struct {
-	RequestID     string `json:"request_id"`
-	OperationType string `json:"operation_type"`
-	MakerID       int    `json:"maker_id"`
-	CheckerID     int    `json:"checker_id"`
-	Decision      string `json:"decision"` // approved, rejected
+	RequestID     string  `json:"request_id"`
+	OperationType string  `json:"operation_type"`
+	MakerID       int     `json:"maker_id"`
+	CheckerID     int     `json:"checker_id"`
+	Decision      string  `json:"decision"` // approved, rejected
 	Amount        float64 `json:"amount"`
 	Timestamp     string  `json:"timestamp"`
 }
@@ -170,6 +173,7 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var entry AuditEntry
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
 		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
@@ -208,9 +212,9 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 	valid, position := store.VerifyChain()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"chain_valid":    valid,
+		"chain_valid":      valid,
 		"entries_verified": position,
-		"tamper_detected": !valid,
+		"tamper_detected":  !valid,
 	})
 }
 
@@ -221,6 +225,7 @@ func handleMakerChecker(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var mc MakerCheckerAudit
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&mc); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
@@ -255,6 +260,7 @@ func handleBreakGlass(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var bg BreakGlassAudit
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&bg); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
@@ -292,6 +298,7 @@ func handleCanaryTrip(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var ct CanaryTripAudit
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&ct); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
@@ -368,7 +375,28 @@ func main() {
 	log.Printf("[go-audit-sink] Storage backend: %s", getEnvOrDefault("AUDIT_STORAGE", "memory"))
 	log.Printf("[go-audit-sink] HMAC chain verification: enabled")
 
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
-		log.Fatal(err)
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	// Graceful shutdown (wave-14 hardening): drain in-flight requests on SIGINT/SIGTERM
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Printf("[go-audit-sink] Shutting down")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[go-audit-sink] shutdown error: %v", err)
 	}
 }

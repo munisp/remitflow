@@ -21,7 +21,7 @@ export default function BillPaymentScreen() {
   const { data: bills } = trpc.bills.list.useQuery();
   const payMutation = trpc.bills.pay.useMutation({
     onSuccess: () => { Alert.alert('Success', 'Bill paid successfully!'); setAccountNumber(''); setAmount(''); },
-    onError: (e) => Alert.alert('Error', e.message),
+    onError: (e: any) => Alert.alert('Error', e.message),
   });
   return (
     <View style={s.container}>

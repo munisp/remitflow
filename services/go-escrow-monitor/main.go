@@ -92,13 +92,13 @@ type EscrowMonitor struct {
 // ─── Overdue Milestone Detection ─────────────────────────────────────────────
 
 type OverdueMilestone struct {
-	MilestoneID  string
-	PlanID       string
-	BuyerID      int
-	BuilderID    int
-	Name         string
-	Deadline     time.Time
-	Status       string
+	MilestoneID string
+	PlanID      string
+	BuyerID     int
+	BuilderID   int
+	Name        string
+	Deadline    time.Time
+	Status      string
 }
 
 func (m *EscrowMonitor) scanOverdueMilestones(ctx context.Context) (int, error) {
@@ -274,12 +274,12 @@ func (m *EscrowMonitor) processAutoRefunds(ctx context.Context) (int, error) {
 	defer rows.Close()
 
 	type refundCase struct {
-		DisputeID    string
+		DisputeID      string
 		EscrowPlanDBID int
-		PlanID       string
-		BuyerID      int
-		TotalPaid    float64
-		TotalReleased float64
+		PlanID         string
+		BuyerID        int
+		TotalPaid      float64
+		TotalReleased  float64
 	}
 	var cases []refundCase
 	for rows.Next() {
@@ -556,10 +556,11 @@ func main() {
 	mux.HandleFunc("/scan", monitor.triggerScanHandler)
 
 	srv := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              ":" + cfg.Port,
+		Handler:           mux,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
 	}
 
 	// Graceful shutdown

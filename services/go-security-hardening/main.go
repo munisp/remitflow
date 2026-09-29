@@ -5,24 +5,24 @@
 package main
 
 import (
-	"database/sql"
-	"log/slog"
-	_ "github.com/lib/pq"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	_ "github.com/lib/pq"
 	"log"
+	"log/slog"
 	"math"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
-	"time"
-	"os/signal"
 	"syscall"
-	"context"
+	"time"
 )
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -93,10 +93,14 @@ func (s *RateLimitStore) GetBucket(ip string) *TokenBucket {
 	defer s.mu.Unlock()
 	b = newTokenBucket(float64(maxBurstSize), float64(maxRequestsMin)/60.0)
 	s.buckets[ip] = b
-	if db != nil { go func() { _ = dbUpsert("ratelimit:"+ip, b) }() }
+	if db != nil {
+		go func() { _ = dbUpsert("ratelimit:"+ip, b) }()
+	}
 	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
 	if db != nil {
-		go func() { _ = dbLogEvent("GetBucket.state_change", map[string]string{"service": "go-security-hardening", "ip": ip}) }()
+		go func() {
+			_ = dbLogEvent("GetBucket.state_change", map[string]string{"service": "go-security-hardening", "ip": ip})
+		}()
 	}
 	return b
 }
@@ -109,8 +113,8 @@ type AttackPattern struct {
 }
 
 var knownAttackPatterns = []struct {
-	Pattern  string
-	Attack   AttackPattern
+	Pattern string
+	Attack  AttackPattern
 }{
 	{"../", AttackPattern{"PATH_TRAVERSAL", "Directory traversal attempt", "high"}},
 	{"<script", AttackPattern{"XSS", "Cross-site scripting attempt", "high"}},
@@ -317,6 +321,7 @@ func attackScanHandler(w http.ResponseWriter, r *http.Request) {
 		Payload string `json:"payload"`
 		Source  string `json:"source"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
@@ -359,6 +364,7 @@ func fraudCheckHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req FinancialRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
@@ -459,11 +465,14 @@ func initDB() error {
 
 // dbUpsert stores or updates a record in the service state table
 func dbUpsert(id string, data interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO security_hardening_state (id, data, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
@@ -473,8 +482,11 @@ func dbUpsert(id string, data interface{}) error {
 
 // dbGet retrieves a record from the service state table
 func dbGet(id string, dest interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM security_hardening_state WHERE id = $1", id).Scan(&jsonData)
+	err := db.QueryRowContext(ctx, "SELECT data FROM security_hardening_state WHERE id = $1", id).Scan(&jsonData)
 	if err != nil {
 		return err
 	}
@@ -483,7 +495,10 @@ func dbGet(id string, dest interface{}) error {
 
 // dbList retrieves all records from the service state table
 func dbList(limit int) ([]json.RawMessage, error) {
-	rows, err := db.Query("SELECT data FROM security_hardening_state ORDER BY updated_at DESC LIMIT $1", limit)
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT data FROM security_hardening_state ORDER BY updated_at DESC LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -501,22 +516,27 @@ func dbList(limit int) ([]json.RawMessage, error) {
 
 // dbLogEvent stores an event in the events table
 func dbLogEvent(eventType string, payload interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("INSERT INTO security_hardening_events (event_type, payload) VALUES ($1, $2)",
+	_, err = db.ExecContext(ctx, "INSERT INTO security_hardening_events (event_type, payload) VALUES ($1, $2)",
 		eventType, jsonData)
 	return err
 }
 
-
 // loadFromDB populates in-memory state from database on startup (write-through cache warm)
 func loadFromDB() {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query("SELECT id, data FROM security_hardening_state ORDER BY updated_at DESC LIMIT 1000")
+	rows, err := db.QueryContext(ctx, "SELECT id, data FROM security_hardening_state ORDER BY updated_at DESC LIMIT 1000")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
@@ -569,11 +589,12 @@ func main() {
 
 	addr := ":" + port
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      panicRecoveryMiddleware(mux),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              addr,
+		Handler:           panicRecoveryMiddleware(mux),
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	sigCh := make(chan os.Signal, 1)

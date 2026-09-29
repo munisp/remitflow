@@ -108,7 +108,7 @@ def run_accrual_cycle() -> dict:
                 "[interest-accrual] DATABASE_URL is not set; refusing to connect "
                 "with default credentials. Configure DATABASE_URL explicitly."
             )
-        conn = psycopg2.connect(PG_URL)
+        conn = psycopg2.connect(PG_URL, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
     except ImportError:
         # Fallback: use urllib to call the Node.js API
         return _run_accrual_via_api()

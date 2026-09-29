@@ -6,10 +6,10 @@
 // in real-time without capital lock-up.
 //
 // Settlement Flow:
-//   1. Sender deposits source currency (e.g. USD) → on-ramp to USDC
-//   2. USDC is routed via the cheapest liquidity path (AMM / CEX / OTC)
-//   3. USDC is off-ramped to destination currency (e.g. NGN) in real-time
-//   4. Recipient receives local currency — no pre-funding required
+//  1. Sender deposits source currency (e.g. USD) → on-ramp to USDC
+//  2. USDC is routed via the cheapest liquidity path (AMM / CEX / OTC)
+//  3. USDC is off-ramped to destination currency (e.g. NGN) in real-time
+//  4. Recipient receives local currency — no pre-funding required
 //
 // Innovations:
 //   - Multi-bridge routing: Circle, Stellar, Ripple XRP, Polygon USDC
@@ -48,7 +48,7 @@ func getEnv(k, d string) string {
 }
 
 var (
-	port               = getEnv("PORT", "8250")
+	port                = getEnv("PORT", "8250")
 	liquidityManagerURL = getEnv("LIQUIDITY_MANAGER_URL", "http://go-liquidity-manager:8133")
 	stablecoinSettleURL = getEnv("STABLECOIN_SETTLEMENT_URL", "http://go-stablecoin-settlement:8200")
 	tigerbeetleURL      = getEnv("TIGERBEETLE_BRIDGE_URL", "http://rust-tigerbeetle-bridge:8090")
@@ -72,23 +72,23 @@ const (
 type ODLProvider string
 
 const (
-	ProviderCircle   ODLProvider = "CIRCLE"
-	ProviderRipple   ODLProvider = "RIPPLE"
-	ProviderStellar  ODLProvider = "STELLAR"
-	ProviderPolygon  ODLProvider = "POLYGON"
+	ProviderCircle  ODLProvider = "CIRCLE"
+	ProviderRipple  ODLProvider = "RIPPLE"
+	ProviderStellar ODLProvider = "STELLAR"
+	ProviderPolygon ODLProvider = "POLYGON"
 )
 
 // ODLSettlementStatus represents the lifecycle state of an ODL settlement.
 type ODLSettlementStatus string
 
 const (
-	StatusPending     ODLSettlementStatus = "PENDING"
-	StatusOnRamping   ODLSettlementStatus = "ON_RAMPING"
-	StatusBridging    ODLSettlementStatus = "BRIDGING"
-	StatusOffRamping  ODLSettlementStatus = "OFF_RAMPING"
-	StatusCompleted   ODLSettlementStatus = "COMPLETED"
-	StatusFailed      ODLSettlementStatus = "FAILED"
-	StatusSlippage    ODLSettlementStatus = "FAILED_SLIPPAGE"
+	StatusPending    ODLSettlementStatus = "PENDING"
+	StatusOnRamping  ODLSettlementStatus = "ON_RAMPING"
+	StatusBridging   ODLSettlementStatus = "BRIDGING"
+	StatusOffRamping ODLSettlementStatus = "OFF_RAMPING"
+	StatusCompleted  ODLSettlementStatus = "COMPLETED"
+	StatusFailed     ODLSettlementStatus = "FAILED"
+	StatusSlippage   ODLSettlementStatus = "FAILED_SLIPPAGE"
 	// StatusUnavailable is the honest terminal state for settlement requests
 	// whose rail adapter is not implemented. It MUST be used instead of
 	// COMPLETED whenever no real on-chain/rail execution occurred.
@@ -109,42 +109,42 @@ type CorridorRoute struct {
 
 // ODLQuote is a real-time quote for an ODL settlement.
 type ODLQuote struct {
-	QuoteID          string      `json:"quote_id"`
-	FromCurrency     string      `json:"from_currency"`
-	ToCurrency       string      `json:"to_currency"`
-	SendAmount       float64     `json:"send_amount"`
-	ReceiveAmount    float64     `json:"receive_amount"`
-	BridgeAsset      BridgeAsset `json:"bridge_asset"`
-	Provider         ODLProvider `json:"provider"`
-	ExchangeRate     float64     `json:"exchange_rate"`
-	BridgeRate       float64     `json:"bridge_rate"`
-	TotalFeePct      float64     `json:"total_fee_pct"`
-	TotalFeeAmount   float64     `json:"total_fee_amount"`
-	SlippagePct      float64     `json:"slippage_pct"`
-	ExpiresAt        time.Time   `json:"expires_at"`
-	LockedRate       bool        `json:"locked_rate"`
+	QuoteID        string      `json:"quote_id"`
+	FromCurrency   string      `json:"from_currency"`
+	ToCurrency     string      `json:"to_currency"`
+	SendAmount     float64     `json:"send_amount"`
+	ReceiveAmount  float64     `json:"receive_amount"`
+	BridgeAsset    BridgeAsset `json:"bridge_asset"`
+	Provider       ODLProvider `json:"provider"`
+	ExchangeRate   float64     `json:"exchange_rate"`
+	BridgeRate     float64     `json:"bridge_rate"`
+	TotalFeePct    float64     `json:"total_fee_pct"`
+	TotalFeeAmount float64     `json:"total_fee_amount"`
+	SlippagePct    float64     `json:"slippage_pct"`
+	ExpiresAt      time.Time   `json:"expires_at"`
+	LockedRate     bool        `json:"locked_rate"`
 }
 
 // ODLSettlement tracks the full lifecycle of an ODL settlement.
 type ODLSettlement struct {
-	SettlementID    string              `json:"settlement_id"`
-	TransferID      string              `json:"transfer_id"`
-	QuoteID         string              `json:"quote_id"`
-	Status          ODLSettlementStatus `json:"status"`
-	FromCurrency    string              `json:"from_currency"`
-	ToCurrency      string              `json:"to_currency"`
-	SendAmount      float64             `json:"send_amount"`
-	ReceiveAmount   float64             `json:"receive_amount"`
-	BridgeAsset     BridgeAsset         `json:"bridge_asset"`
-	Provider        ODLProvider         `json:"provider"`
-	OnRampTxID      string              `json:"on_ramp_tx_id,omitempty"`
-	BridgeTxHash    string              `json:"bridge_tx_hash,omitempty"`
-	OffRampTxID     string              `json:"off_ramp_tx_id,omitempty"`
-	ActualSlippage  float64             `json:"actual_slippage_pct,omitempty"`
-	CreatedAt       time.Time           `json:"created_at"`
-	CompletedAt     *time.Time          `json:"completed_at,omitempty"`
-	FailureReason   string              `json:"failure_reason,omitempty"`
-	AuditTrail      []AuditEvent        `json:"audit_trail"`
+	SettlementID   string              `json:"settlement_id"`
+	TransferID     string              `json:"transfer_id"`
+	QuoteID        string              `json:"quote_id"`
+	Status         ODLSettlementStatus `json:"status"`
+	FromCurrency   string              `json:"from_currency"`
+	ToCurrency     string              `json:"to_currency"`
+	SendAmount     float64             `json:"send_amount"`
+	ReceiveAmount  float64             `json:"receive_amount"`
+	BridgeAsset    BridgeAsset         `json:"bridge_asset"`
+	Provider       ODLProvider         `json:"provider"`
+	OnRampTxID     string              `json:"on_ramp_tx_id,omitempty"`
+	BridgeTxHash   string              `json:"bridge_tx_hash,omitempty"`
+	OffRampTxID    string              `json:"off_ramp_tx_id,omitempty"`
+	ActualSlippage float64             `json:"actual_slippage_pct,omitempty"`
+	CreatedAt      time.Time           `json:"created_at"`
+	CompletedAt    *time.Time          `json:"completed_at,omitempty"`
+	FailureReason  string              `json:"failure_reason,omitempty"`
+	AuditTrail     []AuditEvent        `json:"audit_trail"`
 }
 
 // AuditEvent records a single step in the ODL settlement lifecycle.
@@ -172,11 +172,11 @@ var store = &ODLStore{
 
 // Metrics
 var (
-	totalSettlements    atomic.Int64
+	totalSettlements      atomic.Int64
 	successfulSettlements atomic.Int64
-	failedSettlements   atomic.Int64
-	totalSlippageEvents atomic.Int64
-	totalVolumeUSD      atomic.Int64 // stored as cents
+	failedSettlements     atomic.Int64
+	totalSlippageEvents   atomic.Int64
+	totalVolumeUSD        atomic.Int64 // stored as cents
 )
 
 // ── Corridor Route Matrix ─────────────────────────────────────────────────────
@@ -384,6 +384,7 @@ func handleInitiateSettlement(w http.ResponseWriter, r *http.Request) {
 		TransferID string `json:"transfer_id"`
 		UserID     string `json:"user_id"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 		return
@@ -574,11 +575,12 @@ func main() {
 	)
 
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              addr,
+		Handler:           mux,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	if err := srv.ListenAndServe(); err != nil {

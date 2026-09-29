@@ -37,7 +37,6 @@ import {
   createAccounts,
   createTransfers,
   postPendingTransfer,
-  voidPendingTransfer,
   lookupAccounts,
   compositeAccountId,
   TB_LEDGERS,
@@ -202,7 +201,17 @@ function legRecord(
  * constraints on those accounts would make every posting fail before any
  * capitalization exists. App-layer guarded updates enforce stock limits.
  */
+// W14: in-process memo of successful provisioning per (tenant, currency-set),
+// 5 min TTL. createAccounts is idempotent server-side, so skipping repeat calls
+// is safe; a TB restart loses nothing because the next call after TTL expiry
+// re-provisions. Fail-closed: only SUCCESSFUL provisioning is memoized.
+const ENSURE_TTL_MS = 5 * 60 * 1000;
+const ensureMemo = new Map<string, number>(); // key -> epoch ms of success
+
 export async function ensureBdcAccounts(tenantId: number, currencies: string[] = ["USD"]): Promise<void> {
+  const memoKey = `${tenantId}:${currencies.map((c) => c.toUpperCase()).sort().join(",")}`;
+  const memoizedAt = ensureMemo.get(memoKey);
+  if (memoizedAt && Date.now() - memoizedAt < ENSURE_TTL_MS) return;
   const accounts: CreateAccountRequest[] = [];
   const push = (id: bigint, currency: string, offset: number, flags: number) =>
     accounts.push({
@@ -245,6 +254,7 @@ export async function ensureBdcAccounts(tenantId: number, currencies: string[] =
 
   try {
     await createAccounts(accounts);
+    ensureMemo.set(memoKey, Date.now());
   } catch (err) {
     tbUnavailable("ensureBdcAccounts", err);
   }
@@ -495,23 +505,85 @@ export async function reversePost(
   idempotencyKey: string,
   originalTbIds: TbLegRecord[],
 ): Promise<TbLegRecord[]> {
-  const out: TbLegRecord[] = [];
-  for (const leg of originalTbIds) {
+  // W14: batch — all VOID legs go out in ONE createTransfers array call and all
+  // REV legs in another (was: one TB round trip per leg). Per-leg result-code
+  // attribution is preserved via createTransfers' index-aligned results.
+  const out: Array<TbLegRecord | null> = new Array(originalTbIds.length);
+  const voidJobs: Array<{ idx: number; leg: TbLegRecord; req: CreateTransferRequest }> = [];
+  const revJobs: Array<{ idx: number; leg: TbLegRecord; req: CreateTransferRequest }> = [];
+
+  originalTbIds.forEach((leg, idx) => {
     if (leg.phase === "pending") {
-      const voidId = bdcTransferId(idempotencyKey, `${leg.leg}:void`);
-      try {
-        await voidPendingTransfer(voidId, BigInt(leg.transferId), leg.currency);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (!/exists|pending_transfer_has_already_been_voided/i.test(msg)) {
-          tbUnavailable(`reversePost(void ${leg.leg})`, err);
-        }
+      voidJobs.push({
+        idx,
+        leg,
+        req: {
+          id: bdcTransferId(idempotencyKey, `${leg.leg}:void`),
+          debitAccountId: 0n,
+          creditAccountId: 0n,
+          amount: 0n,
+          ledger: leg.ledger,
+          code: 0,
+          flags: TB_TRANSFER_FLAGS.VOID_PENDING_TRANSFER,
+          pendingId: BigInt(leg.transferId),
+        },
+      });
+    } else if (leg.phase === "posted") {
+      revJobs.push({
+        idx,
+        leg,
+        req: {
+          id: bdcTransferId(idempotencyKey, `${leg.leg}:rev`),
+          debitAccountId: BigInt(leg.creditAccountId),
+          creditAccountId: BigInt(leg.debitAccountId),
+          amount: BigInt(leg.amountMinor),
+          ledger: leg.ledger,
+          code: leg.code,
+          flags: 0,
+        },
+      });
+    } else {
+      out[idx] = leg; // already voided/reversed — idempotent replay
+    }
+  });
+
+  if (voidJobs.length > 0) {
+    let results;
+    try {
+      results = await createTransfers(voidJobs.map((j) => j.req));
+    } catch (err) {
+      tbUnavailable("reversePost(void batch)", err);
+    }
+    voidJobs.forEach((job, i) => {
+      const r = results![i];
+      // `exists` / already-voided on a deterministic id = idempotent replay.
+      if (!r.success && !/exists|pending_transfer_has_already_been_voided/i.test(r.error ?? "")) {
+        tbUnavailable(`reversePost(void ${job.leg.leg})`, new Error(`${r.error} (code ${r.errorCode})`));
       }
-      out.push({ ...leg, phase: "voided" });
+      out[job.idx] = job.leg; // phase updated below when records are emitted
+    });
+  }
+
+  if (revJobs.length > 0) {
+    // createTransfersIdempotent treats per-leg `exists` as replay-success and
+    // throws with the exact failing transfer ids/codes on any real rejection.
+    await createTransfersIdempotent(
+      "reversePost(rev batch)",
+      revJobs.map((j) => j.req),
+    );
+    for (const job of revJobs) out[job.idx] = job.leg;
+  }
+
+  // Emit records in original leg order (originals re-phased + reversal entries).
+  const emitted: TbLegRecord[] = [];
+  originalTbIds.forEach((leg, idx) => {
+    if (leg.phase === "pending") {
+      const voidReq = voidJobs.find((j) => j.idx === idx)!.req;
+      emitted.push({ ...leg, phase: "voided" });
       // Mirrorable record of the VOID transfer itself.
-      out.push({
+      emitted.push({
         leg: `${leg.leg}:void`,
-        transferId: voidId.toString(),
+        transferId: voidReq.id.toString(),
         debitAccountId: leg.debitAccountId,
         creditAccountId: leg.creditAccountId,
         amountMinor: "0",
@@ -521,23 +593,14 @@ export async function reversePost(
         phase: "reversal",
       });
     } else if (leg.phase === "posted") {
-      const revReq: CreateTransferRequest = {
-        id: bdcTransferId(idempotencyKey, `${leg.leg}:rev`),
-        debitAccountId: BigInt(leg.creditAccountId),
-        creditAccountId: BigInt(leg.debitAccountId),
-        amount: BigInt(leg.amountMinor),
-        ledger: leg.ledger,
-        code: leg.code,
-        flags: 0,
-      };
-      await createTransfersIdempotent(`reversePost(rev ${leg.leg})`, [revReq]);
-      out.push({ ...leg, phase: "reversed" });
-      out.push(legRecord(`${leg.leg}:reversal`, revReq, leg.currency, "reversal"));
+      const revReq = revJobs.find((j) => j.idx === idx)!.req;
+      emitted.push({ ...leg, phase: "reversed" });
+      emitted.push(legRecord(`${leg.leg}:reversal`, revReq, leg.currency, "reversal"));
     } else {
-      out.push(leg); // already voided/reversed — idempotent replay
+      emitted.push(leg);
     }
-  }
-  return out;
+  });
+  return emitted;
 }
 
 // ─── PG mirror (ledger_entries, migration 0063 — fits WITHOUT modification) ───

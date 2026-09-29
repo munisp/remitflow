@@ -29,13 +29,13 @@
 package main
 
 import (
-	"database/sql"
-	"log/slog"
-	_ "github.com/lib/pq"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	_ "github.com/lib/pq"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -48,25 +48,24 @@ import (
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-
 var _processStartTime = time.Now()
 
 var db *sql.DB
 
 type Config struct {
-	Port              string
-	BRICSPayEndpoint  string
-	DCMSEndpoint      string
-	MojaloopHubURL    string
-	KafkaBrokers      string
-	DaprHTTPPort      string
-	FluvioGatewayURL  string
-	TemporalHostPort  string
-	RedisAddr         string
-	TigerBeetleAddr   string
-	OpenSearchURL     string
-	LakehouseURL      string
-	ServiceName       string
+	Port             string
+	BRICSPayEndpoint string
+	DCMSEndpoint     string
+	MojaloopHubURL   string
+	KafkaBrokers     string
+	DaprHTTPPort     string
+	FluvioGatewayURL string
+	TemporalHostPort string
+	RedisAddr        string
+	TigerBeetleAddr  string
+	OpenSearchURL    string
+	LakehouseURL     string
+	ServiceName      string
 }
 
 func loadConfig() Config {
@@ -119,34 +118,34 @@ type BRICSPayTransferRequest struct {
 	SendAmount      float64       `json:"sendAmount" binding:"required,gt=0"`
 	SendCurrency    BRICSCurrency `json:"sendCurrency" binding:"required"`
 	ReceiveCurrency BRICSCurrency `json:"receiveCurrency" binding:"required"`
-	SenderVPA       string        `json:"senderVpa"`       // Virtual Payment Address
+	SenderVPA       string        `json:"senderVpa"` // Virtual Payment Address
 	ReceiverVPA     string        `json:"receiverVpa" binding:"required"`
 	SenderName      string        `json:"senderName"`
 	ReceiverName    string        `json:"receiverName"`
-	Purpose         string        `json:"purpose"`         // ISO 20022 purpose code
+	Purpose         string        `json:"purpose"` // ISO 20022 purpose code
 	UserID          string        `json:"userId"`
 	IdempotencyKey  string        `json:"idempotencyKey" binding:"required"`
 }
 
 // BRICSPayTransferResponse is the response to the RemitFlow core
 type BRICSPayTransferResponse struct {
-	TransferID      string  `json:"transferId"`
-	DCMSMessageID   string  `json:"dcmsMessageId"`
-	Status          string  `json:"status"`
-	ReceiveAmount   float64 `json:"receiveAmount"`
-	ExchangeRate    float64 `json:"exchangeRate"`
-	SettlementTime  string  `json:"settlementTime"`
-	MojaloopRouted  bool    `json:"mojaloopRouted"`
-	Message         string  `json:"message"`
+	TransferID     string  `json:"transferId"`
+	DCMSMessageID  string  `json:"dcmsMessageId"`
+	Status         string  `json:"status"`
+	ReceiveAmount  float64 `json:"receiveAmount"`
+	ExchangeRate   float64 `json:"exchangeRate"`
+	SettlementTime string  `json:"settlementTime"`
+	MojaloopRouted bool    `json:"mojaloopRouted"`
+	Message        string  `json:"message"`
 }
 
 // DCMSMessage represents a BRICS DCMS ISO 20022 pacs.008 message
 type DCMSMessage struct {
-	MsgID       string `json:"msgId"`
-	CreDtTm     string `json:"creDtTm"`
-	NbOfTxs     int    `json:"nbOfTxs"`
-	SttlmMtd    string `json:"sttlmMtd"` // CLRG (clearing) or INDA (instructed agent)
-	InstrAmt    struct {
+	MsgID    string `json:"msgId"`
+	CreDtTm  string `json:"creDtTm"`
+	NbOfTxs  int    `json:"nbOfTxs"`
+	SttlmMtd string `json:"sttlmMtd"` // CLRG (clearing) or INDA (instructed agent)
+	InstrAmt struct {
 		Ccy string  `json:"ccy"`
 		Amt float64 `json:"amt"`
 	} `json:"instrAmt"`
@@ -158,8 +157,8 @@ type DCMSMessage struct {
 		Nm  string `json:"nm"`
 		VPA string `json:"vpa"`
 	} `json:"cdtr"`
-	Purp    string `json:"purp"`
-	RmtInf  string `json:"rmtInf"`
+	Purp   string `json:"purp"`
+	RmtInf string `json:"rmtInf"`
 }
 
 // ── Middleware helpers ────────────────────────────────────────────────────────
@@ -278,14 +277,14 @@ func routeViaMojaloop(cfg Config, req BRICSPayTransferRequest) bool {
 		return false
 	}
 	payload, _ := json.Marshal(map[string]any{
-		"transferId":   req.TransferID,
-		"payerFsp":     "remitflow",
-		"payeeFsp":     req.ReceiverCountry + "-bank",
-		"amount":       fmt.Sprintf("%.2f", req.SendAmount),
-		"currency":     string(req.SendCurrency),
-		"ilpPacket":    "BRICSPAY_ROUTED",
-		"condition":    uuid.New().String(),
-		"expiration":   time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339),
+		"transferId": req.TransferID,
+		"payerFsp":   "remitflow",
+		"payeeFsp":   req.ReceiverCountry + "-bank",
+		"amount":     fmt.Sprintf("%.2f", req.SendAmount),
+		"currency":   string(req.SendCurrency),
+		"ilpPacket":  "BRICSPAY_ROUTED",
+		"condition":  uuid.New().String(),
+		"expiration": time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339),
 	})
 	resp, err := httpClient.Post(cfg.MojaloopHubURL+"/transfers", "application/json", nil)
 	if err != nil {
@@ -340,9 +339,9 @@ func initiateTransfer(cfg Config) gin.HandlerFunc {
 		// 3. Build DCMS ISO 20022 pacs.008 message
 		msgID := uuid.New().String()
 		dcmsMsg := DCMSMessage{
-			MsgID:   msgID,
-			CreDtTm: time.Now().UTC().Format(time.RFC3339),
-			NbOfTxs: 1,
+			MsgID:    msgID,
+			CreDtTm:  time.Now().UTC().Format(time.RFC3339),
+			NbOfTxs:  1,
 			SttlmMtd: "CLRG",
 		}
 		dcmsMsg.InstrAmt.Ccy = string(req.SendCurrency)
@@ -361,7 +360,7 @@ func initiateTransfer(cfg Config) gin.HandlerFunc {
 		dcmsReq.Header.Set("X-BRICS-Source", "remitflow")
 		_ = dcmsBody
 		dcmsResp, dcmsErr := httpClient.Do(dcmsReq)
-		
+
 		status := "submitted"
 		receiveAmount := req.SendAmount * 0.98 // mock FX rate
 		if dcmsErr != nil {
@@ -470,11 +469,11 @@ func getSupportedCorridors() gin.HandlerFunc {
 func healthCheck(cfg Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"service":         cfg.ServiceName,
-			"status":          "healthy",
-			"rail":            "bricspay",
-			"dcmsEndpoint":    cfg.DCMSEndpoint,
-			"mojaloopBridge":  cfg.MojaloopHubURL,
+			"service":        cfg.ServiceName,
+			"status":         "healthy",
+			"rail":           "bricspay",
+			"dcmsEndpoint":   cfg.DCMSEndpoint,
+			"mojaloopBridge": cfg.MojaloopHubURL,
 			"middleware": map[string]string{
 				"kafka":       cfg.KafkaBrokers,
 				"dapr":        "port:" + cfg.DaprHTTPPort,
@@ -489,7 +488,6 @@ func healthCheck(cfg Config) gin.HandlerFunc {
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
-
 
 func initDB() error {
 	dbURL := os.Getenv("DATABASE_URL")
@@ -533,11 +531,14 @@ func initDB() error {
 
 // dbUpsert stores or updates a record in the service state table
 func dbUpsert(id string, data interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO bricspay_adapter_state (id, data, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
@@ -547,8 +548,11 @@ func dbUpsert(id string, data interface{}) error {
 
 // dbGet retrieves a record from the service state table
 func dbGet(id string, dest interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var jsonData []byte
-	err := db.QueryRow("SELECT data FROM bricspay_adapter_state WHERE id = $1", id).Scan(&jsonData)
+	err := db.QueryRowContext(ctx, "SELECT data FROM bricspay_adapter_state WHERE id = $1", id).Scan(&jsonData)
 	if err != nil {
 		return err
 	}
@@ -557,7 +561,10 @@ func dbGet(id string, dest interface{}) error {
 
 // dbList retrieves all records from the service state table
 func dbList(limit int) ([]json.RawMessage, error) {
-	rows, err := db.Query("SELECT data FROM bricspay_adapter_state ORDER BY updated_at DESC LIMIT $1", limit)
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT data FROM bricspay_adapter_state ORDER BY updated_at DESC LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -575,22 +582,27 @@ func dbList(limit int) ([]json.RawMessage, error) {
 
 // dbLogEvent stores an event in the events table
 func dbLogEvent(eventType string, payload interface{}) error {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("INSERT INTO bricspay_adapter_events (event_type, payload) VALUES ($1, $2)",
+	_, err = db.ExecContext(ctx, "INSERT INTO bricspay_adapter_events (event_type, payload) VALUES ($1, $2)",
 		eventType, jsonData)
 	return err
 }
 
-
 // loadFromDB populates in-memory state from database on startup (write-through cache warm)
 func loadFromDB() {
+	// bounded DB context (wave-14 perf): 5s ceiling per helper call
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if db == nil {
 		return
 	}
-	rows, err := db.Query("SELECT id, data FROM bricspay_adapter_state ORDER BY updated_at DESC LIMIT 1000")
+	rows, err := db.QueryContext(ctx, "SELECT id, data FROM bricspay_adapter_state ORDER BY updated_at DESC LIMIT 1000")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
@@ -630,7 +642,7 @@ func main() {
 	r.POST("/transfers", initiateTransfer(cfg))
 	r.GET("/transfers/:transferId/status", getTransferStatus(cfg))
 
-	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
+	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() {
 		log.Printf("[BRICSPay] Adapter ready on :%s | DCMS: %s | Mojaloop: %s",
 			cfg.Port, cfg.DCMSEndpoint, cfg.MojaloopHubURL)
@@ -639,7 +651,6 @@ func main() {
 		}
 	}()
 
-	
 	// Periodic state persistence to PostgreSQL (write-through cache)
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)

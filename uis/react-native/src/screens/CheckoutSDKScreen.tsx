@@ -10,7 +10,7 @@ export default function CheckoutSDKScreen() {
   const { data, isLoading, refetch } = trpc.checkout.apiKeys.useQuery();
   const createMutation = trpc.checkout.createKey.useMutation({
     onSuccess: () => { setShowCreate(false); setKeyName(''); refetch(); },
-    onError: (e) => Alert.alert('Error', e.message),
+    onError: (e: any) => Alert.alert('Error', e.message),
   });
   const copy = (text: string) => { Clipboard.setString(text); Alert.alert('Copied', 'API key copied to clipboard'); };
   return (

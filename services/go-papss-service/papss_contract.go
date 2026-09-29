@@ -79,8 +79,8 @@ func getPAPSSAPIURL() string {
 }
 
 func handleInitiateTransfer(c *gin.Context) { initiateTransfer(loadConfig())(c) }
-func handleListCorridors(c *gin.Context)   { getCorridors()(c) }
-func handleTriggerNetting(c *gin.Context)  { triggerNetting(loadConfig())(c) }
+func handleListCorridors(c *gin.Context)    { getCorridors()(c) }
+func handleTriggerNetting(c *gin.Context)   { triggerNetting(loadConfig())(c) }
 
 func handleGetTransfer(c *gin.Context) {
 	c.JSON(http.StatusNotFound, gin.H{"error": "transfer not found", "transfer_id": c.Param("id")})

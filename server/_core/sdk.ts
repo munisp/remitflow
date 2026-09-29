@@ -296,7 +296,10 @@ class SDKServer {
     }
 
     const signedInAt = new Date();
-    let user = await db.getUserByOpenId(claims.sub);
+    // W14-C1: single-RTT auth fetch — user row LEFT JOIN user_lockouts
+    // (fresh, uncached: lockout is an enforcement decision).
+    let authCtx = await db.getUserAuthContextByOpenId(claims.sub);
+    let user = authCtx?.user;
     if (!user) {
       try {
         await db.upsertUser({
@@ -306,7 +309,8 @@ class SDKServer {
           loginMethod: "keycloak",
           lastSignedIn: signedInAt,
         });
-        user = await db.getUserByOpenId(claims.sub);
+        authCtx = await db.getUserAuthContextByOpenId(claims.sub);
+        user = authCtx?.user;
       } catch (error) {
         logger.error({ err: error instanceof Error ? error.message : String(error) }, "[Auth] Failed to sync Keycloak user");
         throw ForbiddenError("Failed to sync user info");
@@ -314,15 +318,27 @@ class SDKServer {
     }
     if (!user) throw ForbiddenError("User not found");
 
-    await this.enforceAccountLockout(user);
-    await db.upsertUser({ openId: user.openId, lastSignedIn: signedInAt });
+    await this.enforceAccountLockout(user, authCtx ? authCtx.lockExpiresAt : undefined);
+    // W14-C1: lastSignedIn bump is throttled (≤1 write/5min/user) and
+    // fire-and-forget — it never blocks or fails the request path.
+    db.touchLastSignedIn(user.openId);
     return user;
   }
 
   /** DB-persisted account lockout enforcement shared by all auth paths. */
-  private async enforceAccountLockout(user: User): Promise<void> {
+  private async enforceAccountLockout(user: User, prefetchedLockExpiresAt?: Date | string | null): Promise<void> {
     try {
-      const lockStatus = await db.checkDbUserLockout(user.id);
+      // W14-C1: when the caller already JOINed user_lockouts into the user
+      // fetch, evaluate the pre-fetched expiry (0 extra RTTs); otherwise fall
+      // back to the standalone DB check. Fail-closed semantics unchanged.
+      const lockStatus = prefetchedLockExpiresAt !== undefined
+        ? db.evaluateLockExpiry(prefetchedLockExpiresAt)
+        : await db.checkDbUserLockout(user.id);
+      if (prefetchedLockExpiresAt && !lockStatus.locked) {
+        // Expired lock row — clear opportunistically (was an awaited delete
+        // inside checkDbUserLockout; the expiry evaluation is authoritative).
+        db.clearExpiredLockout(user.id);
+      }
       if (lockStatus.locked) {
         const { emitSecurityEvent } = await import("../security.attacks.js");
         emitSecurityEvent({
@@ -376,7 +392,10 @@ class SDKServer {
 
     const sessionUserId = session.openId;
     const signedInAt = new Date();
-    let user = await db.getUserByOpenId(sessionUserId);
+    // W14-C1: single-RTT auth fetch — user row LEFT JOIN user_lockouts
+    // (fresh, uncached: lockout is an enforcement decision).
+    let authCtx = await db.getUserAuthContextByOpenId(sessionUserId);
+    let user = authCtx?.user;
 
     // If user not in DB, sync from OAuth server automatically
     if (!user) {
@@ -390,7 +409,8 @@ class SDKServer {
           loginMethod: userInfo.loginMethod ?? userInfo.platform ?? null,
           lastSignedIn: signedInAt,
         });
-        user = await db.getUserByOpenId(userInfo.openId);
+        authCtx = await db.getUserAuthContextByOpenId(userInfo.openId);
+        user = authCtx?.user;
       } catch (error) {
         logger.error({ err: error instanceof Error ? error.message : String(error) }, "[Auth] Failed to sync user from OAuth");
         throw ForbiddenError("Failed to sync user info");
@@ -402,12 +422,12 @@ class SDKServer {
     }
 
     // ─── v148: Enforce user-ID-based account lockout (DB-persisted) ────────────
-    await this.enforceAccountLockout(user);
+    await this.enforceAccountLockout(user, authCtx ? authCtx.lockExpiresAt : undefined);
 
-    await db.upsertUser({
-      openId: user.openId,
-      lastSignedIn: signedInAt,
-    });
+    // W14-C1: lastSignedIn bump is throttled (≤1 write/5min/user) and
+    // fire-and-forget — previously a full upsertUser (~4 RTTs) was awaited on
+    // EVERY authenticated request.
+    db.touchLastSignedIn(user.openId);
 
     return user;
   }

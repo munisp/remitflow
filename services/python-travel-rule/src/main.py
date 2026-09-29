@@ -27,6 +27,27 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
+import httpx
+
+# ── Shared HTTP clients (SPEC-wave14 §4.6) ────────────────────────────────────
+# Timeout-keyed pool of module-level AsyncClients: outbound calls previously
+# constructed a fresh client per request (TCP/TLS + pool setup each time).
+# Clients live for the process lifetime; pools are capped at 100 connections.
+_http_clients: dict = {}
+
+
+def get_http_client(timeout: float = 5.0, **kwargs) -> httpx.AsyncClient:
+    key = (float(timeout), tuple(sorted(kwargs.items())))
+    client = _http_clients.get(key)
+    if client is None:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout),
+            limits=httpx.Limits(max_connections=100),
+            **kwargs,
+        )
+        _http_clients[key] = client
+    return client
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -154,7 +175,6 @@ async def submit_to_notabene(report: TravelRuleReport) -> dict:
         logger.warning("[TravelRule] Notabene API key not configured — simulating submission")
         return {"status": "simulated", "provider_ref": f"NB-{report.tx_ref[:8]}"}
 
-    import httpx
     payload = {
         "transactionAsset": report.stablecoin,
         "transactionAmount": str(report.amount_usd),
@@ -182,15 +202,15 @@ async def submit_to_notabene(report: TravelRuleReport) -> dict:
         }
     }
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
-                f"{NOTABENE_URL}/tf/send",
-                json=payload,
-                headers={"Authorization": f"Bearer {NOTABENE_API_KEY}"}
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return {"status": "submitted", "provider_ref": data.get("id", report.tx_ref)}
+        client = get_http_client(timeout=10)  # shared client (SPEC-wave14 §4.6)
+        resp = await client.post(
+            f"{NOTABENE_URL}/tf/send",
+            json=payload,
+            headers={"Authorization": f"Bearer {NOTABENE_API_KEY}"}
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return {"status": "submitted", "provider_ref": data.get("id", report.tx_ref)}
     except Exception as e:
         logger.error(f"[TravelRule] Notabene submission failed: {e}")
         return {"status": "failed", "error": str(e)}
@@ -290,4 +310,4 @@ async def shutdown():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT, log_level="info")
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, log_level="info", workers=int(os.getenv("UVICORN_WORKERS", "1")))  # SPEC-wave14 §4.6: env-configurable workers (default 1)

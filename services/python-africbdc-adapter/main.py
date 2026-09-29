@@ -36,6 +36,26 @@ import json
 import logging
 import asyncio
 import httpx
+
+# ── Shared HTTP clients (SPEC-wave14 §4.6) ────────────────────────────────────
+# Timeout-keyed pool of module-level AsyncClients: outbound calls previously
+# constructed a fresh client per request (TCP/TLS + pool setup each time).
+# Clients live for the process lifetime; pools are capped at 100 connections.
+_http_clients: dict = {}
+
+
+def get_http_client(timeout: float = 5.0, **kwargs) -> httpx.AsyncClient:
+    key = (float(timeout), tuple(sorted(kwargs.items())))
+    client = _http_clients.get(key)
+    if client is None:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout),
+            limits=httpx.Limits(max_connections=100),
+            **kwargs,
+        )
+        _http_clients[key] = client
+    return client
+
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Literal
 from fastapi import FastAPI, HTTPException, Header, Depends, Response
@@ -67,7 +87,7 @@ _db_pool = None
 def _get_db():
     global _db_pool
     if _db_pool is None:
-        _db_pool = psycopg2.connect(_DB_URL)
+        _db_pool = psycopg2.connect(_DB_URL, options="-c statement_timeout=5000")  # SPEC-wave14 §4.6: 5s statement_timeout
         _db_pool.autocommit = True
         with _db_pool.cursor() as cur:
             cur.execute("""
@@ -293,119 +313,119 @@ class AfriCBDCTransferResponse(BaseModel):
 async def publish_kafka(topic: str, payload: dict):
     """Publish event to Kafka via go-kafka-service sidecar."""
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.post(
-                f"http://localhost:8095/publish/{topic}",
-                json={
-                    "eventType": topic,
-                    "serviceName": "python-africbdc-adapter",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "payload": payload,
-                }
-            )
+        client = get_http_client(timeout=3.0)  # shared client (SPEC-wave14 §4.6)
+        await client.post(
+            f"http://localhost:8095/publish/{topic}",
+            json={
+                "eventType": topic,
+                "serviceName": "python-africbdc-adapter",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "payload": payload,
+            }
+        )
     except Exception as e:
         logger.warning(f"[Kafka] WARN: {e} (degraded mode)")
 
 async def publish_dapr(topic: str, data: dict):
     """Publish event to Dapr pub/sub."""
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.post(
-                f"http://localhost:{cfg.DAPR_HTTP_PORT}/v1.0/publish/remitflow-pubsub/{topic}",
-                json={"data": data}
-            )
+        client = get_http_client(timeout=3.0)  # shared client (SPEC-wave14 §4.6)
+        await client.post(
+            f"http://localhost:{cfg.DAPR_HTTP_PORT}/v1.0/publish/remitflow-pubsub/{topic}",
+            json={"data": data}
+        )
     except Exception as e:
         logger.warning(f"[Dapr] WARN: {e}")
 
 async def produce_fluvio(topic: str, key: str, value: str):
     """Produce record to Fluvio stream."""
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.post(
-                f"{cfg.FLUVIO_GATEWAY_URL}/produce",
-                json={"topic": topic, "key": key, "value": value}
-            )
+        client = get_http_client(timeout=3.0)  # shared client (SPEC-wave14 §4.6)
+        await client.post(
+            f"{cfg.FLUVIO_GATEWAY_URL}/produce",
+            json={"topic": topic, "key": key, "value": value}
+        )
     except Exception as e:
         logger.warning(f"[Fluvio] WARN: {e}")
 
 async def record_tigerbeetle(transfer_id: str, debit_acct: str, credit_acct: str, amount: int):
     """Record double-entry in TigerBeetle (ledger 4 = African CBDCs)."""
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.post(
-                "http://localhost:8096/transfers",
-                json={
-                    "id": transfer_id, "debitAccountId": debit_acct,
-                    "creditAccountId": credit_acct, "amount": amount,
-                    "ledger": 4, "code": 4,  # code 4 = African CBDC
-                }
-            )
+        client = get_http_client(timeout=3.0)  # shared client (SPEC-wave14 §4.6)
+        await client.post(
+            "http://localhost:8096/transfers",
+            json={
+                "id": transfer_id, "debitAccountId": debit_acct,
+                "creditAccountId": credit_acct, "amount": amount,
+                "ledger": 4, "code": 4,  # code 4 = African CBDC
+            }
+        )
     except Exception as e:
         logger.warning(f"[TigerBeetle] WARN: {e}")
 
 async def index_opensearch(index: str, doc_id: str, doc: dict):
     """Index transfer document in OpenSearch."""
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.put(
-                f"{cfg.OPENSEARCH_URL}/{index}/_doc/{doc_id}",
-                json=doc
-            )
+        client = get_http_client(timeout=3.0)  # shared client (SPEC-wave14 §4.6)
+        await client.put(
+            f"{cfg.OPENSEARCH_URL}/{index}/_doc/{doc_id}",
+            json=doc
+        )
     except Exception as e:
         logger.warning(f"[OpenSearch] WARN: {e}")
 
 async def emit_lakehouse(event_type: str, data: dict):
     """Emit event to Lakehouse ETL pipeline."""
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.post(
-                f"{cfg.LAKEHOUSE_URL}/events",
-                json={
-                    "source": "python-africbdc-adapter",
-                    "eventType": event_type,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "data": data,
-                }
-            )
+        client = get_http_client(timeout=3.0)  # shared client (SPEC-wave14 §4.6)
+        await client.post(
+            f"{cfg.LAKEHOUSE_URL}/events",
+            json={
+                "source": "python-africbdc-adapter",
+                "eventType": event_type,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "data": data,
+            }
+        )
     except Exception as e:
         logger.warning(f"[Lakehouse] WARN: {e}")
 
 async def trigger_temporal(workflow_type: str, workflow_id: str, input_data: dict):
     """Trigger Temporal workflow for CBDC settlement."""
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.post(
-                "http://localhost:8098/workflows/start",
-                json={
-                    "workflowType": workflow_type,
-                    "workflowId": workflow_id,
-                    "taskQueue": "remitflow-africbdc",
-                    "input": input_data,
-                }
-            )
+        client = get_http_client(timeout=3.0)  # shared client (SPEC-wave14 §4.6)
+        await client.post(
+            "http://localhost:8098/workflows/start",
+            json={
+                "workflowType": workflow_type,
+                "workflowId": workflow_id,
+                "taskQueue": "remitflow-africbdc",
+                "input": input_data,
+            }
+        )
     except Exception as e:
         logger.warning(f"[Temporal] WARN: {e}")
 
 async def route_via_mojaloop(req: AfriCBDCTransferRequest, cbdc_info: dict) -> bool:
     """Route via Mojaloop for last-mile delivery to unbanked recipients."""
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                f"{cfg.MOJALOOP_HUB_URL}/transfers",
-                json={
-                    "transferId": req.transfer_id,
-                    "payerFsp": "remitflow",
-                    "payeeFsp": cbdc_info["mojaloop_fsp"],
-                    "amount": f"{req.send_amount:.2f}",
-                    "currency": cbdc_info["currency"],
-                    "ilpPacket": f"AFRICBDC_{req.cbdc_type}_ROUTED",
-                    "condition": str(uuid.uuid4()),
-                    "expiration": (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat(),
-                }
-            )
-            if resp.status_code < 400:
-                logger.info(f"[Mojaloop] AfriCBDC transfer {req.transfer_id} routed via Mojaloop ({req.cbdc_type})")
-                return True
+        client = get_http_client(timeout=5.0)  # shared client (SPEC-wave14 §4.6)
+        resp = await client.post(
+            f"{cfg.MOJALOOP_HUB_URL}/transfers",
+            json={
+                "transferId": req.transfer_id,
+                "payerFsp": "remitflow",
+                "payeeFsp": cbdc_info["mojaloop_fsp"],
+                "amount": f"{req.send_amount:.2f}",
+                "currency": cbdc_info["currency"],
+                "ilpPacket": f"AFRICBDC_{req.cbdc_type}_ROUTED",
+                "condition": str(uuid.uuid4()),
+                "expiration": (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat(),
+            }
+        )
+        if resp.status_code < 400:
+            logger.info(f"[Mojaloop] AfriCBDC transfer {req.transfer_id} routed via Mojaloop ({req.cbdc_type})")
+            return True
     except Exception as e:
         logger.warning(f"[Mojaloop] AfriCBDC bridge failed: {e}")
     return False
@@ -423,16 +443,16 @@ async def initiate_transfer(req: AfriCBDCTransferRequest):
 
     # 1. Idempotency check
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get(f"http://localhost:8097/idempotency/{req.idempotency_key}")
-            if resp.status_code == 200:
-                return AfriCBDCTransferResponse(
-                    transfer_id=req.transfer_id, cbdc_ref="duplicate",
-                    cbdc_type=req.cbdc_type, status="duplicate",
-                    receive_amount=req.send_amount,
-                    settlement_time=datetime.now(timezone.utc).isoformat(),
-                    mojaloop_routed=False, message="Transfer already processed"
-                )
+        client = get_http_client(timeout=2.0)  # shared client (SPEC-wave14 §4.6)
+        resp = await client.get(f"http://localhost:8097/idempotency/{req.idempotency_key}")
+        if resp.status_code == 200:
+            return AfriCBDCTransferResponse(
+                transfer_id=req.transfer_id, cbdc_ref="duplicate",
+                cbdc_type=req.cbdc_type, status="duplicate",
+                receive_amount=req.send_amount,
+                settlement_time=datetime.now(timezone.utc).isoformat(),
+                mojaloop_routed=False, message="Transfer already processed"
+            )
     except Exception:
         pass
 
@@ -484,8 +504,8 @@ async def initiate_transfer(req: AfriCBDCTransferRequest):
 
     # 5. Mark idempotency key
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            await client.post(f"http://localhost:8097/idempotency/{req.idempotency_key}?ttl=86400")
+        client = get_http_client(timeout=2.0)  # shared client (SPEC-wave14 §4.6)
+        await client.post(f"http://localhost:8097/idempotency/{req.idempotency_key}?ttl=86400")
     except Exception:
         pass
 
@@ -545,4 +565,4 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=cfg.PORT)
+    uvicorn.run("main:app", host="0.0.0.0", port=cfg.PORT, workers=int(os.getenv("UVICORN_WORKERS", "1")))  # SPEC-wave14 §4.6: env-configurable workers (default 1)

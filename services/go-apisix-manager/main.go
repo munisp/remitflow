@@ -64,7 +64,7 @@ func loadConfig() (Config, error) {
 		OIDCBearerOnly: getEnv("APISIX_OIDC_BEARER_ONLY", "true") == "true",
 		// ssl_verify defaults to true; set APISIX_OIDC_SSL_VERIFY=false only for
 		// local Keycloak dev instances without valid certs.
-		OIDCSslVerify:  getEnv("APISIX_OIDC_SSL_VERIFY", "true") == "true",
+		OIDCSslVerify: getEnv("APISIX_OIDC_SSL_VERIFY", "true") == "true",
 	}
 	if cfg.ApisixAdminKey == "" {
 		return cfg, fmt.Errorf("APISIX_ADMIN_KEY is not set — refusing to start without gateway credentials")
@@ -89,22 +89,22 @@ func getEnv(key, fallback string) string {
 // ─── Domain Types ─────────────────────────────────────────────────────────────
 
 type Route struct {
-	ID          string                 `json:"id"`
-	Name        string                 `json:"name"`
-	URI         string                 `json:"uri"`
-	Methods     []string               `json:"methods"`
-	UpstreamID  string                 `json:"upstream_id,omitempty"`
-	Upstream    *Upstream              `json:"upstream,omitempty"`
-	Plugins     map[string]interface{} `json:"plugins,omitempty"`
-	Status      int                    `json:"status"` // 1=enabled, 0=disabled
+	ID         string                 `json:"id"`
+	Name       string                 `json:"name"`
+	URI        string                 `json:"uri"`
+	Methods    []string               `json:"methods"`
+	UpstreamID string                 `json:"upstream_id,omitempty"`
+	Upstream   *Upstream              `json:"upstream,omitempty"`
+	Plugins    map[string]interface{} `json:"plugins,omitempty"`
+	Status     int                    `json:"status"` // 1=enabled, 0=disabled
 }
 
 type Upstream struct {
-	ID     string `json:"id,omitempty"`
-	Name   string `json:"name,omitempty"`
-	Type   string `json:"type"` // "roundrobin" | "least_conn" | "chash"
-	Scheme string `json:"scheme"` // "http" | "https" | "grpc"
-	Nodes  map[string]int `json:"nodes"` // "host:port" → weight
+	ID     string         `json:"id,omitempty"`
+	Name   string         `json:"name,omitempty"`
+	Type   string         `json:"type"`   // "roundrobin" | "least_conn" | "chash"
+	Scheme string         `json:"scheme"` // "http" | "https" | "grpc"
+	Nodes  map[string]int `json:"nodes"`  // "host:port" → weight
 	Checks *HealthCheck   `json:"checks,omitempty"`
 }
 
@@ -121,8 +121,8 @@ type ActiveCheck struct {
 }
 
 type Healthy struct {
-	Interval     int `json:"interval"`
-	Successes    int `json:"successes"`
+	Interval     int   `json:"interval"`
+	Successes    int   `json:"successes"`
 	HTTPStatuses []int `json:"http_statuses"`
 }
 
@@ -132,11 +132,11 @@ type Consumer struct {
 }
 
 type RateLimitConfig struct {
-	RouteID   string `json:"route_id"`
-	Count     int    `json:"count"`
-	TimeWindow int   `json:"time_window"` // seconds
-	Policy    string `json:"policy"` // "local" | "redis"
-	Rejected  int    `json:"rejected_code"` // HTTP status for rejected requests
+	RouteID    string `json:"route_id"`
+	Count      int    `json:"count"`
+	TimeWindow int    `json:"time_window"`   // seconds
+	Policy     string `json:"policy"`        // "local" | "redis"
+	Rejected   int    `json:"rejected_code"` // HTTP status for rejected requests
 }
 
 // ─── Metrics ──────────────────────────────────────────────────────────────────
@@ -312,6 +312,7 @@ type Server struct {
 
 func (s *Server) handleUpsertRoute(w http.ResponseWriter, r *http.Request) {
 	var route Route
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&route); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 		return
@@ -366,6 +367,7 @@ func (s *Server) handleListRoutes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpsertUpstream(w http.ResponseWriter, r *http.Request) {
 	var upstream Upstream
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&upstream); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 		return
@@ -382,6 +384,7 @@ func (s *Server) handleUpsertUpstream(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpsertConsumer(w http.ResponseWriter, r *http.Request) {
 	var consumer Consumer
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&consumer); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 		return
@@ -398,6 +401,7 @@ func (s *Server) handleUpsertConsumer(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleConfigureRateLimit(w http.ResponseWriter, r *http.Request) {
 	var cfg RateLimitConfig
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB request body cap (wave-14)
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 		return
@@ -480,10 +484,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpStatus)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":      status,
-		"service":     "apisix-manager",
-		"apisix_ok":   apisixOk,
-		"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		"status":    status,
+		"service":   "apisix-manager",
+		"apisix_ok": apisixOk,
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
@@ -529,15 +533,15 @@ func (s *Server) bootstrapDefaultRoutes(ctx context.Context) {
 			"max_age":       3600,
 		},
 		"limit-req": map[string]interface{}{
-			"rate":         100,
-			"burst":        50,
-			"key":          "remote_addr",
+			"rate":          100,
+			"burst":         50,
+			"key":           "remote_addr",
 			"rejected_code": 429,
 		},
 		"response-rewrite": map[string]interface{}{
 			"headers": map[string]interface{}{
-				"X-Frame-Options":        "DENY",
-				"X-Content-Type-Options": "nosniff",
+				"X-Frame-Options":           "DENY",
+				"X-Content-Type-Options":    "nosniff",
 				"Strict-Transport-Security": "max-age=31536000; includeSubDomains",
 			},
 		},
@@ -628,11 +632,12 @@ func main() {
 	logger.Info("APISIX manager listening", "addr", addr)
 
 	server := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // wave-14: slowloris guard
+		Addr:              addr,
+		Handler:           mux,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	if err := server.ListenAndServe(); err != nil {

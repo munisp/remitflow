@@ -1,9 +1,54 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { View, Text, FlatList, TouchableOpacity, StyleSheet, TextInput, ActivityIndicator, Alert, Modal } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { trpc } from '../services/trpc';
 
 const CURRENCIES = ['USD', 'EUR', 'GBP', 'NGN', 'KES', 'GHS', 'ZAR', 'CNY', 'INR', 'BRL'];
+
+// wave14 perf (L1): fixed row geometry for getItemLayout — card height 128
+// (enforced in styles) + 10 marginBottom.
+const ALERT_ROW_HEIGHT = 128 + 10;
+
+type FxAlert = {
+  id: string;
+  fromCurrency: string;
+  toCurrency: string;
+  triggered: boolean;
+  direction: string;
+  targetRate: number | string;
+  createdAt: string | Date;
+};
+
+const AlertRow = React.memo(function AlertRow({
+  item,
+  onDelete,
+}: {
+  item: FxAlert;
+  onDelete: (id: string) => void;
+}) {
+  return (
+    <View style={styles.alertCard}>
+      <View style={styles.alertPair}>
+        <Text style={styles.alertCurrencies}>{item.fromCurrency}/{item.toCurrency}</Text>
+        <View style={[styles.alertBadge, { backgroundColor: item.triggered ? '#10b981' + '20' : '#f59e0b' + '20' }]}>
+          <Text style={[styles.alertBadgeText, { color: item.triggered ? '#10b981' : '#f59e0b' }]}>
+            {item.triggered ? '✓ Triggered' : '⏳ Watching'}
+          </Text>
+        </View>
+      </View>
+      <Text style={styles.alertTarget}>
+        {item.direction === 'above' ? '↑ Above' : '↓ Below'} {Number(item.targetRate).toFixed(4)}
+      </Text>
+      <Text style={styles.alertCreated}>Created {new Date(item.createdAt).toLocaleDateString()}</Text>
+      <TouchableOpacity
+        style={styles.deleteAlertBtn}
+        onPress={() => onDelete(item.id)}
+      >
+        <Text style={styles.deleteAlertBtnText}>Delete</Text>
+      </TouchableOpacity>
+    </View>
+  );
+});
 
 export default function FXAlertsScreen() {
   const navigation = useNavigation();
@@ -16,11 +61,28 @@ export default function FXAlertsScreen() {
 
   const createMutation = trpc.fxAlerts.create.useMutation({
     onSuccess: () => { setShowCreate(false); utils.fxAlerts.list.invalidate(); },
-    onError: (e) => Alert.alert('Error', e.message),
+    onError: (e: any) => Alert.alert('Error', e.message),
   });
   const deleteMutation = trpc.fxAlerts.delete.useMutation({
     onSuccess: () => utils.fxAlerts.list.invalidate(),
   });
+
+  // wave14 perf (L1): stable renderItem/getItemLayout.
+  const deleteMutateRef = React.useRef(deleteMutation.mutate);
+  deleteMutateRef.current = deleteMutation.mutate;
+  const handleDelete = useCallback((id: string) => deleteMutateRef.current({ id }), []);
+  const renderItem = useCallback(
+    ({ item }: { item: FxAlert }) => <AlertRow item={item} onDelete={handleDelete} />,
+    [handleDelete],
+  );
+  const getItemLayout = useCallback(
+    (_: ArrayLike<FxAlert> | null | undefined, index: number) => ({
+      length: ALERT_ROW_HEIGHT,
+      offset: ALERT_ROW_HEIGHT * index + 16, // contentContainerStyle padding
+      index,
+    }),
+    [],
+  );
 
   const currentRate = rates?.rates?.[form.toCurrency] ?? 0;
 
@@ -43,28 +105,11 @@ export default function FXAlertsScreen() {
           data={alerts ?? []}
           keyExtractor={(item) => item.id}
           contentContainerStyle={{ padding: 16 }}
-          renderItem={({ item }) => (
-            <View style={styles.alertCard}>
-              <View style={styles.alertPair}>
-                <Text style={styles.alertCurrencies}>{item.fromCurrency}/{item.toCurrency}</Text>
-                <View style={[styles.alertBadge, { backgroundColor: item.triggered ? '#10b981' + '20' : '#f59e0b' + '20' }]}>
-                  <Text style={[styles.alertBadgeText, { color: item.triggered ? '#10b981' : '#f59e0b' }]}>
-                    {item.triggered ? '✓ Triggered' : '⏳ Watching'}
-                  </Text>
-                </View>
-              </View>
-              <Text style={styles.alertTarget}>
-                {item.direction === 'above' ? '↑ Above' : '↓ Below'} {Number(item.targetRate).toFixed(4)}
-              </Text>
-              <Text style={styles.alertCreated}>Created {new Date(item.createdAt).toLocaleDateString()}</Text>
-              <TouchableOpacity
-                style={styles.deleteAlertBtn}
-                onPress={() => deleteMutation.mutate({ id: item.id })}
-              >
-                <Text style={styles.deleteAlertBtnText}>Delete</Text>
-              </TouchableOpacity>
-            </View>
-          )}
+          renderItem={renderItem}
+          getItemLayout={getItemLayout}
+          removeClippedSubviews
+          initialNumToRender={10}
+          windowSize={7}
           ListEmptyComponent={
             <View style={styles.empty}>
               <Text style={styles.emptyIcon}>📈</Text>
@@ -149,7 +194,7 @@ const styles = StyleSheet.create({
   title: { fontSize: 18, fontWeight: '700', color: '#fff' },
   addBtn: { backgroundColor: '#6366f1', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6 },
   addBtnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
-  alertCard: { backgroundColor: '#1a1a2e', borderRadius: 12, padding: 16, marginBottom: 10, borderWidth: 1, borderColor: '#2d2d4e' },
+  alertCard: { backgroundColor: '#1a1a2e', borderRadius: 12, padding: 16, marginBottom: 10, borderWidth: 1, borderColor: '#2d2d4e', height: 128 },
   alertPair: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   alertCurrencies: { color: '#fff', fontSize: 18, fontWeight: '700' },
   alertBadge: { borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4 },

@@ -9,8 +9,8 @@ export default function RecurringPaymentsScreen() {
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({ recipientEmail: '', amount: '', currency: 'USD', frequency: 'monthly', description: '' });
   const { data, isLoading, refetch } = trpc.recurringPayments.list.useQuery();
-  const createMutation = trpc.recurringPayments.create.useMutation({ onSuccess: () => { setShowCreate(false); refetch(); }, onError: (e) => Alert.alert('Error', e.message) });
-  const cancelMutation = trpc.recurringPayments.cancel.useMutation({ onSuccess: refetch, onError: (e) => Alert.alert('Error', e.message) });
+  const createMutation = trpc.recurringPayments.create.useMutation({ onSuccess: () => { setShowCreate(false); refetch(); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const cancelMutation = trpc.recurringPayments.cancel.useMutation({ onSuccess: refetch, onError: (e: any) => Alert.alert('Error', e.message) });
   const FREQUENCIES = ['daily', 'weekly', 'monthly', 'quarterly'];
   const STATUS_COLOR: Record<string, string> = { active: '#10b981', paused: '#f59e0b', cancelled: '#6b7280' };
   return (

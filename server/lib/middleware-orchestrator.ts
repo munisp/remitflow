@@ -194,9 +194,12 @@ export const tigerBeetle = {
   },
 
   async createTransfers(transfers: unknown[]): Promise<unknown[]> {
-    for (const transfer of transfers) {
+    // W14: normalize all, then ONE batched cluster call (was: one round trip
+    // per transfer). Per-index result-code attribution is preserved inside
+    // createTransfersBatch.
+    const normalized: TigerBeetleTransfer[] = transfers.map((transfer) => {
       const data = asObject(transfer, "TigerBeetle transfer");
-      const normalized: TigerBeetleTransfer = {
+      return {
         id: asBigInt(data.id, "transfer id"),
         debitAccountId: asBigInt(data.debitAccountId ?? data.debit_account_id, "debit account id"),
         creditAccountId: asBigInt(data.creditAccountId ?? data.credit_account_id, "credit account id"),
@@ -209,8 +212,8 @@ export const tigerBeetle = {
           ? undefined
           : asBigInt(data.userData128 ?? data.user_data_128, "transfer userData128"),
       };
-      await tigerBeetleClient.createTransfer(normalized);
-    }
+    });
+    await tigerBeetleClient.createTransfersBatch(normalized);
     return [];
   },
 

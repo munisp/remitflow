@@ -20,9 +20,9 @@ type LivenessResultEvent struct {
 	CorridorCode string `json:"corridor_code,omitempty"`
 
 	// Passive liveness layer
-	PassiveScore   *float64 `json:"passive_score,omitempty"`
-	PassivePassed  *bool    `json:"passive_passed,omitempty"`
-	SpoofingType   string   `json:"spoofing_type,omitempty"`
+	PassiveScore  *float64 `json:"passive_score,omitempty"`
+	PassivePassed *bool    `json:"passive_passed,omitempty"`
+	SpoofingType  string   `json:"spoofing_type,omitempty"`
 
 	// Active liveness layer
 	ActiveBlinkCount      *int     `json:"active_blink_count,omitempty"`
@@ -30,9 +30,9 @@ type LivenessResultEvent struct {
 	ActivePassed          *bool    `json:"active_passed,omitempty"`
 
 	// Deepfake detection layer
-	DeepfakeScore   *float64 `json:"deepfake_score,omitempty"`
-	DeepfakeMethod  string   `json:"deepfake_method,omitempty"`
-	DeepfakePassed  *bool    `json:"deepfake_passed,omitempty"`
+	DeepfakeScore  *float64 `json:"deepfake_score,omitempty"`
+	DeepfakeMethod string   `json:"deepfake_method,omitempty"`
+	DeepfakePassed *bool    `json:"deepfake_passed,omitempty"`
 
 	// Overall result
 	OverallLive bool   `json:"overall_live"`

@@ -28,6 +28,7 @@ const {
   recordAuditActivity,
 } = proxyActivities<typeof Activities>({
   startToCloseTimeout: "30 seconds",
+  heartbeatTimeout: "30s", // W14: dead-activity detection bound
   retry: {
     maximumAttempts: 3,
     initialInterval: "1 second",
@@ -48,6 +49,7 @@ const {
   slaBreachCheckActivity,
 } = proxyActivities<typeof Activities>({
   startToCloseTimeout: "2 minutes",
+  heartbeatTimeout: "30s", // W14
   retry: {
     maximumAttempts: 2,
     initialInterval: "5 seconds",
@@ -58,6 +60,7 @@ const {
 
 const { executeRecurringPaymentActivity } = proxyActivities<typeof Activities>({
   startToCloseTimeout: "60 seconds",
+  heartbeatTimeout: "30s", // W14
   retry: {
     maximumAttempts: 3,
     initialInterval: "2 seconds",
