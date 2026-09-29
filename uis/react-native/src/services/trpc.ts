@@ -7,18 +7,27 @@ import { httpBatchLink } from '@trpc/client';
 import superjson from 'superjson';
 import { secureGet } from './secureStorage';
 import { fetchWithTimeout } from '../api/fetchWithTimeout';
-// NOTE: AppRouter is a local placeholder type — see src/types/appRouter.d.ts
-// for why the server/routers type import is decoupled from this package.
-import type { AppRouter } from '../types/appRouter';
+// AppRouter is a GENERATED structural type (src/types/appRouter.d.ts,
+// `npm run gen:approuter-types`): every mounted, non-legacy procedure name
+// and its query/mutation kind is exact, so phantom procedure calls are now
+// compile errors. Inputs/outputs are widened (the generator's snapshot has
+// no schemas) — arg/payload-shape checking stays with the server typecheck.
+import type { AppRouter, AppRouterHooks } from '../types/appRouter';
 
-// With the placeholder router type, createTRPCReact's mapped proxy type
-// collapses to tRPC's "property collides with a built-in method" marker
-// union. Cast the proxy to a permissive shape: call sites are untyped
-// (documented in appRouter.d.ts), but JSX usage (`trpc.Provider`) and hook
-// calls compile cleanly.
 const trpcProxy = createTRPCReact<AppRouter>();
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export const trpc: any = trpcProxy;
+
+// Keep the real tRPC base surface (Provider, createClient, useUtils,
+// useContext, useQueries, useSuspenseQueries) from the typed proxy, but
+// replace the per-procedure decoration with AppRouterHooks: the snapshot
+// cannot distinguish input-less procedures, so the strict DecorateProcedure
+// signatures would require an argument on no-input queries. AppRouterHooks
+// keeps procedure names + hook kind exact while widening hook call
+// signatures to `(...args: any[]) => any`.
+export const trpc = trpcProxy as unknown as Omit<
+  typeof trpcProxy,
+  keyof AppRouterHooks
+> &
+  AppRouterHooks;
 
 /**
  * Legacy raw-envelope REST helper used by RequestMoneyScreen and

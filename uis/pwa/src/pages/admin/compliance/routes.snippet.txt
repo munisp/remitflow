@@ -1,0 +1,12 @@
+W17-C3 — PWA router wiring for the admin compliance console.
+Add to uis/pwa/src/App.tsx (wiring coder; C3 does not edit the router file):
+
+1) Lazy import — place with the other admin console lazy imports
+   (next to the W16 KycReviewConsole import, ~line 86):
+
+const ComplianceConsole = lazy(() => import("./pages/admin/compliance/ComplianceConsole"));
+
+2) Route entry — place inside the layout <Route> alongside the other
+   AdminRoute-gated admin consoles (next to path="admin/kyc-review", ~line 337):
+
+<Route path="admin/compliance" element={<AdminRoute><ComplianceConsole /></AdminRoute>} />

@@ -1,0 +1,17 @@
+W17-C3 — PWA router wiring for the user-facing travel rule pages.
+Add to uis/pwa/src/App.tsx (wiring coder; C3 does not edit the router file):
+
+1) Lazy imports — place with the other user page lazy imports
+   (next to the invest page imports, ~line 80):
+
+const TravelRulePage = lazy(() => import("./pages/travel-rule/TravelRulePage"));
+const TrisaPage = lazy(() => import("./pages/travel-rule/TrisaPage"));
+
+2) Route entries — place inside the layout <Route> with the other
+   authenticated user pages (these routes sit inside the ProtectedRoute-wrapped
+   layout, so no wrapper is needed here — same as the invest/* routes,
+   ~line 300). trisa.pendingReview/approve additionally fail closed
+   server-side for non-admin users:
+
+<Route path="travel-rule" element={<TravelRulePage />} />
+<Route path="travel-rule/trisa" element={<TrisaPage />} />

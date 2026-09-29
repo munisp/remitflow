@@ -118,6 +118,18 @@ const RecipientOnboardingScreen = lazyScreen(() => import('../screens/RecipientO
 // screen; all 15 route names below render it with their route-keyed config.
 const SendToCountryScreen = lazyScreen(() => import('../screens/SendToCountryScreen'));
 
+// wave17 C1 investment parity screens (lazy) — mirror the PWA /invest/*
+// surfaces against the same mounted, non-legacy routers (proc names verified
+// against audit/routers.json).
+const InvestHubScreen = lazyScreen(() => import('../screens/invest/InvestHubScreen'));
+const BondsScreen = lazyScreen(() => import('../screens/invest/BondsScreen'));
+const BondDetailScreen = lazyScreen(() => import('../screens/invest/BondDetailScreen'));
+const StocksScreen = lazyScreen(() => import('../screens/invest/StocksScreen'));
+const RealEstateScreen = lazyScreen(() => import('../screens/invest/RealEstateScreen'));
+const StartupsScreen = lazyScreen(() => import('../screens/invest/StartupsScreen'));
+const CommunityScreen = lazyScreen(() => import('../screens/invest/CommunityScreen'));
+const EscrowScreen = lazyScreen(() => import('../screens/invest/EscrowScreen'));
+
 // wave12 BDC screens (lazy)
 const BDCPartnerPortalScreen = lazyScreen(() => import('../screens/BDCPartnerPortalScreen'));
 const BdcOnboardingEmailPreviewScreen = lazyScreen(() => import('../screens/BdcOnboardingEmailPreviewScreen'));
@@ -197,6 +209,15 @@ export type RootStackParamList = {
   SendToChina: undefined;
   SendToBrazil: undefined;
   SendToIndia: undefined;
+  // wave17 C1 investment parity screens
+  InvestHub: undefined;
+  InvestBonds: undefined;
+  InvestBondDetail: { bondId: number };
+  InvestStocks: undefined;
+  InvestRealEstate: undefined;
+  InvestStartups: undefined;
+  InvestCommunity: undefined;
+  InvestEscrow: undefined;
   // wave12 BDC screens
   BDCPartnerPortal: undefined;
   BdcOnboardingEmailPreview: undefined;
@@ -329,6 +350,15 @@ export default function RootNavigator() {
           <Stack.Screen name="SendToChina" component={SendToCountryScreen} />
           <Stack.Screen name="SendToBrazil" component={SendToCountryScreen} />
           <Stack.Screen name="SendToIndia" component={SendToCountryScreen} />
+          {/* wave17 C1 investment parity screens */}
+          <Stack.Screen name="InvestHub" component={InvestHubScreen} />
+          <Stack.Screen name="InvestBonds" component={BondsScreen} />
+          <Stack.Screen name="InvestBondDetail" component={BondDetailScreen} />
+          <Stack.Screen name="InvestStocks" component={StocksScreen} />
+          <Stack.Screen name="InvestRealEstate" component={RealEstateScreen} />
+          <Stack.Screen name="InvestStartups" component={StartupsScreen} />
+          <Stack.Screen name="InvestCommunity" component={CommunityScreen} />
+          <Stack.Screen name="InvestEscrow" component={EscrowScreen} />
           {/* wave12 BDC screens */}
           <Stack.Screen name="BDCPartnerPortal" component={BDCPartnerPortalScreen} />
           <Stack.Screen name="BdcOnboardingEmailPreview" component={BdcOnboardingEmailPreviewScreen} />

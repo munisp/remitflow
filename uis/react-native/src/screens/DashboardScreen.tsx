@@ -12,6 +12,9 @@ const QUICK_ACTIONS = [
   { label: 'FX Alerts', icon: '🔔', screen: 'FXAlerts' },
   { label: 'Payment Rails', icon: '🛤️', screen: 'PaymentRails' },
   { label: 'Revenue Share', icon: '💰', screen: 'RevenueShare' },
+  // wave17 C1: investment hub entry (bonds, NGX stocks, real estate,
+  // startups, community funds, property escrow).
+  { label: 'Invest', icon: '📈', screen: 'InvestHub' },
 ];
 
 export default function DashboardScreen() {

@@ -83,6 +83,16 @@ const sidebarSections = [
         href: "/cards",
         icon: "M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z",
       },
+      {
+        name: "Travel Rule",
+        href: "/travel-rule",
+        icon: "M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
+      },
+      {
+        name: "TRISA Network",
+        href: "/travel-rule/trisa",
+        icon: "M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9",
+      },
       // {
       //   name: "M-Pesa",
       //   href: "/mpesa",
@@ -158,6 +168,30 @@ const sidebarSections = [
         href: "/operations-map",
         adminOnly: true,
         icon: "M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.553-.832L9 7.75m0 12.25V7.75m0 12.25l6-3m-6-9.5l6-3m0 12.5l4.447 2.224A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.832L15 4.25m0 12.75V4.25",
+      },
+      {
+        name: "Security Audit",
+        href: "/admin/security-audit",
+        adminOnly: true,
+        icon: "M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z",
+      },
+      {
+        name: "Insider Threat",
+        href: "/admin/insider-threat",
+        adminOnly: true,
+        icon: "M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z",
+      },
+      {
+        name: "Feature Flags",
+        href: "/admin/feature-flags",
+        adminOnly: true,
+        icon: "M3 21v-4m0 0V5a2 2 0 012-2h6.5l1 1H21l-3 5 3 5h-8.5l-1-1H5a2 2 0 00-2 2zm9-13.5V9",
+      },
+      {
+        name: "Compliance",
+        href: "/admin/compliance",
+        adminOnly: true,
+        icon: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z",
       },
     ],
   },

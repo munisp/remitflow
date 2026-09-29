@@ -84,6 +84,14 @@ const InvestStartups = lazy(() => import("./pages/invest/Startups"));
 const InvestCommunity = lazy(() => import("./pages/invest/Community"));
 const InvestEscrow = lazy(() => import("./pages/invest/Escrow"));
 const KycReviewConsole = lazy(() => import("./pages/admin/kyc-review/KycReviewConsole"));
+// W17-C2 — admin security/insider-threat/feature-flags consoles
+const SecurityAuditConsole = lazy(() => import("./pages/admin/security-audit/SecurityAuditConsole"));
+const InsiderThreatConsole = lazy(() => import("./pages/admin/insider-threat/InsiderThreatConsole"));
+const FeatureFlagsConsole = lazy(() => import("./pages/admin/feature-flags/FeatureFlagsConsole"));
+// W17-C3 — admin compliance console + user travel-rule/TRISA pages
+const ComplianceConsole = lazy(() => import("./pages/admin/compliance/ComplianceConsole"));
+const TravelRulePage = lazy(() => import("./pages/travel-rule/TravelRulePage"));
+const TrisaPage = lazy(() => import("./pages/travel-rule/TrisaPage"));
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -336,6 +344,17 @@ const App: React.FC = () => {
             <Route path="admin/kyc-capture-sessions" element={<AdminRoute><KycCaptureSessionsConsole /></AdminRoute>} />
             {/* W16-C5: admin KYC review console */}
             <Route path="admin/kyc-review" element={<AdminRoute><KycReviewConsole /></AdminRoute>} />
+            {/* W17-C2: admin security, insider-threat, feature-flags consoles */}
+            <Route path="admin/security-audit" element={<AdminRoute><SecurityAuditConsole /></AdminRoute>} />
+            <Route path="admin/insider-threat" element={<AdminRoute><InsiderThreatConsole /></AdminRoute>} />
+            <Route path="admin/feature-flags" element={<AdminRoute><FeatureFlagsConsole /></AdminRoute>} />
+            {/* W17-C3: admin compliance console */}
+            <Route path="admin/compliance" element={<AdminRoute><ComplianceConsole /></AdminRoute>} />
+            {/* W17-C3: user-facing travel rule / TRISA pages (protected like
+                the invest/* routes — server-side guards remain authoritative;
+                trisa.pendingReview/approve fail closed for non-admins) */}
+            <Route path="travel-rule" element={<TravelRulePage />} />
+            <Route path="travel-rule/trisa" element={<TrisaPage />} />
           </Route>
 
           <Route path="*" element={<Navigate to="/" replace />} />

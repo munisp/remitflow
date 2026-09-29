@@ -1,0 +1,12 @@
+W17-C2 — PWA router wiring for the admin security audit console.
+Add to uis/pwa/src/App.tsx (wiring coder; C2 does not edit the router file):
+
+1) Lazy import — place with the other admin console lazy imports
+   (next to the W16 KycReviewConsole import, ~line 75):
+
+const SecurityAuditConsole = lazy(() => import("./pages/admin/security-audit/SecurityAuditConsole"));
+
+2) Route entry — place inside the layout <Route> alongside the other
+   AdminRoute-gated admin consoles (next to path="admin/kyc-review", ~line 338):
+
+<Route path="admin/security-audit" element={<AdminRoute><SecurityAuditConsole /></AdminRoute>} />
