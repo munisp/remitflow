@@ -224,6 +224,17 @@ export default function KYCScreen() {
                 ))}
               </View>
             </View>
+            {/* wave-15 §8: camera capture is the PRIMARY path (guided
+                document capture + server-validated liveness); the picker
+                below stays as the honest fallback for devices without a
+                working camera or denied permission. */}
+            <TouchableOpacity
+              style={styles.cameraBtn}
+              onPress={() => (navigation as any).navigate('KycCapture', { docType: form.idType })}
+            >
+              <Text style={styles.cameraBtnText}>📸 Verify with camera (recommended)</Text>
+            </TouchableOpacity>
+            <Text style={styles.fallbackLabel}>Or upload an existing photo:</Text>
             <TouchableOpacity
               style={styles.uploadBtn}
               onPress={handlePickAndUpload}
@@ -232,7 +243,7 @@ export default function KYCScreen() {
               {uploadMutation.isPending ? (
                 <ActivityIndicator color="#6366f1" />
               ) : (
-                <Text style={styles.uploadBtnText}>📷 Upload Document Photo</Text>
+                <Text style={styles.uploadBtnText}>Upload Document Photo</Text>
               )}
             </TouchableOpacity>
             {(uploadedDocType === form.idType || uploadedIdDoc) && (
@@ -335,6 +346,9 @@ const styles = StyleSheet.create({
   docTypeBtnTextActive: { color: '#fff' },
   uploadBtn: { backgroundColor: '#0f0f1a', borderRadius: 12, padding: 16, alignItems: 'center', borderWidth: 2, borderColor: '#2d2d4e', borderStyle: 'dashed', marginTop: 8 },
   uploadBtnText: { color: '#6366f1', fontWeight: '600' },
+  cameraBtn: { backgroundColor: '#6366f1', borderRadius: 12, padding: 16, alignItems: 'center', marginTop: 8 },
+  cameraBtnText: { color: '#fff', fontWeight: '700' },
+  fallbackLabel: { color: '#6b7280', fontSize: 12, marginTop: 14, textAlign: 'center' },
   uploadedNote: { color: '#f59e0b', fontSize: 12, marginTop: 10 },
   reviewRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#2d2d4e' },
   reviewLabel: { color: '#9ca3af', fontSize: 13 },

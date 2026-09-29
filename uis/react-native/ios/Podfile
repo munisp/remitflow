@@ -13,6 +13,13 @@ end
 target 'RemitFlow' do
   config = use_native_modules!
 
+  # SPEC-wave15 §9: NFC e-passport (eMRTD) reading.
+  # NFCPassportReader — MIT license (see THIRD-PARTY-NOTICES.md).
+  # NOTE: upstream deprecates CocoaPods in favour of SPM; if `pod install`
+  # fails on a future version, add the package via Xcode SPM
+  # (https://github.com/AndyQ/NFCPassportReader) and remove this line.
+  pod 'NFCPassportReader', '~> 2.1'
+
   use_react_native!(
     :path => config[:reactNativePath],
     :app_path => "#{Pod::Config.instance.installation_root}/.."

@@ -8,3 +8,15 @@
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
 # Add any project specific keep options here:
+
+# SPEC-wave15 §9: NFC e-passport reading (JMRTD + SCUBA + BouncyCastle).
+# Release builds run R8 full minification; the crypto provider and LDS/ASN.1
+# parsers use reflection-adjacent patterns and must not be renamed/stripped.
+-keep class org.jmrtd.** { *; }
+-keep class net.sf.scuba.** { *; }
+-keep class org.bouncycastle.** { *; }
+-keep class org.ejbca.** { *; }
+-dontwarn org.bouncycastle.**
+-dontwarn org.ejbca.**
+-dontwarn java.nio.**
+-dontwarn org.codehaus.**

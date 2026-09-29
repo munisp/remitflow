@@ -13,6 +13,8 @@
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		13B07FC11A68108700A75B9A /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 13B07FB71A68108700A75B9A /* main.m */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
+		W15K7A000000000000000001 /* NfcPassportModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = W15K7A000000000000000003 /* NfcPassportModule.swift */; };
+		W15K7A000000000000000002 /* NfcPassportBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = W15K7A000000000000000004 /* NfcPassportBridge.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -25,6 +27,10 @@
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = RemitFlow/Info.plist; sourceTree = "<group>"; };
 		13B07FB71A68108700A75B9A /* main.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = main.m; path = RemitFlow/main.m; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = RemitFlow/LaunchScreen.storyboard; sourceTree = "<group>"; };
+		W15K7A000000000000000003 /* NfcPassportModule.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; name = NfcPassportModule.swift; path = RemitFlow/NfcPassportModule.swift; sourceTree = "<group>"; };
+		W15K7A000000000000000004 /* NfcPassportBridge.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = NfcPassportBridge.m; path = RemitFlow/NfcPassportBridge.m; sourceTree = "<group>"; };
+		W15K7A000000000000000005 /* RemitFlow-Bridging-Header.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = "RemitFlow-Bridging-Header.h"; path = "RemitFlow/RemitFlow-Bridging-Header.h"; sourceTree = "<group>"; };
+		W15K7A000000000000000006 /* RemitFlow.entitlements */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.entitlements; name = RemitFlow.entitlements; path = RemitFlow/RemitFlow.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -37,6 +43,10 @@
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */,
 				13B07FB71A68108700A75B9A /* main.m */,
+				W15K7A000000000000000003 /* NfcPassportModule.swift */,
+				W15K7A000000000000000004 /* NfcPassportBridge.m */,
+				W15K7A000000000000000005 /* RemitFlow-Bridging-Header.h */,
+				W15K7A000000000000000006 /* RemitFlow.entitlements */,
 			);
 			name = RemitFlow;
 			sourceTree = "<group>";
@@ -153,6 +163,8 @@
 			files = (
 				13B07FBC1A68108700A75B9A /* AppDelegate.mm in Sources */,
 				13B07FC11A68108700A75B9A /* main.m in Sources */,
+				W15K7A000000000000000001 /* NfcPassportModule.swift in Sources */,
+				W15K7A000000000000000002 /* NfcPassportBridge.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -175,6 +187,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = RemitFlow/RemitFlow.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -194,6 +207,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "com.remitflow.app";
 				PRODUCT_NAME = RemitFlow;
+				SWIFT_OBJC_BRIDGING_HEADER = "RemitFlow/RemitFlow-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";
@@ -205,6 +219,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = RemitFlow/RemitFlow.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -223,6 +238,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "com.remitflow.app";
 				PRODUCT_NAME = RemitFlow;
+				SWIFT_OBJC_BRIDGING_HEADER = "RemitFlow/RemitFlow-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";
 			};

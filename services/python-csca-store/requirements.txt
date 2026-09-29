@@ -1,0 +1,10 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+
+# ── eMRTD crypto / ASN.1 ─────────────────────────────────────────────────────
+cryptography==43.0.3   # Apache-2.0/BSD — X.509 + signature verification
+asn1crypto==1.5.1      # MIT — CMS SignedData (SOD) + CscaMasterList parsing.
+                       # Deliberately NOT pyasn1/python-ldap: asn1crypto is a
+                       # single MIT-licensed wheel with no transitive deps.
+httpx==0.27.2          # BSD-3-Clause — scripts/fetch_masterlist.py downloads

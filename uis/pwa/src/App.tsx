@@ -68,6 +68,12 @@ const MerchantKybConsole = lazy(() => import("./pages/MerchantKybConsole"));
 const PartnerApply = lazy(() => import("./pages/PartnerApply"));
 const PartnerApplicationsConsole = lazy(() => import("./pages/PartnerApplicationsConsole"));
 // /W13-PARTNER
+// W15-K5 — camera-based KYC capture flow (MediaPipe WASM is lazy-loaded inside
+// the flow, so this chunk stays lean) + admin capture-session review console.
+const CaptureFlow = lazy(() => import("./pages/kyc/CaptureFlow"));
+const KycCaptureSessionsConsole = lazy(
+  () => import("./components/enhanced-features/EnhancedKYCVerification"),
+);
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -250,6 +256,8 @@ const App: React.FC = () => {
             <Route path="virtual-account" element={<VirtualAccount />} />
             <Route path="cards" element={<Cards />} />
             <Route path="kyc" element={<KYC />} />
+            {/* W15-K5: guided camera capture; /kyc keeps the upload fallback */}
+            <Route path="kyc/capture" element={<CaptureFlow />} />
             <Route path="property-kyc" element={<PropertyKYC />} />
             <Route path="settings" element={<Settings />} />
             <Route path="profile" element={<Profile />} />
@@ -304,6 +312,8 @@ const App: React.FC = () => {
             {/* W13-PARTNER — admin review queue for partner applications */}
             <Route path="admin/partner-applications" element={<AdminRoute><PartnerApplicationsConsole /></AdminRoute>} />
             {/* /W13-PARTNER */}
+            {/* W15-K5: admin viewer for kycCapture pipeline sessions */}
+            <Route path="admin/kyc-capture-sessions" element={<AdminRoute><KycCaptureSessionsConsole /></AdminRoute>} />
           </Route>
 
           <Route path="*" element={<Navigate to="/" replace />} />

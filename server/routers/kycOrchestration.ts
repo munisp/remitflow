@@ -13,7 +13,7 @@ import { z } from "zod";
 import { createTRPCRouter, protectedProcedure, publicProcedure } from "../trpc";
 import { TRPCError } from "@trpc/server";
 import { getDb } from "../db";
-import { kycLifecycle, kycLifecycleHistory } from "../../drizzle/schema";
+import { kycLifecycle, kycLifecycleHistory, kycCaptureSessions } from "../../drizzle/schema";
 import { and, eq } from "drizzle-orm";
 
 const KYC_ORCHESTRATOR_URL = process.env.KYC_ORCHESTRATOR_URL ?? "http://go-kyc-orchestrator:8150";
@@ -46,6 +46,8 @@ const KYCSubmitInput = z.object({
   runBiometric:   z.boolean().default(true),
   runAML:         z.boolean().default(true),
   transferAmount: z.number().optional(),
+  // W15: optionally link this submission to an open kycCapture session (SPEC §6).
+  captureSessionId: z.string().uuid().optional(),
 });
 
 const LivenessCheckInput = z.object({
@@ -200,6 +202,53 @@ async function persistOrchestrationResult(
   return true;
 }
 
+/**
+ * W15 (SPEC §6): link an orchestration verdict to a user-owned capture session
+ * by merging an `orchestration` block into the session verdict jsonb.
+ * Fail-closed/honest: returns false when the DB is unavailable or the session
+ * is not found / not owned by the user — never pretends the link happened.
+ */
+async function linkOrchestrationToCaptureSession(
+  userId: number,
+  captureSessionId: string,
+  result: OrchestrationResult,
+): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+
+  return db.transaction(async (tx) => {
+    const [session] = await tx
+      .select({ id: kycCaptureSessions.id, verdict: kycCaptureSessions.verdict })
+      .from(kycCaptureSessions)
+      .where(and(
+        eq(kycCaptureSessions.id, captureSessionId),
+        eq(kycCaptureSessions.userId, userId),
+      ))
+      .limit(1);
+    if (!session) return false;
+
+    const prior = (session.verdict && typeof session.verdict === "object"
+      ? session.verdict
+      : {}) as Record<string, unknown>;
+    await tx
+      .update(kycCaptureSessions)
+      .set({
+        verdict: {
+          ...prior,
+          orchestration: {
+            orchestrationId: result.orchestration_id ?? null,
+            finalStatus: result.final_status ?? null,
+            rejectionReasons: result.rejection_reasons ?? [],
+            processingMs: result.processing_ms ?? null,
+            linkedAt: new Date().toISOString(),
+          },
+        },
+      })
+      .where(eq(kycCaptureSessions.id, session.id));
+    return true;
+  });
+}
+
 // ── Router ────────────────────────────────────────────────────────────────────
 export const kycOrchestrationRouter = createTRPCRouter({
 
@@ -243,9 +292,16 @@ export const kycOrchestrationRouter = createTRPCRouter({
       // caller the verdict exists only in this response.
       const persisted = await persistOrchestrationResult(Number(userId), result);
 
+      // W15: link to a capture session when one was supplied. Honest flag —
+      // false means the session was not found/owned or the DB was unavailable.
+      const captureSessionLinked = input.captureSessionId
+        ? await linkOrchestrationToCaptureSession(Number(userId), input.captureSessionId, result)
+        : null;
+
       return {
         ...result,
         persisted,
+        captureSessionLinked,
         // Honest contract: submitting KYC never advances the tier by itself.
         tierAdvanced: false,
         tierAdvanceNote:

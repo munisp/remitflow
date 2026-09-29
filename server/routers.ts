@@ -296,6 +296,7 @@ import {
   swiftTxRouter,
 } from "./routers/orphanFeatures";
 import { bvnNinRouter } from "./routers/kycProductionGate";
+import { kycCaptureRouter, captureSessionsRouter, captureSessionRouter } from "./routers/kycCapture"; // W15 SPEC §6
 import { logger } from './_core/logger';
 import { doubleEntryRouter } from "./routers/doubleEntry";
 import { accountingSyncRouter } from "./routers/accountingSync"; // W10-C4
@@ -7869,6 +7870,10 @@ Case: #${input.caseId}`,
   // Phase 2 Compliance Suite (Travel Rule, SAR/STR, PEP, Data Residency, Audit)
   complianceV2: complianceRouter,
   kycOrchestration: kycOrchestrationRouter,
+  // W15 (SPEC §6): capture-session API + admin capture-session inspection
+  kycCapture: kycCaptureRouter,
+  captureSessions: captureSessionsRouter,
+  captureSession: captureSessionRouter,
   developerExperience: developerExperienceRouter,
   // W10-C3: Bill capture OCR (inbound email → ocr_jobs → python-bill-capture)
   billCapture: billCaptureRouter,

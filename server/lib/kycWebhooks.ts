@@ -86,15 +86,33 @@ export interface KYCTierDecision {
 const ONFIDO_WEBHOOK_SECRET = process.env.ONFIDO_WEBHOOK_SECRET || "";
 const SMILE_API_KEY = process.env.SMILE_API_KEY || "";
 
+/**
+ * W15: FAIL CLOSED. When a webhook secret is unset the receiver is NOT
+ * configured — previously this warned and continued (signature bypass in
+ * dev), which let unsigned webhooks drive tier decisions. Now the verifier
+ * throws KycWebhookNotConfiguredError (HTTP 503) so callers must surface an
+ * honest "receiver disabled" instead of processing unauthenticated payloads.
+ * These are commercial receivers kept for compatibility; configure the
+ * secret to enable them.
+ */
+export class KycWebhookNotConfiguredError extends Error {
+  readonly statusCode = 503;
+  constructor(provider: string) {
+    super(`${provider} webhook secret not configured — receiver disabled (fail-closed 503)`);
+    this.name = "KycWebhookNotConfiguredError";
+  }
+}
+
 // ── Signature Verification ──────────────────────────────────────────────────
 
 /**
  * Verify Onfido webhook HMAC-SHA256 signature.
+ * Throws KycWebhookNotConfiguredError (503) when the secret is unset.
  */
 export function verifyOnfidoSignature(payload: string, signature: string): boolean {
   if (!ONFIDO_WEBHOOK_SECRET) {
-    logger.warn("Onfido webhook secret not configured — skipping signature verification");
-    return process.env.NODE_ENV !== "production"; // Allow in dev only
+    logger.error("Onfido webhook secret not configured — rejecting webhook (fail-closed 503)");
+    throw new KycWebhookNotConfiguredError("Onfido");
   }
 
   const expected = createHmac("sha256", ONFIDO_WEBHOOK_SECRET)
@@ -106,11 +124,12 @@ export function verifyOnfidoSignature(payload: string, signature: string): boole
 
 /**
  * Verify Smile Identity webhook signature.
+ * Throws KycWebhookNotConfiguredError (503) when the API key is unset.
  */
 export function verifySmileSignature(payload: string, signature: string): boolean {
   if (!SMILE_API_KEY) {
-    logger.warn("Smile API key not configured — skipping signature verification");
-    return process.env.NODE_ENV !== "production";
+    logger.error("Smile API key not configured — rejecting webhook (fail-closed 503)");
+    throw new KycWebhookNotConfiguredError("Smile Identity");
   }
 
   const expected = createHmac("sha256", SMILE_API_KEY)

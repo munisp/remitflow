@@ -152,6 +152,11 @@ dependencies {
     implementation("com.facebook.react:flipper-integration")
     implementation("androidx.multidex:multidex:2.0.1")
 
+    // SPEC-wave15 §9: NFC e-passport (eMRTD) reading — BAC, DG1/DG2/SOD/DG15,
+    // Active Authentication via JMRTD PassportService.
+    // LGPL-3.0 — unmodified dependency, counsel sign-off tracked in THIRD-PARTY-NOTICES.md
+    implementation("org.jmrtd:jmrtd:0.8.3")
+
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
     } else {

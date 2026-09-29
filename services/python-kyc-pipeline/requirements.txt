@@ -3,11 +3,11 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 python-multipart>=0.0.12
 
-# ── PaddleOCR 3.0 — PP-OCRv5 + PP-StructureV3 + PP-ChatOCRv4 ────────────────
-paddlepaddle>=3.0.0
-paddleocr>=2.9.1
+# ── OCR: PP-OCRv5 via RapidOCR (ONNX) — primary VIZ OCR (SPEC-wave15 §4 G9) ──
+rapidocr-onnxruntime>=1.4.0   # Apache-2.0
+onnxruntime>=1.19.0           # MIT
 
-# ── Docling — IBM Document Parsing + GraniteDocling VLM ──────────────────────
+# ── Docling — IBM Document Parsing (optional layout stage, fail-closed) ──────
 docling>=2.14.0
 docling-core>=2.14.0
 
@@ -19,10 +19,11 @@ torch>=2.4.0
 torchvision>=0.19.0
 
 # ── Liveness Detection & Biometrics ──────────────────────────────────────────
+# InsightFace REMOVED (G10): buffalo_l weights are NON-COMMERCIAL — license
+# violation. Replaced by YuNet ONNX detection (OpenCV Zoo, MIT) + AdaFace
+# IR-50 ONNX embeddings (weights supplied via MODEL_DIR/ADAFACE_MODEL_PATH,
+# never vendored in git). onnxruntime (MIT) listed above serves both.
 opencv-python-headless>=4.10.0
-mediapipe>=0.10.14
-onnxruntime>=1.19.0
-insightface>=0.7.3
 
 # ── ML / Data Science ────────────────────────────────────────────────────────
 numpy>=1.26.0

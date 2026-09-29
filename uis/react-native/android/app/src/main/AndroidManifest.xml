@@ -4,6 +4,11 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- SPEC-wave15 §9: NFC e-passport (eMRTD) reading. required=false so the
+         app remains installable on NFC-less devices; the module reports
+         UNAVAILABLE at runtime instead. -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
 
     <application
       android:name=".MainApplication"

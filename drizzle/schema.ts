@@ -2625,7 +2625,10 @@ export const kycLifecycle = pgTable("kyc_lifecycle", {
   notes: text("notes"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+}, (t) => [
+  // wave-15: residual #8 — one lifecycle row per user (0096_kyc_lifecycle_uniq.sql)
+  uniqueIndex("kyc_lifecycle_user_uniq").on(t.userId),
+]);
 export type KycLifecycle = typeof kycLifecycle.$inferSelect;
 
 export const kycLifecycleHistory = pgTable("kyc_lifecycle_history", {
@@ -7035,3 +7038,81 @@ export const bdcTellers = pgTable("bdc_tellers", {
 ]);
 export type BdcTeller = typeof bdcTellers.$inferSelect;
 export type InsertBdcTeller = typeof bdcTellers.$inferInsert;
+
+// ─── Wave 15: Open-source-first OpenKYC capture pipeline (0095_kyc_wave15.sql — additive) ──
+export const kycCaptureSessions = pgTable("kyc_capture_sessions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: integer("userId").notNull(),
+  tenantId: integer("tenant_id"),
+  status: varchar("status", { length: 24 }).notNull().default("issued"), // 'issued'|'in_progress'|'verified'|'failed'|'expired'|'manual_review'
+  nonce: varchar("nonce", { length: 64 }).notNull(),
+  challenge: jsonb("challenge").notNull(),
+  docType: varchar("doc_type", { length: 32 }),
+  nfcSupported: boolean("nfc_supported"),
+  verdict: jsonb("verdict"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+}, (t) => [
+  index("kyc_capture_sessions_user_idx").on(t.userId),
+  index("kyc_capture_sessions_status_idx").on(t.status),
+]);
+export type KycCaptureSession = typeof kycCaptureSessions.$inferSelect;
+export type InsertKycCaptureSession = typeof kycCaptureSessions.$inferInsert;
+
+export const kycChallengeEvents = pgTable("kyc_challenge_events", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  sessionId: uuid("session_id").notNull().references(() => kycCaptureSessions.id),
+  seq: integer("seq").notNull(),
+  event: varchar("event", { length: 32 }).notNull(),
+  payload: jsonb("payload"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("kyc_challenge_events_session_idx").on(t.sessionId),
+]);
+export type KycChallengeEvent = typeof kycChallengeEvents.$inferSelect;
+export type InsertKycChallengeEvent = typeof kycChallengeEvents.$inferInsert;
+
+export const kycPipelineResults = pgTable("kyc_pipeline_results", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: integer("userId"),
+  sessionId: uuid("session_id"),
+  stage: varchar("stage", { length: 32 }).notNull(), // 'ocr'|'mrz'|'authenticity'|'liveness'|'face_match'|'deepfake'|'nfc'
+  model: varchar("model", { length: 64 }),
+  success: boolean("success").notNull(),
+  simulated: boolean("simulated").notNull().default(false),
+  score: doublePrecision("score"),
+  details: jsonb("details"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("kyc_pipeline_results_user_idx").on(t.userId),
+  index("kyc_pipeline_results_session_idx").on(t.sessionId),
+]);
+export type KycPipelineResult = typeof kycPipelineResults.$inferSelect;
+export type InsertKycPipelineResult = typeof kycPipelineResults.$inferInsert;
+
+export const biometricEmbeddings = pgTable("biometric_embeddings", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  userId: integer("userId").notNull().unique(),
+  model: varchar("model", { length: 32 }).notNull(), // 'adaface-ir50'|'sface'
+  embedding: doublePrecision("embedding").array().notNull(),
+  source: varchar("source", { length: 24 }), // 'capture'|'document_portrait'|'nfc_dg2'
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type BiometricEmbedding = typeof biometricEmbeddings.$inferSelect;
+export type InsertBiometricEmbedding = typeof biometricEmbeddings.$inferInsert;
+
+export const documentAuthenticity = pgTable("document_authenticity", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  sessionId: uuid("session_id").references(() => kycCaptureSessions.id),
+  userId: integer("userId"),
+  signals: jsonb("signals").notNull(),
+  riskScore: doublePrecision("risk_score").notNull(),
+  verdict: varchar("verdict", { length: 16 }).notNull(), // 'low'|'medium'|'high'
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("document_authenticity_user_idx").on(t.userId),
+]);
+export type DocumentAuthenticity = typeof documentAuthenticity.$inferSelect;
+export type InsertDocumentAuthenticity = typeof documentAuthenticity.$inferInsert;

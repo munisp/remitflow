@@ -28,13 +28,23 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Pre-download uniface ONNX models at build time so first request is fast
 RUN python -c "from uniface import AntiSpoofing; AntiSpoofing()" 2>/dev/null || true
 
+# Pre-download the MediaPipe Face Landmarker model asset (SPEC-wave15 §5).
+# If this is missing at runtime, /challenge/validate FAILS CLOSED (503).
+RUN mkdir -p /app/models && \
+    python -c "import urllib.request; urllib.request.urlretrieve( \
+        'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float32/1/face_landmarker.task', \
+        '/app/models/face_landmarker.task')"
+
 COPY . .
 
 EXPOSE 8095
 
 # LIVENESS_PROVIDER: minifasnet (default, open-source) | iproov | onfido
+# Commercial providers are opt-in only and hard-fail without explicit creds —
+# the platform default liveness path is pure OSS.
 ENV LIVENESS_PROVIDER=minifasnet
 ENV PORT=8095
+ENV MEDIAPIPE_FACE_LANDMARKER_MODEL=/app/models/face_landmarker.task
 
 RUN addgroup --system --gid 1001 appgroup && \
     adduser --system --uid 1001 --ingroup appgroup --no-create-home appuser && \
@@ -42,6 +52,6 @@ RUN addgroup --system --gid 1001 appgroup && \
 USER appuser
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-  CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
+  CMD python -c "import os,urllib.request;urllib.request.urlopen('http://localhost:'+os.environ.get('PORT','8095')+'/health',timeout=8)" || exit 1
 
 CMD ["python", "main.py"]

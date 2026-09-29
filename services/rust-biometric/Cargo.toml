@@ -1,26 +1,42 @@
 [package]
 name    = "rust-biometric"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
+build   = "build.rs"
 
 [[bin]]
 name = "rust-biometric"
 path = "src/main.rs"
 
+# ── Dependency license policy (wave 15) ──────────────────────────────────────
+# New deps introduced in wave 15, per SPEC/THIRD-PARTY-NOTICES:
+#   ort       = MIT OR Apache-2.0 (ONNX Runtime bindings; pulls ONNX Runtime
+#               1.22 binaries — MIT — at build time via download-binaries)
+#   ndarray   = MIT OR Apache-2.0 (tensor helpers for ort inputs)
+#   sqlx      = MIT OR Apache-2.0 (repo-standard Postgres crate; same
+#               version/features as services/rust-bmatch-engine)
+# Image decoding uses vendored stb_image (csrc/, public domain OR MIT),
+# compiled by build.rs with the system C compiler — deliberately NOT a Cargo
+# crate, to keep the new-dep set at exactly {ort, ndarray, sqlx}.
 [dependencies]
-axum             = { version = "0.7", features = ["json"] }
-tokio            = { version = "1",   features = ["full"] }
-serde            = { version = "1",   features = ["derive"] }
-serde_json       = "1"
-tracing          = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-prometheus       = { version = "0.13", features = ["process"] }
-uuid             = { version = "1",   features = ["v4"] }
-base64           = "0.22"
-sha2             = "0.10"
-hmac             = "0.12"
-hex              = "0.4"
-lazy_static      = "1"
+axum             = { version = "0.7", features = ["json"] }        # MIT
+tokio            = { version = "1",   features = ["full"] }        # MIT
+serde            = { version = "1",   features = ["derive"] }      # MIT/Apache-2.0
+serde_json       = "1"                                             # MIT/Apache-2.0
+tracing          = "0.1"                                           # MIT
+tracing-subscriber = { version = "0.3", features = ["env-filter"] } # MIT
+prometheus       = { version = "0.13", features = ["process"] }    # MIT/Apache-2.0
+uuid             = { version = "1",   features = ["v4"] }          # MIT/Apache-2.0
+base64           = "0.22"                                          # MIT/Apache-2.0
+sha2             = "0.10"                                          # MIT/Apache-2.0 (HMAC token signing only — no longer used for embeddings)
+hmac             = "0.12"                                          # MIT/Apache-2.0
+hex              = "0.4"                                           # MIT/Apache-2.0
+lazy_static      = "1"                                             # MIT/Apache-2.0
+
+# wave-15 additions:
+ort      = { version = "2.0.0-rc", features = ["download-binaries", "copy-dylibs"] } # MIT/Apache-2.0
+ndarray  = "0.17"                                                  # MIT/Apache-2.0
+sqlx     = { version = "0.8.1", features = ["runtime-tokio", "postgres"] } # MIT/Apache-2.0
 
 [profile.release]
 opt-level = 3

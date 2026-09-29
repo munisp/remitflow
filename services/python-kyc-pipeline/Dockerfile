@@ -1,4 +1,5 @@
-# Python KYC Pipeline — PaddleOCR 3.0 + Docling + VLM + Next-Gen Liveness
+# Python KYC Pipeline — RapidOCR PP-OCRv5 (onnxruntime) + Docling + VLM (optional,
+# fail-closed) + ICAO 9303 MRZ hard gate + YuNet/AdaFace biometrics + PG persistence
 FROM python:3.11-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

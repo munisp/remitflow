@@ -75,5 +75,13 @@
 	<string>RemitFlow uses Face ID for secure authentication.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>RemitFlow uses your location to find nearby agents and prevent fraud.</string>
+	<!-- SPEC-wave15 §9: NFC e-passport (eMRTD) reading -->
+	<key>NFCReaderUsageDescription</key>
+	<string>RemitFlow uses NFC to securely read the chip in your biometric passport for identity verification.</string>
+	<key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key>
+	<array>
+		<!-- ICAO 9303 eMRTD application identifier -->
+		<string>A0000002471001</string>
+	</array>
 </dict>
 </plist>

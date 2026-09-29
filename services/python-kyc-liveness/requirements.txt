@@ -4,16 +4,19 @@ httpx==0.27.2
 pydantic==2.10.3
 
 # ── Open-source liveness detection (MiniFASNet, Apache 2.0) ──────────────────
-uniface==2.0.0          # MiniFASNetV1SE + MiniFASNetV2 via ONNX Runtime
-onnxruntime==1.20.1     # CPU-only ONNX inference engine
+uniface==2.0.0          # MiniFASNetV1SE + MiniFASNetV2 via ONNX Runtime (MIT)
+onnxruntime==1.20.1     # CPU-only ONNX inference engine (MIT)
+
+# ── Active challenge validation (SPEC-wave15 §5) ─────────────────────────────
+mediapipe==0.10.14      # Face Landmarker blendshapes + head pose (Apache-2.0)
 
 # ── Face matching ─────────────────────────────────────────────────────────────
 deepface==0.0.93        # ArcFace / FaceNet embeddings (Apache 2.0)
 opencv-python-headless==4.10.0.84
 
-# ── Document OCR ─────────────────────────────────────────────────────────────
-pytesseract==0.3.13     # Tesseract OCR Python wrapper
-passporteye==2.2.1      # MRZ parser for travel documents
+# ── Document OCR (FALLBACK ONLY — primary MRZ path: python-kyc-pipeline) ──────
+pytesseract==0.3.13     # Tesseract OCR Python wrapper (Apache-2.0)
+passporteye==2.2.1      # MRZ parser for travel documents (MIT), optional fallback
 Pillow==12.3.0
 
 # ── Utilities ────────────────────────────────────────────────────────────────

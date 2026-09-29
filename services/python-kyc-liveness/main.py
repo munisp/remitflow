@@ -1,18 +1,46 @@
 """
-RemitFlow KYC Liveness Verification Service (Python)
-Performs face liveness detection, document OCR, and identity matching.
+RemitFlow KYC Liveness Verification Service (Python) — SPEC-wave15 §5 overhaul.
+
+Performs face liveness detection, active challenge validation, document OCR
+(fallback only), and identity matching.
 
 Liveness providers (controlled by LIVENESS_PROVIDER env var):
-  - minifasnet  [default] MiniFASNet via uniface ONNX — Apache 2.0, CPU-only, ~98.8% NUAA accuracy
-  - iproov      iProov commercial SDK (requires IPROOV_API_KEY)
-  - onfido      Onfido commercial SDK (requires ONFIDO_API_TOKEN)
+  - minifasnet  [default, OSS] MiniFASNet via uniface ONNX (Apache 2.0, CPU-only).
+                IMPORTANT: MiniFASNet is NOT certified to ISO/IEC 30107-3 PAD
+                Level 1 or Level 2. No independently audited accuracy figures are
+                claimed here. It is deployed as a presentation-attack DETERRENCE
+                control only, never as certification-grade PAD. All liveness
+                responses carry certified=false.
+  - iproov      iProov commercial SDK (OPT-IN ONLY — hard-fails unless
+                IPROOV_API_KEY is explicitly set). Platform default is pure OSS.
+  - onfido      Onfido commercial SDK (OPT-IN ONLY — hard-fails unless
+                ONFIDO_API_TOKEN is explicitly set). Platform default is pure OSS.
 
-Integrates with: Dapr statestore, Kafka events, OpenSearch for audit logs.
+FAIL-CLOSED policy (SPEC-wave15): when a model, dependency, or downstream
+service (rust-biometric) is unavailable, endpoints return an error (503);
+there is NO silent heuristic fallback that returns success.
+
+MRZ delegation (SPEC-wave15 §5): the primary MRZ/document-parsing path is owned
+by python-kyc-pipeline (wave-15 K1). The pytesseract/passporteye code in this
+service is retained ONLY as an optional fallback for the /verify endpoint and
+must not be extended — new MRZ work belongs in python-kyc-pipeline.
+
+Endpoints:
+  GET  /health              liveness/readiness probe
+  GET  /metrics             Prometheus metrics
+  POST /verify              full KYC liveness + face match + OCR fallback
+  POST /check/passive       single-frame passive PAD (MiniFASNet, uncertified)
+  POST /check/active        video-clip passive PAD sampling
+  POST /match               face comparison
+  POST /challenge/validate  active challenge-response validation (mediapipe
+                            blendshapes + timing + order + cross-frame biometric
+                            consistency via rust-biometric)
+
+Integrates with: PostgreSQL (state/audit), Dapr pub/sub, rust-biometric (HTTP).
 """
 
 import asyncio
 import base64
-import hashlib
 import io
 import json
 import logging
@@ -43,8 +71,8 @@ def get_http_client(timeout: float = 5.0, **kwargs) -> httpx.AsyncClient:
         _http_clients[key] = client
     return client
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Response, UploadFile, File, Form
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 # ── PostgreSQL persistence ──────────────────────────────────────────────
 import psycopg2
@@ -133,7 +161,7 @@ def db_log_event(event_type: str, payload: dict):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("kyc-liveness")
 
-app = FastAPI(title="RemitFlow KYC Liveness Service", version="2.0.0")
+app = FastAPI(title="RemitFlow KYC Liveness Service", version="2.1.0")
 
 @app.get("/metrics")
 async def _prometheus_metrics():
@@ -195,16 +223,46 @@ OPENSEARCH_URL = os.getenv("OPENSEARCH_URL", "http://localhost:9200")
 KYC_CONFIDENCE_THRESHOLD = float(os.getenv("KYC_CONFIDENCE_THRESHOLD", "0.85"))
 FACE_MATCH_THRESHOLD = float(os.getenv("FACE_MATCH_THRESHOLD", "0.80"))
 
-# Provider selection — minifasnet | iproov | onfido
+# Provider selection — minifasnet (default, OSS) | iproov | onfido (commercial, opt-in)
 LIVENESS_PROVIDER = os.getenv("LIVENESS_PROVIDER", "minifasnet").lower()
 
-# iProov config (only used when LIVENESS_PROVIDER=iproov)
+# iProov config (only used when LIVENESS_PROVIDER=iproov — commercial, opt-in;
+# the platform default is pure OSS and this provider hard-fails without creds)
 IPROOV_API_KEY = os.getenv("IPROOV_API_KEY", "")
 IPROOV_BASE_URL = os.getenv("IPROOV_BASE_URL", "https://eu.rp.secure.iproov.me/api/v2")
 
-# Onfido config (only used when LIVENESS_PROVIDER=onfido)
+# Onfido config (only used when LIVENESS_PROVIDER=onfido — commercial, opt-in;
+# the platform default is pure OSS and this provider hard-fails without creds)
 ONFIDO_API_TOKEN = os.getenv("ONFIDO_API_TOKEN", "")
 ONFIDO_BASE_URL = os.getenv("ONFIDO_BASE_URL", "https://api.eu.onfido.com/v3.6")
+
+# ── Challenge validation config (SPEC-wave15 §5, /challenge/validate) ─────────
+# rust-biometric service base URL for per-frame face embeddings (fail-closed
+# when unset/empty or unreachable).
+RUST_BIOMETRIC_URL = os.getenv("RUST_BIOMETRIC_URL", "").rstrip("/")
+# Cross-frame face consistency: minimum cosine similarity between the first
+# sampled frame's embedding and every other sampled frame's embedding.
+CHALLENGE_CONSISTENCY_THRESHOLD = float(os.getenv("CHALLENGE_CONSISTENCY_THRESHOLD", "0.5"))
+# Timing plausibility bounds (client-reported event timestamps, milliseconds).
+CHALLENGE_MIN_DWELL_MS = float(os.getenv("CHALLENGE_MIN_DWELL_MS", "250"))     # faster = scripted/bot
+CHALLENGE_MAX_DWELL_MS = float(os.getenv("CHALLENGE_MAX_DWELL_MS", "30000"))   # slower = stalled/replay
+CHALLENGE_MAX_TOTAL_MS = float(os.getenv("CHALLENGE_MAX_TOTAL_MS", "180000"))
+# MediaPipe Face Landmarker model asset (lazy-loaded; missing → fail-closed).
+MEDIAPIPE_FACE_LANDMARKER_MODEL = os.getenv(
+    "MEDIAPIPE_FACE_LANDMARKER_MODEL", "/app/models/face_landmarker.task"
+)
+# Blendshape / head-pose decision thresholds (deterrence tuning, NOT certified).
+CHALLENGE_BLENDSHAPE_THRESHOLD = float(os.getenv("CHALLENGE_BLENDSHAPE_THRESHOLD", "0.45"))
+CHALLENGE_HEAD_TURN_MIN_DEG = float(os.getenv("CHALLENGE_HEAD_TURN_MIN_DEG", "12.0"))
+CHALLENGE_HEAD_NOD_MIN_DEG = float(os.getenv("CHALLENGE_HEAD_NOD_MIN_DEG", "10.0"))
+# Max sampled frames accepted per validation request (abuse guard).
+CHALLENGE_MAX_FRAMES = int(os.getenv("CHALLENGE_MAX_FRAMES", "16"))
+# If "true", the session nonce MUST exist in kyc_capture_sessions (written by the
+# capture-session issuer) and its server-issued challenge must match; if the row
+# cannot be checked the endpoint fails closed. Default false: when no server row
+# is found we proceed against the client-supplied sequence but emit the
+# "nonce_not_server_verified" risk flag.
+CHALLENGE_REQUIRE_SERVER_NONCE = os.getenv("CHALLENGE_REQUIRE_SERVER_NONCE", "false").lower() == "true"
 
 # ─── Models ──────────────────────────────────────────────────────────────────
 
@@ -239,6 +297,11 @@ class LivenessResponse(BaseModel):
     verified_at: str
     liveness_provider: str
     liveness_method: str
+    # Honest labeling (SPEC-wave15 §5): no OSS liveness path in this service is
+    # ISO/IEC 30107-3 PAD certified. `certified` is ALWAYS false here.
+    certified: bool = False
+    # One of: "minifasnet-passive" | "iproov-commercial" | "onfido-commercial"
+    method: str = "minifasnet-passive"
 
 
 class OCRResult(BaseModel):
@@ -259,6 +322,60 @@ class HealthResponse(BaseModel):
     tesseract_available: bool
     uniface_available: bool
     dapr_connected: bool
+    # SPEC-wave15 §5 additions (optional, backward-compatible):
+    mediapipe_available: bool = False       # Face Landmarker importable + model asset present
+    rust_biometric_configured: bool = False # RUST_BIOMETRIC_URL set (not probed — health stays cheap)
+
+
+class ChallengeEvent(BaseModel):
+    """
+    One client-reported challenge event (SPEC-wave15 §5).
+
+    PRIMARY field names match what server/routers/kycCapture.ts POSTs to
+    /challenge/validate: {seq, event, timestamp_ms, payload} (timestamp_ms may
+    be null — the server maps an absent client timestamp to null). The legacy
+    pre-wave-15-fix name `timestamp` is still accepted as an alias.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    seq: int                                # 0-based, strictly increasing
+    event: str                              # e.g. blink|turnLeft|turnRight|smile|jawOpen|nod|frame
+    timestamp_ms: Optional[float] = Field(  # client epoch milliseconds (nullable per server contract)
+        default=None,
+        validation_alias=AliasChoices("timestamp_ms", "timestamp"),
+    )
+    payload: Optional[dict] = None          # may carry {"frame_index": int}
+
+
+class ChallengeValidateRequest(BaseModel):
+    """
+    PRIMARY field names match the server contract (kycCapture.ts →
+    /challenge/validate): nonce / challenge / events / sampled_frames. The
+    legacy names session_nonce / challenge_sequence / frames remain accepted
+    aliases so both shapes validate.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    nonce: str = Field(                     # nonce from the issued capture session
+        validation_alias=AliasChoices("nonce", "session_nonce"))
+    challenge: list[str] = Field(           # server-issued, order-randomized per session
+        validation_alias=AliasChoices("challenge", "challenge_sequence"))
+    events: list[ChallengeEvent]            # ordered client-reported events
+    sampled_frames: list[str] = Field(      # base64 JPEG samples captured during the challenge
+        validation_alias=AliasChoices("sampled_frames", "frames"))
+
+
+class ChallengeValidateResponse(BaseModel):
+    session_nonce: str
+    passed: bool
+    certified: bool = False                 # never certified — deterrence control only
+    method: str = "mediapipe-challenge"
+    checks: dict                            # per-check pass/fail + detail
+    per_event: list[dict]                   # blendshape verification per claimed event
+    consistency_score: Optional[float]      # min cross-frame cosine similarity
+    risk_flags: list[str]
+    processing_time_ms: int
+    validated_at: str
 
 
 # ─── Provider Abstraction ─────────────────────────────────────────────────────
@@ -284,24 +401,36 @@ class LivenessProviderBase(ABC):
 
 class MiniFASNetProvider(LivenessProviderBase):
     """
-    Open-source liveness detection using MiniFASNet via the uniface ONNX library.
+    Open-source passive liveness detection using MiniFASNet via the uniface ONNX library.
 
     Model: MiniFASNetV1SE + MiniFASNetV2 ensemble (80×80 input, CPU-friendly)
     Source: https://github.com/minivision-ai/Silent-Face-Anti-Spoofing (Apache 2.0)
     Library: https://github.com/yakhyo/uniface (MIT)
-    Accuracy: ~98.8% on NUAA, ~97.2% on CASIA-FASD
 
-    Detects:
+    CERTIFICATION STATUS (honest label): MiniFASNet is UNCERTIFIED. It has NOT
+    been evaluated to ISO/IEC 30107-3 PAD Level 1 or Level 2 by an accredited
+    lab, and no independently audited accuracy figure is claimed here. Vendor
+    self-reported benchmark numbers exist upstream but are not treated as
+    certification evidence. This control is deployed as presentation-attack
+    DETERRENCE only; downstream risk engines must treat it as one signal, never
+    as certification-grade proof of liveness.
+
+    Heuristically resists (best-effort, uncertified):
       - Printed photos
       - Screen replay attacks
       - Paper masks
-      - 3D masks (partial)
-      - High-quality photo spoofing
+      - High-quality photo spoofing (partial)
+
+    FAIL-CLOSED (SPEC-wave15 §5): if the model is unavailable or inference
+    errors, check_passive returns an error result (mapped to HTTP 503 by the
+    endpoints). There is deliberately NO heuristic fallback that could silently
+    return success.
     """
 
     def __init__(self):
         self._model = None
         self._available = False
+        self._load_error: Optional[str] = None
         self._load_model()
 
     def _load_model(self):
@@ -310,11 +439,14 @@ class MiniFASNetProvider(LivenessProviderBase):
             self._model = AntiSpoofing()
             self._available = True
             logger.info("[MiniFASNet] Model loaded successfully via uniface")
-        except ImportError:
-            logger.warning("[MiniFASNet] uniface not installed — falling back to heuristic provider")
+        except ImportError as e:
+            # FAIL-CLOSED: no fallback provider — passive checks will 503.
+            self._load_error = f"uniface not installed: {e}"
+            logger.error(f"[MiniFASNet] {self._load_error} — passive liveness will FAIL CLOSED (503)")
             self._available = False
         except Exception as e:
-            logger.error(f"[MiniFASNet] Model load failed: {e}")
+            self._load_error = f"model load failed: {e}"
+            logger.error(f"[MiniFASNet] {self._load_error} — passive liveness will FAIL CLOSED (503)")
             self._available = False
 
     @property
@@ -327,7 +459,14 @@ class MiniFASNetProvider(LivenessProviderBase):
 
     def check_passive(self, image_b64: str) -> dict:
         if not self._available:
-            return self._heuristic_fallback(image_b64)
+            # FAIL-CLOSED: previously this silently fell back to DCT/image
+            # heuristics that could return passed=True. Removed per SPEC-wave15 §5.
+            return {
+                "passed": False,
+                "confidence": 0.0,
+                "method": "minifasnet_onnx",
+                "error": f"minifasnet_unavailable: {self._load_error or 'model not loaded'}",
+            }
 
         try:
             import numpy as np
@@ -339,7 +478,7 @@ class MiniFASNetProvider(LivenessProviderBase):
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
             if img is None:
-                return {"passed": False, "confidence": 0.0, "method": "minifasnet", "error": "invalid_image"}
+                return {"passed": False, "confidence": 0.0, "method": "minifasnet_onnx", "error": "invalid_image"}
 
             # Run MiniFASNet anti-spoofing inference
             # uniface AntiSpoofing.predict returns (label, score)
@@ -349,7 +488,8 @@ class MiniFASNetProvider(LivenessProviderBase):
             is_live = bool(label == 1)
             confidence = float(score)
 
-            # Determine attack type from score distribution
+            # Heuristic attack-type hint from score distribution (uncertified
+            # deterrence signal — NOT an ISO 30107-3 attack classification).
             attack_type = None
             if not is_live:
                 if confidence < 0.3:
@@ -363,82 +503,38 @@ class MiniFASNetProvider(LivenessProviderBase):
                 "passed": is_live,
                 "confidence": confidence,
                 "method": "minifasnet_onnx",
+                "certified": False,
                 "attack_type": attack_type,
                 "details": {
                     "label": int(label),
                     "raw_score": float(score),
                     "model": "MiniFASNetV1SE+V2_ensemble",
                     "input_size": "80x80",
+                    "certification": "none — uncertified deterrence control (not ISO/IEC 30107-3 PAD L1/L2)",
                 },
             }
 
         except Exception as e:
-            logger.error(f"[MiniFASNet] Inference error: {e}")
-            return self._heuristic_fallback(image_b64)
-
-    def _heuristic_fallback(self, image_b64: str) -> dict:
-        """
-        CPU-only fallback when uniface is unavailable.
-        Uses image quality heuristics + DCT frequency analysis.
-        """
-        try:
-            import numpy as np
-            import cv2
-
-            image_bytes = base64.b64decode(image_b64)
-            nparr = np.frombuffer(image_bytes, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
-
-            if img is None:
-                return {"passed": False, "confidence": 0.0, "method": "heuristic_fallback"}
-
-            # ── Check 1: Image size sanity ────────────────────────────────────
-            h, w = img.shape
-            size_ok = (h >= 64 and w >= 64)
-
-            # ── Check 2: Laplacian variance (blur detection) ──────────────────
-            laplacian_var = float(cv2.Laplacian(img, cv2.CV_64F).var())
-            not_blurry = laplacian_var > 50.0  # Printed photos are often blurry
-
-            # ── Check 3: DCT high-frequency energy (screen replay detection) ──
-            # Screen replays have characteristic moiré patterns in frequency domain
-            img_float = np.float32(img) / 255.0
-            dct = cv2.dct(img_float)
-            high_freq_energy = float(np.sum(np.abs(dct[h//2:, w//2:])))
-            normal_freq_range = (high_freq_energy > 0.5 and high_freq_energy < 50.0)
-
-            # ── Check 4: Histogram spread (flat histograms = printed photo) ───
-            hist = cv2.calcHist([img], [0], None, [256], [0, 256])
-            hist_std = float(np.std(hist))
-            natural_histogram = hist_std > 100.0
-
-            checks_passed = sum([size_ok, not_blurry, normal_freq_range, natural_histogram])
-            confidence = checks_passed / 4.0
-
+            # FAIL-CLOSED: no silent fallback — surface the error (→ HTTP 503).
+            logger.error(f"[MiniFASNet] Inference error (fail-closed): {e}")
             return {
-                "passed": checks_passed >= 3,
-                "confidence": confidence,
-                "method": "heuristic_fallback",
-                "attack_type": "possible_spoof" if checks_passed < 3 else None,
-                "details": {
-                    "size_ok": size_ok,
-                    "not_blurry": not_blurry,
-                    "normal_freq_range": normal_freq_range,
-                    "natural_histogram": natural_histogram,
-                    "laplacian_var": laplacian_var,
-                },
+                "passed": False,
+                "confidence": 0.0,
+                "method": "minifasnet_onnx",
+                "error": f"minifasnet_inference_error: {e}",
             }
-        except Exception as e:
-            logger.error(f"[Heuristic] Fallback check failed: {e}")
-            return {"passed": False, "confidence": 0.0, "method": "heuristic_fallback", "error": str(e)}
 
 
-# ─── iProov Provider (Commercial) ────────────────────────────────────────────
+# ─── iProov Provider (Commercial — OPT-IN ONLY) ──────────────────────────────
+# SPEC-wave15 §5: the platform default liveness path is pure OSS (MiniFASNet +
+# mediapipe challenge). This commercial integration is retained for deployments
+# that explicitly opt in via LIVENESS_PROVIDER=iproov + IPROOV_API_KEY; it is
+# never selected implicitly and hard-fails when credentials are absent.
 
 class IProovProvider(LivenessProviderBase):
     """
     iProov commercial liveness provider.
-    Requires IPROOV_API_KEY environment variable.
+    Requires IPROOV_API_KEY environment variable (hard-fails without it).
     Docs: https://docs.iproov.com/docs/Content/ImplementationGuide/biometric-token.htm
     """
 
@@ -448,7 +544,11 @@ class IProovProvider(LivenessProviderBase):
 
     def check_passive(self, image_b64: str) -> dict:
         if not IPROOV_API_KEY:
-            raise RuntimeError("IPROOV_API_KEY not set — cannot use iProov provider")
+            # Hard-fail (fail-closed): commercial provider selected without creds.
+            raise RuntimeError(
+                "IPROOV_API_KEY not set — iProov is an opt-in commercial provider; "
+                "the platform default is pure OSS (LIVENESS_PROVIDER=minifasnet)"
+            )
 
         try:
             import httpx as _httpx
@@ -483,12 +583,16 @@ class IProovProvider(LivenessProviderBase):
             return {"passed": False, "confidence": 0.0, "method": "iproov", "error": str(e)}
 
 
-# ─── Onfido Provider (Commercial) ────────────────────────────────────────────
+# ─── Onfido Provider (Commercial — OPT-IN ONLY) ──────────────────────────────
+# SPEC-wave15 §5: the platform default liveness path is pure OSS (MiniFASNet +
+# mediapipe challenge). This commercial integration is retained for deployments
+# that explicitly opt in via LIVENESS_PROVIDER=onfido + ONFIDO_API_TOKEN; it is
+# never selected implicitly and hard-fails when credentials are absent.
 
 class OnfidoProvider(LivenessProviderBase):
     """
     Onfido commercial liveness provider.
-    Requires ONFIDO_API_TOKEN environment variable.
+    Requires ONFIDO_API_TOKEN environment variable (hard-fails without it).
     Docs: https://documentation.onfido.com/
     """
 
@@ -498,7 +602,11 @@ class OnfidoProvider(LivenessProviderBase):
 
     def check_passive(self, image_b64: str) -> dict:
         if not ONFIDO_API_TOKEN:
-            raise RuntimeError("ONFIDO_API_TOKEN not set — cannot use Onfido provider")
+            # Hard-fail (fail-closed): commercial provider selected without creds.
+            raise RuntimeError(
+                "ONFIDO_API_TOKEN not set — Onfido is an opt-in commercial provider; "
+                "the platform default is pure OSS (LIVENESS_PROVIDER=minifasnet)"
+            )
 
         try:
             import httpx as _httpx
@@ -532,16 +640,35 @@ class OnfidoProvider(LivenessProviderBase):
 # ─── Provider Factory ─────────────────────────────────────────────────────────
 
 def get_liveness_provider() -> LivenessProviderBase:
-    """Return the configured liveness provider instance (reads env var at call time)."""
+    """
+    Return the configured liveness provider instance (reads env var at call time).
+
+    SPEC-wave15 §5: the platform default is pure OSS (minifasnet). Commercial
+    providers are opt-in only and HARD-FAIL at selection time when their
+    credentials env vars are absent — there is no silent degradation.
+    """
     provider_name = os.getenv("LIVENESS_PROVIDER", "minifasnet").lower()
     if provider_name == "iproov":
-        logger.info("[Provider] Using iProov (commercial)")
+        if not os.getenv("IPROOV_API_KEY"):
+            raise RuntimeError(
+                "LIVENESS_PROVIDER=iproov selected but IPROOV_API_KEY is not set. "
+                "iProov is a commercial opt-in provider; set credentials explicitly "
+                "or use the OSS default (LIVENESS_PROVIDER=minifasnet)."
+            )
+        logger.info("[Provider] Using iProov (commercial, explicitly opted in)")
         return IProovProvider()
     elif provider_name == "onfido":
-        logger.info("[Provider] Using Onfido (commercial)")
+        if not os.getenv("ONFIDO_API_TOKEN"):
+            raise RuntimeError(
+                "LIVENESS_PROVIDER=onfido selected but ONFIDO_API_TOKEN is not set. "
+                "Onfido is a commercial opt-in provider; set credentials explicitly "
+                "or use the OSS default (LIVENESS_PROVIDER=minifasnet)."
+            )
+        logger.info("[Provider] Using Onfido (commercial, explicitly opted in)")
         return OnfidoProvider()
     else:
-        logger.info("[Provider] Using MiniFASNet (open-source, Apache 2.0)")
+        # Platform default: pure OSS.
+        logger.info("[Provider] Using MiniFASNet (open-source, Apache 2.0 — UNCERTIFIED deterrence control)")
         return MiniFASNetProvider()
 
 
@@ -646,8 +773,16 @@ def compare_faces(selfie_b64: str, document_b64: str) -> dict:
 
 def extract_mrz_data(document_b64: str) -> OCRResult:
     """
-    Extract text from document using pytesseract + MRZ parser.
-    Falls back to passporteye if available, then to stub for dev.
+    OPTIONAL FALLBACK ONLY — extract text/MRZ from a document image using
+    passporteye (MIT) or pytesseract.
+
+    SPEC-wave15 §5 delegation note: the PRIMARY MRZ/document-parsing path is
+    owned by python-kyc-pipeline (wave-15 K1). This function is retained solely
+    as a local fallback for the legacy /verify flow. Do NOT extend or duplicate
+    MRZ logic here — new MRZ work belongs in python-kyc-pipeline.
+
+    Fail-closed: when neither passporteye nor pytesseract is importable, returns
+    an empty result with confidence=0.0 (never a fabricated success).
     """
     try:
         import numpy as np
@@ -815,6 +950,413 @@ def detect_risk_flags(
     return flags
 
 
+# ─── Challenge Validation (SPEC-wave15 §5) ────────────────────────────────────
+# Active challenge-response liveness: the server (capture-session issuer) emits
+# an order-randomized challenge sequence per session; the client performs the
+# actions and reports ordered events plus sampled frames. This module verifies:
+#   1. Event order matches the issued challenge sequence.
+#   2. Timing plausibility (per-step min/max dwell, monotonic timestamps).
+#   3. Blendshape verification on sampled frames via MediaPipe Face Landmarker
+#      (lazy import; unavailable → FAIL CLOSED 503): eyeBlink / jawOpen /
+#      mouthSmile blendshapes and head-pose turns must correspond to claimed
+#      events.
+#   4. Cross-frame face consistency: per-frame embeddings from rust-biometric
+#      (HTTP), pairwise cosine vs first frame >= CHALLENGE_CONSISTENCY_THRESHOLD.
+#      rust-biometric down → FAIL CLOSED 503.
+#
+# HONEST LABEL: this is an UNCERTIFIED deterrence control (no ISO/IEC 30107-3
+# PAD certification). Responses always carry certified=false.
+
+# Canonical event vocabulary. Accepts snake_case (python-kyc-pipeline challenge
+# issuer) and camelCase (kyc_challenge_events schema, drizzle/0095) spellings.
+_EVENT_ALIASES = {
+    "blink": "blink",
+    "turnleft": "turnLeft", "turn_left": "turnLeft",
+    "turnright": "turnRight", "turn_right": "turnRight",
+    "smile": "smile",
+    "jawopen": "jawOpen", "jaw_open": "jawOpen",
+    "open_mouth": "jawOpen", "openmouth": "jawOpen",
+    "nod": "nod",
+    "frame": "frame",  # passive sample marker — not a movement challenge
+}
+_MOVEMENT_EVENTS = {"blink", "turnLeft", "turnRight", "smile", "jawOpen", "nod"}
+
+
+def _normalize_event_name(name: str) -> str:
+    """Map a raw event/challenge name to the canonical vocabulary; '' if unknown."""
+    return _EVENT_ALIASES.get((name or "").strip().lower().replace("-", "_"), "")
+
+
+def _validate_event_order(events: list, challenge_sequence: list[str]) -> dict:
+    """
+    Check 1 — event order matches the server-issued (order-randomized) sequence.
+    'frame' events are passive sample markers and are ignored for order matching.
+    All seq values must be 0-based and strictly increasing.
+    """
+    seqs = [e.seq for e in events]
+    if seqs != sorted(seqs) or len(set(seqs)) != len(seqs):
+        return {"passed": False, "detail": "event seq values must be strictly increasing"}
+    if seqs and seqs[0] != 0:
+        return {"passed": False, "detail": "event seq must start at 0"}
+
+    unknown = [e.event for e in events if not _normalize_event_name(e.event)]
+    if unknown:
+        return {"passed": False, "detail": f"unknown event names: {sorted(set(unknown))}"}
+
+    reported = [_normalize_event_name(e.event) for e in events]
+    reported_movements = [n for n in reported if n != "frame"]
+    expected = [_normalize_event_name(c) for c in challenge_sequence]
+    if any(not c for c in expected):
+        return {"passed": False, "detail": "challenge_sequence contains unknown challenge names"}
+    expected_movements = [n for n in expected if n != "frame"]
+
+    if reported_movements != expected_movements:
+        return {
+            "passed": False,
+            "detail": f"event order mismatch: expected {expected_movements}, got {reported_movements}",
+        }
+    return {"passed": True, "detail": "event order matches issued challenge sequence"}
+
+
+def _validate_event_timing(events: list) -> dict:
+    """
+    Check 2 — timing plausibility: timestamps (epoch ms) strictly increasing and
+    each per-step dwell within [CHALLENGE_MIN_DWELL_MS, CHALLENGE_MAX_DWELL_MS].
+    Too fast ⇒ scripted/bot replay; too slow ⇒ stalled or spliced capture.
+    """
+    if len(events) < 2:
+        return {"passed": True, "detail": "single event — dwell not applicable"}
+
+    # Fail-closed: an event without a client timestamp makes timing
+    # unverifiable — never silently skip (server contract allows null).
+    missing = [e.seq for e in events if e.timestamp_ms is None]
+    if missing:
+        return {"passed": False, "detail": f"events missing timestamps at seq {missing}"}
+
+    ts = [float(e.timestamp_ms) for e in events]
+    for i in range(1, len(ts)):
+        if ts[i] <= ts[i - 1]:
+            return {"passed": False, "detail": f"timestamps not strictly increasing at seq {events[i].seq}"}
+        dwell = ts[i] - ts[i - 1]
+        if dwell < CHALLENGE_MIN_DWELL_MS:
+            return {
+                "passed": False,
+                "detail": f"step {events[i].seq} dwell {dwell:.0f}ms < min {CHALLENGE_MIN_DWELL_MS:.0f}ms (scripted?)",
+            }
+        if dwell > CHALLENGE_MAX_DWELL_MS:
+            return {
+                "passed": False,
+                "detail": f"step {events[i].seq} dwell {dwell:.0f}ms > max {CHALLENGE_MAX_DWELL_MS:.0f}ms (stalled?)",
+            }
+    total = ts[-1] - ts[0]
+    if total > CHALLENGE_MAX_TOTAL_MS:
+        return {"passed": False, "detail": f"total duration {total:.0f}ms > max {CHALLENGE_MAX_TOTAL_MS:.0f}ms"}
+    return {"passed": True, "detail": f"timing plausible ({total:.0f}ms across {len(ts)} events)"}
+
+
+# ── MediaPipe Face Landmarker (lazy, fail-closed) ─────────────────────────────
+_face_landmarker = None
+_face_landmarker_error: Optional[str] = None
+
+
+def _get_face_landmarker():
+    """
+    Lazy-init the MediaPipe Face Landmarker (blendshapes + facial transformation
+    matrix). FAIL-CLOSED: raises RuntimeError if mediapipe is not installed or
+    the model asset is missing — the caller maps this to HTTP 503.
+    """
+    global _face_landmarker, _face_landmarker_error
+    if _face_landmarker is not None:
+        return _face_landmarker
+
+    try:
+        import mediapipe as mp  # Apache-2.0
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision as mp_vision
+    except ImportError as e:
+        _face_landmarker_error = f"mediapipe not installed: {e}"
+        raise RuntimeError(f"mediapipe_unavailable: {_face_landmarker_error}")
+
+    if not os.path.isfile(MEDIAPIPE_FACE_LANDMARKER_MODEL):
+        _face_landmarker_error = f"model asset missing: {MEDIAPIPE_FACE_LANDMARKER_MODEL}"
+        raise RuntimeError(f"mediapipe_unavailable: {_face_landmarker_error}")
+
+    try:
+        options = mp_vision.FaceLandmarkerOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=MEDIAPIPE_FACE_LANDMARKER_MODEL),
+            running_mode=mp_vision.RunningMode.IMAGE,
+            num_faces=1,
+            output_face_blendshapes=True,
+            output_facial_transformation_matrixes=True,
+        )
+        _face_landmarker = mp_vision.FaceLandmarker.create_from_options(options)
+        logger.info("[Challenge] MediaPipe Face Landmarker loaded (blendshapes + head pose)")
+        return _face_landmarker
+    except Exception as e:
+        _face_landmarker_error = f"landmarker init failed: {e}"
+        raise RuntimeError(f"mediapipe_unavailable: {_face_landmarker_error}")
+
+
+def mediapipe_face_landmarker_available() -> bool:
+    """Health-probe helper: importable + model asset present (does not init the model)."""
+    try:
+        import mediapipe  # noqa: F401
+    except ImportError:
+        return False
+    return os.path.isfile(MEDIAPIPE_FACE_LANDMARKER_MODEL)
+
+
+def _analyze_frame_blendshapes(frame_b64: str) -> dict:
+    """
+    Run Face Landmarker on one base64 JPEG frame.
+    Returns {"blendshapes": {name: score}, "yaw_deg": float, "pitch_deg": float}.
+    Raises RuntimeError (fail-closed) when mediapipe/model unavailable or no face.
+    """
+    landmarker = _get_face_landmarker()
+
+    import mediapipe as mp
+    import numpy as np
+    import cv2
+
+    try:
+        image_bytes = base64.b64decode(frame_b64)
+    except Exception as e:
+        raise RuntimeError(f"invalid base64 frame: {e}")
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise RuntimeError("undecodable frame (not a valid image)")
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    result = landmarker.detect(mp_image)
+
+    if not result.face_landmarks:
+        raise RuntimeError("no face detected in sampled frame")
+
+    blendshapes = {}
+    if result.face_blendshapes:
+        for cat in result.face_blendshapes[0]:
+            blendshapes[cat.category_name] = float(cat.score)
+
+    # Head pose from the facial transformation matrix (4x4, column-major floats).
+    # Rotation R(row, col) = data[col*4 + row]. Yaw = rotation about the vertical
+    # axis; pitch about the horizontal axis. Convention (MediaPipe face
+    # geometry): positive yaw ≈ face turned to the subject's left (image right);
+    # magnitude thresholds are env-tunable deterrence parameters.
+    yaw_deg = pitch_deg = None
+    mats = getattr(result, "facial_transformation_matrixes", None)
+    if mats:
+        import math
+        m = np.array(mats[0], dtype=np.float64).reshape(4, 4).T  # → row-major R(row,col)
+        r00, r10, r20 = m[0][0], m[1][0], m[2][0]
+        yaw_deg = float(math.degrees(math.atan2(r20, r00)))
+        pitch_deg = float(math.degrees(math.atan2(-r10, math.sqrt(r00 * r00 + r20 * r20) + 1e-9)))
+
+    return {"blendshapes": blendshapes, "yaw_deg": yaw_deg, "pitch_deg": pitch_deg}
+
+
+def _event_matches_analysis(event: str, analysis: dict) -> tuple[bool, str]:
+    """
+    Does the frame's blendshape/head-pose analysis correspond to the claimed
+    challenge event? Deterrence thresholds (env-tunable), NOT certified PAD.
+    """
+    bs = analysis["blendshapes"]
+    thr = CHALLENGE_BLENDSHAPE_THRESHOLD
+
+    def b(name: str) -> float:
+        return float(bs.get(name, 0.0))
+
+    if event == "blink":
+        left, right = b("eyeBlinkLeft"), b("eyeBlinkRight")
+        ok = left >= thr and right >= thr
+        return ok, f"eyeBlinkLeft={left:.2f} eyeBlinkRight={right:.2f} (thr {thr})"
+    if event == "smile":
+        left, right = b("mouthSmileLeft"), b("mouthSmileRight")
+        score = (left + right) / 2.0
+        return score >= thr, f"mouthSmile avg={score:.2f} (thr {thr})"
+    if event == "jawOpen":
+        score = b("jawOpen")
+        return score >= thr, f"jawOpen={score:.2f} (thr {thr})"
+    if event == "turnLeft":
+        yaw = analysis.get("yaw_deg")
+        if yaw is None:
+            return False, "head pose unavailable (no transformation matrix)"
+        ok = yaw >= CHALLENGE_HEAD_TURN_MIN_DEG
+        return ok, f"yaw={yaw:.1f}° (need >= +{CHALLENGE_HEAD_TURN_MIN_DEG:.0f}° for turnLeft)"
+    if event == "turnRight":
+        yaw = analysis.get("yaw_deg")
+        if yaw is None:
+            return False, "head pose unavailable (no transformation matrix)"
+        ok = yaw <= -CHALLENGE_HEAD_TURN_MIN_DEG
+        return ok, f"yaw={yaw:.1f}° (need <= -{CHALLENGE_HEAD_TURN_MIN_DEG:.0f}° for turnRight)"
+    if event == "nod":
+        pitch = analysis.get("pitch_deg")
+        if pitch is None:
+            return False, "head pose unavailable (no transformation matrix)"
+        ok = abs(pitch) >= CHALLENGE_HEAD_NOD_MIN_DEG
+        return ok, f"pitch={pitch:.1f}° (need |pitch| >= {CHALLENGE_HEAD_NOD_MIN_DEG:.0f}°)"
+    return False, f"unsupported movement event '{event}'"
+
+
+def _frame_index_for_event(event_pos: int, n_movements: int, n_frames: int, payload: Optional[dict]) -> int:
+    """
+    Map a movement event to a sampled frame. Prefer an explicit
+    payload.frame_index from the client; otherwise spread movement events
+    positionally across the provided frames.
+    """
+    if payload and isinstance(payload.get("frame_index"), int):
+        idx = payload["frame_index"]
+        if 0 <= idx < n_frames:
+            return idx
+    if n_movements <= 1:
+        return min(n_frames - 1, max(0, n_frames - 1))
+    return min(n_frames - 1, round(event_pos * (n_frames - 1) / (n_movements - 1)))
+
+
+def _verify_blendshapes(events: list, frames: list[str]) -> dict:
+    """
+    Check 3 — blendshape/head-pose verification of claimed movement events
+    against the sampled frames. FAIL-CLOSED: raises RuntimeError when mediapipe
+    or the model asset is unavailable, or a frame yields no analyzable face.
+    """
+    movements = [(i, _normalize_event_name(e.event), e) for i, e in enumerate(events)]
+    movements = [(pos, name, e) for pos, (_, name, e) in enumerate(movements) if name in _MOVEMENT_EVENTS]
+
+    if not frames:
+        return {"passed": False, "detail": "no frames provided for blendshape verification", "per_event": []}
+    if not movements:
+        return {"passed": False, "detail": "no movement events to verify", "per_event": []}
+
+    analyses: dict[int, dict] = {}
+    per_event = []
+    all_ok = True
+    for pos, name, e in movements:
+        fi = _frame_index_for_event(pos, len(movements), len(frames), e.payload)
+        if fi not in analyses:
+            analyses[fi] = _analyze_frame_blendshapes(frames[fi])  # may raise (fail-closed)
+        ok, detail = _event_matches_analysis(name, analyses[fi])
+        per_event.append({"seq": e.seq, "event": name, "frame_index": fi, "verified": ok, "detail": detail})
+        all_ok = all_ok and ok
+
+    return {
+        "passed": all_ok,
+        "detail": "all movement events corroborated by frame analysis" if all_ok
+                  else "one or more claimed events not corroborated by frame analysis",
+        "per_event": per_event,
+    }
+
+
+# ── Cross-frame biometric consistency via rust-biometric (fail-closed) ────────
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    import math
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+async def _frame_embeddings(frames: list[str]) -> tuple[list, float]:
+    """
+    Compute cross-frame consistency via rust-biometric's stateless embedding
+    endpoint (wave-15): POST {RUST_BIOMETRIC_URL}/embed {image_base64} →
+    {"embedding": [...]} per frame. No persistence — nothing is enrolled and
+    nothing is written to biometric_embeddings. This is the ONLY path; the old
+    enroll+match fallback (synthetic negative user ids, hardcoded
+    quality_score) has been removed.
+
+    Returns (embeddings, min_cosine_similarity).
+    FAIL-CLOSED: raises RuntimeError when RUST_BIOMETRIC_URL is unset, the
+    service is unreachable, or it returns an error (→ HTTP 503).
+    """
+    if not RUST_BIOMETRIC_URL:
+        raise RuntimeError("rust_biometric_unavailable: RUST_BIOMETRIC_URL is not set")
+
+    client = get_http_client(timeout=10.0)
+
+    embeddings = []
+    try:
+        for i, frame in enumerate(frames):
+            resp = await client.post(f"{RUST_BIOMETRIC_URL}/embed",
+                                     json={"image_base64": frame})
+            resp.raise_for_status()
+            emb = resp.json().get("embedding")
+            if not isinstance(emb, list) or not emb:
+                raise RuntimeError(f"rust-biometric returned no embedding for frame {i}")
+            embeddings.append([float(x) for x in emb])
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"rust_biometric_unavailable: embedding request failed: {e}")
+
+    ref = embeddings[0]
+    sims = [_cosine_similarity(ref, e) for e in embeddings[1:]] or [1.0]
+    return embeddings, min(sims)
+
+
+async def _verify_cross_frame_consistency(frames: list[str]) -> dict:
+    """
+    Check 4 — every sampled frame must show the same face: cosine similarity
+    between each frame's embedding and the first frame's embedding must be
+    >= CHALLENGE_CONSISTENCY_THRESHOLD. rust-biometric down → raises (fail-closed).
+    """
+    if len(frames) < 2:
+        return {"passed": True, "detail": "single frame — consistency trivially satisfied",
+                "consistency_score": 1.0}
+    _, min_sim = await _frame_embeddings(frames)
+    ok = min_sim >= CHALLENGE_CONSISTENCY_THRESHOLD
+    return {
+        "passed": ok,
+        "detail": (f"min cross-frame cosine {min_sim:.3f} >= {CHALLENGE_CONSISTENCY_THRESHOLD}"
+                   if ok else
+                   f"min cross-frame cosine {min_sim:.3f} < threshold {CHALLENGE_CONSISTENCY_THRESHOLD} "
+                   "(frame swap / injection suspected)"),
+        "consistency_score": round(min_sim, 4),
+    }
+
+
+def _server_nonce_check(nonce: str, challenge_sequence: list[str]) -> dict:
+    """
+    Optional hardening: cross-check the nonce against kyc_capture_sessions
+    (written by the capture-session issuer; drizzle/0095). If a row exists, its
+    server-issued challenge MUST match the client-supplied sequence. If no row
+    exists we proceed but flag it, unless CHALLENGE_REQUIRE_SERVER_NONCE=true
+    (then fail-closed). DB errors are fail-closed only under the require flag.
+    """
+    try:
+        conn = _get_db()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT challenge FROM kyc_capture_sessions
+                   WHERE nonce = %s ORDER BY created_at DESC LIMIT 1""",
+                (nonce,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        if CHALLENGE_REQUIRE_SERVER_NONCE:
+            return {"passed": False, "detail": f"server nonce check required but DB unavailable: {e}",
+                    "verified": None}
+        logger.warning(f"[Challenge] Server nonce check skipped (DB/table unavailable): {e}")
+        return {"passed": True, "detail": "server nonce check unavailable — proceeding unverified",
+                "verified": None}
+
+    if not row:
+        if CHALLENGE_REQUIRE_SERVER_NONCE:
+            return {"passed": False, "detail": "unknown session nonce (no server-issued challenge found)",
+                    "verified": False}
+        return {"passed": True, "detail": "no server record for nonce — client-supplied sequence accepted "
+                "(set CHALLENGE_REQUIRE_SERVER_NONCE=true to enforce)", "verified": False}
+
+    server_seq = [_normalize_event_name(c) for c in (row.get("challenge") or [])]
+    client_seq = [_normalize_event_name(c) for c in challenge_sequence]
+    if server_seq != client_seq:
+        return {"passed": False,
+                "detail": f"challenge sequence does not match server record for nonce ({server_seq} != {client_seq})",
+                "verified": False}
+    return {"passed": True, "detail": "nonce and challenge match server record", "verified": True}
+
+
 # ─── API Endpoints ────────────────────────────────────────────────────────────
 
 @app.get("/health", response_model=HealthResponse)
@@ -858,7 +1400,18 @@ async def health():
         tesseract_available=tesseract_ok,
         uniface_available=uniface_ok,
         dapr_connected=dapr_ok,
+        mediapipe_available=mediapipe_face_landmarker_available(),
+        rust_biometric_configured=bool(RUST_BIOMETRIC_URL),
     )
+
+
+def _public_method(provider_name: str) -> str:
+    """Honest method label (SPEC-wave15 §5) for liveness responses."""
+    return {
+        "minifasnet": "minifasnet-passive",
+        "iproov": "iproov-commercial",
+        "onfido": "onfido-commercial",
+    }.get(provider_name, provider_name)
 
 
 @app.post("/verify", response_model=LivenessResponse)
@@ -921,6 +1474,8 @@ async def verify(request: LivenessRequest):
         verified_at=datetime.now(timezone.utc).isoformat(),
         liveness_provider=prov.name,
         liveness_method=liveness.get("method", "unknown"),
+        certified=False,  # never ISO/IEC 30107-3 certified — deterrence control only
+        method=_public_method(prov.name),
     )
 
     # Publish result to Dapr pub/sub (non-blocking)
@@ -946,6 +1501,7 @@ async def check_passive(body: dict):
         "passed": result.get("passed", False),
         "confidence": result.get("confidence", 0.0),
         "method": result.get("method", "unknown"),
+        "certified": False,  # uncertified deterrence control (not ISO/IEC 30107-3 PAD L1/L2)
         "attack_type": result.get("attack_type"),
         "provider": prov.name,
         "details": result.get("details", {}),
@@ -1001,6 +1557,13 @@ async def check_active(body: dict):
         if not frame_results:
             return {"passed": False, "confidence": 0.0, "blink_count": 0, "head_movement_deg": 0.0, "method": "active_video"}
 
+        if all("error" in r for r in frame_results):
+            # FAIL-CLOSED (SPEC-wave15 §5): provider errored on every sampled
+            # frame — previously this silently degraded to passed=False with a
+            # zero-confidence "result". Surface as 503 instead.
+            raise HTTPException(status_code=503,
+                                detail=f"Active liveness provider unavailable: {frame_results[0]['error']}")
+
         # Aggregate: majority vote across frames
         live_frames = sum(1 for r in frame_results if r.get("passed"))
         live_ratio = live_frames / len(frame_results)
@@ -1016,6 +1579,7 @@ async def check_active(body: dict):
         return {
             "passed": passed,
             "confidence": round(avg_confidence, 4),
+            "certified": False,  # uncertified deterrence control
             "blink_count": estimated_blinks,
             "head_movement_deg": round(confidence_variance * 45, 2),
             "live_frame_ratio": round(live_ratio, 4),
@@ -1040,6 +1604,110 @@ async def match_faces(body: dict):
 
     result = compare_faces(img1_b64, img2_b64)
     return result
+
+
+@app.post("/challenge/validate", response_model=ChallengeValidateResponse)
+async def challenge_validate(request: ChallengeValidateRequest):
+    """
+    Active challenge-response liveness validation (SPEC-wave15 §5).
+
+    Verifies, in order:
+      1. event order matches the server-issued (per-session randomized) sequence
+      2. timing plausibility (per-step min/max dwell, monotonic timestamps)
+      3. blendshape/head-pose corroboration of claimed events on sampled frames
+         via MediaPipe Face Landmarker (lazy import; unavailable → 503 fail-closed)
+      4. cross-frame face consistency via rust-biometric embeddings
+         (cosine >= CHALLENGE_CONSISTENCY_THRESHOLD; service down → 503 fail-closed)
+
+    HONEST LABEL: UNCERTIFIED deterrence control — certified=false always.
+    """
+    start_ms = int(time.time() * 1000)
+    risk_flags: list[str] = []
+
+    # ── Input sanity (400 = malformed request, distinct from fail-closed 503) ──
+    if not request.nonce:
+        raise HTTPException(status_code=400, detail="nonce required")
+    if not request.challenge:
+        raise HTTPException(status_code=400, detail="challenge required")
+    if not request.events:
+        raise HTTPException(status_code=400, detail="events required")
+    if not request.sampled_frames:
+        raise HTTPException(status_code=400, detail="sampled_frames required (base64 jpeg samples)")
+    if len(request.sampled_frames) > CHALLENGE_MAX_FRAMES:
+        raise HTTPException(status_code=400, detail=f"too many frames (max {CHALLENGE_MAX_FRAMES})")
+
+    # ── Check 0 (optional hardening): nonce vs server-issued challenge ─────────
+    checks: dict = {}
+    nonce_check = _server_nonce_check(request.nonce, request.challenge)
+    checks["server_nonce"] = nonce_check
+    if nonce_check.get("verified") is not True:
+        # No positive server-side confirmation of the nonce/sequence (unknown
+        # nonce or check unavailable) — always surfaced as a risk flag.
+        risk_flags.append("nonce_not_server_verified")
+    if not nonce_check["passed"]:
+        risk_flags.append("server_nonce_mismatch")
+
+    # ── Check 1: event order ──────────────────────────────────────────────────
+    order = _validate_event_order(request.events, request.challenge)
+    checks["event_order"] = order
+    if not order["passed"]:
+        risk_flags.append("challenge_order_mismatch")
+
+    # ── Check 2: timing plausibility ──────────────────────────────────────────
+    timing = _validate_event_timing(request.events)
+    checks["timing"] = timing
+    if not timing["passed"]:
+        risk_flags.append("implausible_timing")
+
+    # ── Check 3: blendshape verification (FAIL-CLOSED on unavailable deps) ─────
+    try:
+        blend = _verify_blendshapes(request.events, request.sampled_frames)
+    except RuntimeError as e:
+        # mediapipe missing / model asset missing / no analyzable face → 503.
+        raise HTTPException(status_code=503, detail=f"Challenge blendshape verification unavailable: {e}")
+    checks["blendshapes"] = {k: v for k, v in blend.items() if k != "per_event"}
+    if not blend["passed"]:
+        risk_flags.append("blendshape_mismatch")
+
+    # ── Check 4: cross-frame biometric consistency (FAIL-CLOSED) ──────────────
+    try:
+        consistency = await _verify_cross_frame_consistency(request.sampled_frames)
+    except RuntimeError as e:
+        # rust-biometric down/misconfigured → 503.
+        raise HTTPException(status_code=503, detail=f"Cross-frame consistency check unavailable: {e}")
+    checks["cross_frame_consistency"] = {k: v for k, v in consistency.items() if k != "consistency_score"}
+    if not consistency["passed"]:
+        risk_flags.append("cross_frame_inconsistency")
+
+    passed = all(c.get("passed") for c in checks.values())
+    elapsed_ms = int(time.time() * 1000) - start_ms
+
+    response = ChallengeValidateResponse(
+        session_nonce=request.nonce,
+        passed=passed,
+        certified=False,
+        method="mediapipe-challenge",
+        checks=checks,
+        per_event=blend.get("per_event", []),
+        consistency_score=consistency.get("consistency_score"),
+        risk_flags=risk_flags,
+        processing_time_ms=elapsed_ms,
+        validated_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    # Audit (best-effort — audit failure must not change the verdict)
+    try:
+        db_log_event("challenge.validated", {
+            "session_nonce": request.nonce,
+            "passed": passed,
+            "checks": {k: v.get("passed") for k, v in checks.items()},
+            "risk_flags": risk_flags,
+            "processing_time_ms": elapsed_ms,
+        })
+    except Exception as e:
+        logger.warning(f"[Challenge] Audit log failed (non-critical): {e}")
+
+    return response
 
 
 # ─── Internal Helpers ─────────────────────────────────────────────────────────

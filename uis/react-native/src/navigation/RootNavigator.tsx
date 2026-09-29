@@ -55,6 +55,10 @@ function lazyScreen<T extends React.ComponentType<any>>(loader: () => Promise<{ 
 
 // Detail screens (lazy — original)
 const KYCScreen = lazyScreen(() => import('../screens/KYCScreen'));
+// wave-15 §8 (K6): camera-based KYC capture flow (document → selfie
+// challenge → optional NFC → verdict). Lazy like every other detail
+// screen so the camera module is only evaluated when navigated to.
+const KycCaptureScreen = lazyScreen(() => import('../screens/kyc/CaptureScreen'));
 const PaymentRailsScreen = lazyScreen(() => import('../screens/PaymentRailsScreen'));
 const RevenueShareScreen = lazyScreen(() => import('../screens/RevenueShareScreen'));
 const NotificationsScreen = lazyScreen(() => import('../screens/NotificationsScreen'));
@@ -126,6 +130,7 @@ export type RootStackParamList = {
   Main: undefined;
   // Original detail screens
   KYC: undefined;
+  KycCapture: { docType?: 'passport' | 'national_id' | 'drivers_license' } | undefined;
   PaymentRails: undefined;
   RevenueShare: undefined;
   Notifications: undefined;
@@ -256,6 +261,7 @@ export default function RootNavigator() {
           <Stack.Screen name="Main" component={MainTabs} />
           {/* Original detail screens */}
           <Stack.Screen name="KYC" component={KYCScreen} />
+          <Stack.Screen name="KycCapture" component={KycCaptureScreen} />
           <Stack.Screen name="PaymentRails" component={PaymentRailsScreen} />
           <Stack.Screen name="RevenueShare" component={RevenueShareScreen} />
           <Stack.Screen name="Notifications" component={NotificationsScreen} />

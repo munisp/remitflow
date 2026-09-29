@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { trpcClient } from "../services/trpc";
 
 // ── W13-C1: typed structural accessors over the vanilla tRPC client ──────────
@@ -100,6 +101,7 @@ const ADDRESS_DOC_TYPE = "utility_bill";
 const SELFIE_DOC_TYPE = "selfie";
 
 const KYC: React.FC = () => {
+  const navigate = useNavigate();
   const [currentStep, setCurrentStep] = useState(1);
   const [status, setStatus] = useState<KycStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -295,6 +297,31 @@ const KYC: React.FC = () => {
         <h1 className="text-2xl font-bold text-slate-900">KYC Verification</h1>
         <p className="text-slate-500 mt-1">
           Complete verification to unlock full features
+        </p>
+      </div>
+
+      {/* W15-K5: guided camera capture (kycCapture.* pipeline) is the primary
+          path; the manual upload steps below remain as the supported fallback. */}
+      <div className="bg-gradient-to-r from-indigo-600 to-violet-600 rounded-2xl p-5 text-white shadow-lg shadow-indigo-200">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="font-semibold text-lg">Verify with camera</p>
+            <p className="text-sm text-indigo-100 mt-1">
+              Scan your ID and complete a short selfie challenge — the fastest
+              way to get verified. On-device checks assess capture quality; the
+              decision is made by our secure verification pipeline.
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={() => navigate("/kyc/capture")}
+          className="mt-4 w-full sm:w-auto px-6 py-3 bg-white text-indigo-700 font-semibold rounded-xl hover:bg-indigo-50 transition-colors"
+        >
+          Verify with camera (recommended)
+        </button>
+        <p className="text-xs text-indigo-200 mt-2">
+          No camera? Upload photos instead using the steps below — both paths go
+          through the same review.
         </p>
       </div>
 
