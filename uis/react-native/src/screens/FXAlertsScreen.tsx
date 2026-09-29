@@ -10,7 +10,7 @@ const CURRENCIES = ['USD', 'EUR', 'GBP', 'NGN', 'KES', 'GHS', 'ZAR', 'CNY', 'INR
 const ALERT_ROW_HEIGHT = 128 + 10;
 
 type FxAlert = {
-  id: string;
+  id: number;
   fromCurrency: string;
   toCurrency: string;
   triggered: boolean;
@@ -24,7 +24,7 @@ const AlertRow = React.memo(function AlertRow({
   onDelete,
 }: {
   item: FxAlert;
-  onDelete: (id: string) => void;
+  onDelete: (id: number) => void;
 }) {
   return (
     <View style={styles.alertCard}>
@@ -56,21 +56,26 @@ export default function FXAlertsScreen() {
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({ fromCurrency: 'USD', toCurrency: 'NGN', targetRate: '', direction: 'above' as 'above' | 'below' });
 
-  const { data: alerts, isLoading, refetch } = trpc.fxAlerts.list.useQuery();
-  const { data: rates } = trpc.paymentRails.getLiveRates.useQuery({ baseCurrency: form.fromCurrency });
+  // wave16 C2: no fxAlerts namespace exists. Semantic match is the fx router's alert
+  // procedures (server/routers.ts:1845): fx.alerts / fx.createAlert / fx.deleteAlert —
+  // same camelCase field shape (fromCurrency/toCurrency/targetRate/direction/triggered)
+  // as this screen's model, unlike rateAlerts.* (:4674) which returns snake_case rows.
+  // paymentRails.getLiveRates is legacy-gated OFF; mounted equivalent is fx.liveRates.
+  const { data: alerts, isLoading, refetch } = trpc.fx.alerts.useQuery();
+  const { data: rates } = trpc.fx.liveRates.useQuery({ base: form.fromCurrency, pairs: [form.toCurrency] });
 
-  const createMutation = trpc.fxAlerts.create.useMutation({
-    onSuccess: () => { setShowCreate(false); utils.fxAlerts.list.invalidate(); },
+  const createMutation = trpc.fx.createAlert.useMutation({
+    onSuccess: () => { setShowCreate(false); utils.fx.alerts.invalidate(); },
     onError: (e: any) => Alert.alert('Error', e.message),
   });
-  const deleteMutation = trpc.fxAlerts.delete.useMutation({
-    onSuccess: () => utils.fxAlerts.list.invalidate(),
+  const deleteMutation = trpc.fx.deleteAlert.useMutation({
+    onSuccess: () => utils.fx.alerts.invalidate(),
   });
 
   // wave14 perf (L1): stable renderItem/getItemLayout.
   const deleteMutateRef = React.useRef(deleteMutation.mutate);
   deleteMutateRef.current = deleteMutation.mutate;
-  const handleDelete = useCallback((id: string) => deleteMutateRef.current({ id }), []);
+  const handleDelete = useCallback((id: number) => deleteMutateRef.current({ id: Number(id) }), []);
   const renderItem = useCallback(
     ({ item }: { item: FxAlert }) => <AlertRow item={item} onDelete={handleDelete} />,
     [handleDelete],
@@ -103,7 +108,7 @@ export default function FXAlertsScreen() {
       ) : (
         <FlatList
           data={alerts ?? []}
-          keyExtractor={(item) => item.id}
+          keyExtractor={(item) => String(item.id)}
           contentContainerStyle={{ padding: 16 }}
           renderItem={renderItem}
           getItemLayout={getItemLayout}

@@ -137,7 +137,6 @@ import { v101Router } from "./routers/v101Features.js";
 import { loadTestRouter } from "./routers/loadTestRouter.js";
 import { revenueShareRouter } from "./routers/revenueShare.js";
 import { securityAuditRouter } from "./routers/securityAudit.js";
-import { tenantFlagProcedure, invalidateFlagCache } from "./routers/tenantEnforcement.js";
 import { 
   cipsRouter, upiRouter, pixRouter, kafkaAdminRouter, temporalAdminRouter,
   permifyRouter, tigerBeetleRouter, openSearchRouter,
@@ -186,7 +185,7 @@ import { scheduledTransfersV117Router } from "./routers/scheduledTransfers.js";
 import { smsConfirmRouter } from "./routers/smsConfirm.js";
 import { posAgentCashFlowRouter, transfersListRouter } from "./routers/posAgentCashFlow.js";
 import { cryptoCustodyRouter } from "./routers/cryptoCustody.js";
-import { stablecoinEnhancedRouter } from "./routers/stablecoinEnhanced.js";
+import { stablecoinEnhancedRouter, stablecoinExtendedRouter } from "./routers/stablecoinEnhanced.js";
 import { liquidityPoolRouter } from "./routers/liquidityPool.js";
 import {
   supportTicketsRouter,
@@ -7836,6 +7835,8 @@ Case: #${input.caseId}`,
   p2p: p2pInstantRouter,
   // v310 — Stablecoin On-Ramp/Off-Ramp, Yield, DCA, Multi-Chain, P2P, Virtual Card, Bill Pay, Alerts
   stablecoinPlatform: stablecoinEnhancedRouter,
+  // Wave 16 — Extended stablecoin lifecycle (stake/unstake/bridge/bill-pay/buy/sell) as stablecoinExt.*
+  stablecoinExt: stablecoinExtendedRouter,
   // v311 — Liquidity Provider: quotes, settlements, reserves, rebalancing, admin
   liquidityPool: liquidityPoolRouter,
   // v312 — 20 Stablecoin Features (F1–F20) with polyglot middleware integration

@@ -1,0 +1,12 @@
+W16-C5 — PWA router wiring for the admin KYC review console.
+Add to uis/pwa/src/App.tsx (orchestrator; C5 does not edit the router file):
+
+1) Lazy import — place with the other admin console lazy imports
+   (next to the W15 KycCaptureSessionsConsole import, ~line 74):
+
+const KycReviewConsole = lazy(() => import("./pages/admin/kyc-review/KycReviewConsole"));
+
+2) Route entry — place inside the layout <Route> alongside the other
+   AdminRoute-gated admin consoles (next to path="admin/kyc-capture-sessions", ~line 316):
+
+<Route path="admin/kyc-review" element={<AdminRoute><KycReviewConsole /></AdminRoute>} />

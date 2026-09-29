@@ -7,12 +7,24 @@ export default function CheckoutSDKScreen() {
   const navigation = useNavigation();
   const [showCreate, setShowCreate] = useState(false);
   const [keyName, setKeyName] = useState('');
-  const { data, isLoading, refetch } = trpc.checkout.apiKeys.useQuery();
-  const createMutation = trpc.checkout.createKey.useMutation({
-    onSuccess: () => { setShowCreate(false); setKeyName(''); refetch(); },
+  // wave16: phantom checkout.createKey (mounted `checkout` router has no createKey; its
+  // `apiKeys` query returns a static credentials object, not a key list) repointed to the
+  // mounted apiKeys router (server/routers/productionV2.ts): list returns
+  // {id,name,keyPrefix,scopes,status,lastUsedAt,expiresAt,createdAt}[] and create takes
+  // {name, scopes?, expiresAt?, ipAllowlist?} and returns the raw key exactly once.
+  const { data, isLoading, refetch } = trpc.apiKeys.list.useQuery();
+  const createMutation = trpc.apiKeys.create.useMutation({
+    onSuccess: (created: any) => {
+      setShowCreate(false);
+      setKeyName('');
+      refetch();
+      if (created?.rawKey) {
+        Alert.alert('API Key Created', `Store this key securely — it will not be shown again:\n\n${created.rawKey}`);
+      }
+    },
     onError: (e: any) => Alert.alert('Error', e.message),
   });
-  const copy = (text: string) => { Clipboard.setString(text); Alert.alert('Copied', 'API key copied to clipboard'); };
+  const copy = (text: string) => { Clipboard.setString(text); Alert.alert('Copied', 'API key prefix copied to clipboard'); };
   return (
     <View style={s.container}>
       <View style={s.header}>
@@ -33,13 +45,16 @@ export default function CheckoutSDKScreen() {
             <View key={key.id} style={s.card}>
               <View style={s.row}>
                 <Text style={s.keyName}>{key.name ?? 'API Key'}</Text>
-                <Text style={[s.badge, { backgroundColor: key.isActive ? '#065f46' : '#3b1a1a' }]}>{key.isActive ? 'Active' : 'Revoked'}</Text>
+                <Text style={[s.badge, { backgroundColor: key.status === 'active' ? '#065f46' : '#3b1a1a' }]}>{key.status === 'active' ? 'Active' : 'Revoked'}</Text>
               </View>
-              <Text style={s.keyValue}>{key.key ? key.key.slice(0, 20) + '...' : '••••••••••••••••••••'}</Text>
-              <Text style={s.keyDate}>Created: {new Date(key.createdAt).toLocaleDateString()}</Text>
-              {key.isActive && (
-                <TouchableOpacity style={s.copyBtn} onPress={() => copy(key.key ?? '')}>
-                  <Text style={s.copyBtnText}>📋 Copy Key</Text>
+              <Text style={s.keyValue}>{key.keyPrefix ? `${key.keyPrefix}…` : '••••••••••••••••••••'}</Text>
+              <Text style={s.keyDate}>Created: {key.createdAt ? new Date(key.createdAt).toLocaleDateString() : '—'}</Text>
+              {Array.isArray(key.scopes) && key.scopes.length > 0 && (
+                <Text style={s.keyDate}>Scopes: {key.scopes.join(', ')}</Text>
+              )}
+              {key.status === 'active' && key.keyPrefix && (
+                <TouchableOpacity style={s.copyBtn} onPress={() => copy(key.keyPrefix)}>
+                  <Text style={s.copyBtnText}>📋 Copy Prefix</Text>
                 </TouchableOpacity>
               )}
             </View>

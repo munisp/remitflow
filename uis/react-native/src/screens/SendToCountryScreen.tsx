@@ -7,16 +7,17 @@
  * component, which looks up its per-country config by route name — so
  * existing navigation.navigate('SendToBrazil') style callers are untouched.
  *
- * Three historical variants are preserved exactly:
- *   - 'calculator'   : FX rate + amount converter (11 screens)
- *   - 'transferList' : searchable transfer list via trpc.transfer.listTransfers
+ * Three historical variants are preserved:
+ *   - 'calculator'   : FX rate + amount converter via trpc.fx.rates (11 screens)
+ *   - 'transferList' : searchable transfer list via trpc.transfers.list
  *                      (Benin, Mali, Togo)
- *   - 'legacyList'   : raw fetch('/trpc/sendMoney.list') list (Niger).
- *                      NOTE: that fetch uses a RELATIVE URL, which RN cannot
- *                      resolve — this is pre-existing behavior kept verbatim;
- *                      fixing it is a functional change, out of scope here.
+ *   - 'legacyList'   : same trpc.transfers.list data, legacy FlatList rendering
+ *                      (Niger). wave16: the previous raw fetch('/trpc/sendMoney.list')
+ *                      was hostless (unresolvable in RN) AND targeted a namespace
+ *                      that does not exist server-side — replaced with the mounted
+ *                      transfers.list procedure.
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   View,
   Text,
@@ -148,10 +149,10 @@ function CalculatorView({ config }: { config: CalculatorConfig }) {
   // NOTE: the original screens passed `{ onError: () => {} }` here, which
   // react-query v5 removed from useQuery options; it was a silent no-op, so
   // it is simply dropped (query errors remain available via `error`).
-  const { data: rates, isLoading } = trpc.fx.getRates.useQuery(
-    { from: 'USD', to: config.currency },
-  );
-  const rate = rates?.rate ?? 0;
+  // wave16: fx.getRates does not exist server-side — use the mounted fx.rates
+  // (public, USD base) and pick the destination currency entry.
+  const { data: rates, isLoading } = trpc.fx.rates.useQuery();
+  const rate = rates?.find?.((r: any) => r?.currency === config.currency)?.rate ?? 0;
   const converted = amount ? (parseFloat(amount) * rate).toFixed(2) : '0.00';
   return (
     <ScrollView style={calcStyles.container}>
@@ -232,7 +233,11 @@ function TransferListView({ config }: { config: ListConfig }) {
   const [search, setSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
-  const { data, isLoading, error, refetch } = trpc.transfer.listTransfers.useQuery(undefined, {
+  // wave16: transfer.listTransfers is not mounted — transfers.list
+  // (posAgentCashFlow router, "user's full transfer history") is the mounted
+  // equivalent. Input { limit?, offset?, status? } all default; returns
+  // { transfers, total }.
+  const { data, isLoading, error, refetch } = trpc.transfers.list.useQuery({}, {
     retry: 2,
     staleTime: 30_000,
   });
@@ -243,7 +248,7 @@ function TransferListView({ config }: { config: ListConfig }) {
     setRefreshing(false);
   };
 
-  const items = (data as any[]) ?? [];
+  const items: any[] = data?.transfers ?? [];
   const filtered = search
     ? items.filter((item: any) => JSON.stringify(item).toLowerCase().includes(search.toLowerCase()))
     : items;
@@ -358,31 +363,22 @@ const LegacyRow = React.memo(function LegacyRow({ item }: { item: LegacyItem }) 
 });
 
 function LegacyListView({ config }: { config: ListConfig }) {
-  const [items, setItems] = useState<LegacyItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  // wave16: replaced the hostless fetch('/trpc/sendMoney.list') — the sendMoney
+  // namespace does not exist server-side — with the mounted transfers.list
+  // procedure (same user transfer history the screen intends to show).
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { data, isLoading: loading, error: queryError, refetch } = trpc.transfers.list.useQuery({}, {
+    retry: 2,
+    staleTime: 30_000,
+  });
+  const items: LegacyItem[] = (data?.transfers ?? []) as LegacyItem[];
+  const error = queryError ? (queryError as any).message ?? 'Failed to load data' : null;
 
   const load = async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
-    else setLoading(true);
-    setError(null);
-    try {
-      // Pre-existing relative-URL fetch (see file header) — kept verbatim.
-      const response = await fetch('/trpc/sendMoney.list');
-      const data = await response.json();
-      setItems(data?.result?.data ?? []);
-    } catch (e: any) {
-      setError(e.message ?? 'Failed to load data');
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
+    await refetch();
+    setRefreshing(false);
   };
-
-  useEffect(() => {
-    load();
-  }, []);
 
   const renderItem = useCallback(
     ({ item }: { item: LegacyItem }) => <LegacyRow item={item} />,

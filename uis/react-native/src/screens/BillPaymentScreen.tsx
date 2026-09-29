@@ -4,56 +4,63 @@ import { useNavigation } from '@react-navigation/native';
 import { trpc } from '../services/trpc';
 import { DARK } from '../theme/dark';
 
-const CATEGORIES = [
-  { id: 'electricity', label: '⚡ Electricity', icon: '⚡' },
-  { id: 'water', label: '💧 Water', icon: '💧' },
-  { id: 'internet', label: '🌐 Internet', icon: '🌐' },
-  { id: 'tv', label: '📺 TV / DSTV', icon: '📺' },
-  { id: 'phone', label: '📱 Phone', icon: '📱' },
-  { id: 'school', label: '🎓 School Fees', icon: '🎓' },
-];
-
 export default function BillPaymentScreen() {
   const navigation = useNavigation();
-  const [category, setCategory] = useState('electricity');
+  const [category, setCategory] = useState('');
+  const [provider, setProvider] = useState('');
   const [accountNumber, setAccountNumber] = useState('');
   const [amount, setAmount] = useState('');
-  const { data: bills } = trpc.bills.list.useQuery();
+  // wave16 C2: bills.list does not exist on the mounted surface (routers.ts:4054-4092 has
+  // only categories/pay; billsV2 has billers/validateAccount/pay — no list anywhere).
+  // The phantom "Recent Payments" history is removed (fail closed); the category grid now
+  // consumes the mounted bills.categories so provider selection matches the pay schema.
+  const { data: categories, isLoading: loadingCategories, error: categoriesError, refetch: refetchCategories } = trpc.bills.categories.useQuery();
   const payMutation = trpc.bills.pay.useMutation({
     onSuccess: () => { Alert.alert('Success', 'Bill paid successfully!'); setAccountNumber(''); setAmount(''); },
     onError: (e: any) => Alert.alert('Error', e.message),
   });
+  const selectedCategory = (categories ?? []).find((c: any) => c.id === category);
   return (
     <View style={s.container}>
       <View style={s.header}><TouchableOpacity onPress={() => navigation.goBack()}><Text style={s.back}>← Back</Text></TouchableOpacity><Text style={s.title}>Bill Payment</Text><View /></View>
       <ScrollView contentContainerStyle={s.content}>
         <Text style={s.sectionTitle}>Select Category</Text>
-        <View style={s.categoryGrid}>
-          {CATEGORIES.map((cat) => (
-            <TouchableOpacity key={cat.id} style={[s.catBtn, category === cat.id && s.catBtnActive]} onPress={() => setCategory(cat.id)}>
-              <Text style={s.catIcon}>{cat.icon}</Text>
-              <Text style={[s.catLabel, category === cat.id && s.catLabelActive]}>{cat.label.replace(cat.icon + ' ', '')}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
+        {loadingCategories ? (
+          <ActivityIndicator color={DARK.primary} style={{ marginVertical: 12 }} />
+        ) : categoriesError ? (
+          <View style={s.historyCard}>
+            <Text style={s.historyTitle}>Bill categories are unavailable right now.</Text>
+            <TouchableOpacity onPress={() => refetchCategories()}><Text style={[s.historyLabel, { color: DARK.primary }]}>Retry</Text></TouchableOpacity>
+          </View>
+        ) : (
+          <View style={s.categoryGrid}>
+            {(categories ?? []).map((cat: any) => (
+              <TouchableOpacity key={cat.id} style={[s.catBtn, category === cat.id && s.catBtnActive]} onPress={() => { setCategory(cat.id); setProvider(''); }}>
+                <Text style={s.catIcon}>{cat.icon}</Text>
+                <Text style={[s.catLabel, category === cat.id && s.catLabelActive]}>{cat.name}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+        {selectedCategory && (
+          <>
+            <Text style={s.label}>Provider</Text>
+            <View style={s.categoryGrid}>
+              {(selectedCategory.providers ?? []).map((p: string) => (
+                <TouchableOpacity key={p} style={[s.catBtn, provider === p && s.catBtnActive]} onPress={() => setProvider(p)}>
+                  <Text style={[s.catLabel, provider === p && s.catLabelActive]}>{p}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </>
+        )}
         <Text style={s.label}>Account / Meter Number</Text>
         <TextInput style={s.input} value={accountNumber} onChangeText={setAccountNumber} placeholder="Enter account number" placeholderTextColor={DARK.dim} keyboardType="numeric" />
         <Text style={s.label}>Amount (USD)</Text>
         <TextInput style={s.input} value={amount} onChangeText={setAmount} placeholder="50" placeholderTextColor={DARK.dim} keyboardType="numeric" />
-        <TouchableOpacity style={s.payBtn} onPress={() => payMutation.mutate({ category, accountNumber, amount: parseFloat(amount) || 0, currency: 'USD' })} disabled={payMutation.isPending || !accountNumber || !amount}>
+        <TouchableOpacity style={s.payBtn} onPress={() => payMutation.mutate({ category, provider, accountNumber, amount: parseFloat(amount) || 0, currency: 'USD' })} disabled={payMutation.isPending || !category || !provider || !accountNumber || !amount}>
           {payMutation.isPending ? <ActivityIndicator color="#fff" /> : <Text style={s.payBtnText}>Pay Bill</Text>}
         </TouchableOpacity>
-        {bills && bills.length > 0 && (
-          <View style={s.historyCard}>
-            <Text style={s.historyTitle}>Recent Payments</Text>
-            {bills.slice(0, 5).map((b: any) => (
-              <View key={b.id} style={s.historyRow}>
-                <Text style={s.historyLabel}>{b.category} — {b.accountNumber}</Text>
-                <Text style={s.historyAmount}>{b.currency} {Number(b.amount).toLocaleString()}</Text>
-              </View>
-            ))}
-          </View>
-        )}
       </ScrollView>
     </View>
   );

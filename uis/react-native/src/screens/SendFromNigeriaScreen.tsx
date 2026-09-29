@@ -8,7 +8,11 @@ export default function SendFromNigeriaScreen() {
   const [search, setSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
-  const { data, isLoading, error, refetch } = trpc.transfer.listTransfers.useQuery(undefined, {
+  // wave16: transfer.listTransfers is not mounted — transfers.list
+  // (posAgentCashFlow router, "user's full transfer history") is the mounted
+  // equivalent. Input { limit?, offset?, status? } all default; returns
+  // { transfers, total }.
+  const { data, isLoading, error, refetch } = trpc.transfers.list.useQuery({}, {
     retry: 2,
     staleTime: 30_000,
   });
@@ -19,7 +23,7 @@ export default function SendFromNigeriaScreen() {
     setRefreshing(false);
   };
 
-  const items = (data as any[]) ?? [];
+  const items: any[] = data?.transfers ?? [];
   const filtered = search
     ? items.filter((item: any) =>
         JSON.stringify(item).toLowerCase().includes(search.toLowerCase())

@@ -115,12 +115,12 @@ async function fetchJson<T>(path: string, timeoutMs = 5000): Promise<FetchOutcom
   }
 }
 
-/** Attempt the admin-only tRPC health.platform query via raw HTTP. */
+/** Attempt the admin-only tRPC platformHealth.platform query via raw HTTP. */
 async function fetchPlatformIntegrations(): Promise<PlatformIntegration[] | null> {
   const input = encodeURIComponent(JSON.stringify({ json: null }));
   const outcome = await fetchJson<{
     result?: { data?: { json?: { integrations?: PlatformIntegration[] } } };
-  }>(`/trpc/health.platform?input=${input}`, 8000);
+  }>(`/trpc/platformHealth.platform?input=${input}`, 8000);
   if (!outcome.ok || !outcome.data) return null;
   const integrations = outcome.data.result?.data?.json?.integrations;
   return Array.isArray(integrations) ? integrations : null;

@@ -13,18 +13,45 @@ export default function SendMoneyScreen() {
   const [amount, setAmount] = useState('');
   const [fromCurrency, setFromCurrency] = useState('USD');
   const [toCurrency, setToCurrency] = useState('NGN');
+  const [recipientName, setRecipientName] = useState('');
   const [recipientEmail, setRecipientEmail] = useState('');
   const [note, setNote] = useState('');
   const [step, setStep] = useState<'form' | 'confirm' | 'success'>('form');
+  // TOTP step-up: the backend (transfer.send) requires a 6-digit TOTP code for
+  // transfers above $1,000 USD equivalent and answers FORBIDDEN "2FA_REQUIRED:…"
+  // when it is missing. Surface that requirement instead of bypassing it.
+  const [totpRequired, setTotpRequired] = useState(false);
+  const [totpCode, setTotpCode] = useState('');
+  const [idempotencyKey, setIdempotencyKey] = useState(
+    () => `rn-send-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+  );
 
-  const { data: rates } = trpc.paymentRails.getLiveRates.useQuery({ baseCurrency: fromCurrency });
-  const sendMutation = trpc.transactions.send.useMutation({
-    onSuccess: () => setStep('success'),
-    onError: (e: any) => Alert.alert('Transfer Failed', e.message),
+  // fx.liveRates (mounted, public) replaces the legacy-gated
+  // paymentRails.getLiveRates. Response: { rates: Record<currency, rate>, … }.
+  const { data: rates, isLoading: ratesLoading, isError: ratesError, refetch: refetchRates } =
+    trpc.fx.liveRates.useQuery({ base: fromCurrency });
+  const sendMutation = trpc.transfer.send.useMutation({
+    onSuccess: () => {
+      setStep('success');
+      setTotpRequired(false);
+      setTotpCode('');
+      setIdempotencyKey(`rn-send-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+    },
+    onError: (e: any) => {
+      const msg: string = e?.message ?? 'Transfer failed';
+      if (msg.includes('2FA_REQUIRED')) {
+        // Fail into the step-up flow: keep the confirm screen, ask for TOTP.
+        setTotpRequired(true);
+        Alert.alert('Step-up authentication required', msg.replace('2FA_REQUIRED:', '').trim());
+        return;
+      }
+      Alert.alert('Transfer Failed', msg);
+    },
   });
 
-  const rate = rates?.rates?.[toCurrency] ?? 1;
-  const convertedAmount = amount ? (parseFloat(amount) * rate).toFixed(2) : '0.00';
+  // Fail closed on rate display: never show a fabricated 1.0 fallback.
+  const rate: number | null = rates?.rates?.[toCurrency] ?? null;
+  const convertedAmount = amount && rate != null ? (parseFloat(amount) * rate).toFixed(2) : null;
   const fee = amount ? (parseFloat(amount) * 0.015).toFixed(2) : '0.00';
 
   const [isOffline, setIsOffline] = useState(false);
@@ -38,9 +65,28 @@ export default function SendMoneyScreen() {
     return () => unsubscribe();
   }, []);
 
+  const buildPayload = () => ({
+    fromCurrency,
+    amount: parseFloat(amount),
+    toCurrency,
+    recipientName: recipientName.trim(),
+    ...(recipientEmail.trim() ? { recipientEmail: recipientEmail.trim() } : {}),
+    ...(note.trim() ? { description: note.trim() } : {}),
+    idempotencyKey,
+    ...(totpCode.trim() ? { totpCode: totpCode.trim() } : {}),
+  });
+
   const handleSend = async () => {
-    if (!amount || !recipientEmail) {
-      Alert.alert('Missing Fields', 'Please fill in all required fields');
+    if (!amount || !recipientName.trim()) {
+      Alert.alert('Missing Fields', 'Please enter an amount and the recipient name');
+      return;
+    }
+    if (rate == null && !isOffline) {
+      Alert.alert(
+        'Rate Unavailable',
+        'Live exchange rates could not be loaded. Please try again before sending.',
+        [{ text: 'Retry', onPress: () => refetchRates() }, { text: 'Cancel', style: 'cancel' }],
+      );
       return;
     }
     if (step === 'form') {
@@ -51,14 +97,9 @@ export default function SendMoneyScreen() {
     if (isOffline) {
       await enqueue({
         operationType: 'transfer',
-        endpoint: 'transactions.send',
-        payload: {
-          amount: parseFloat(amount),
-          currency: fromCurrency,
-          recipientEmail,
-          note,
-          rail: 'SWIFT',
-        },
+        endpoint: 'transfer.send',
+        payload: buildPayload(),
+        idempotencyKey,
       });
       const count = await pendingCount();
       setQueuedCount(count);
@@ -70,13 +111,7 @@ export default function SendMoneyScreen() {
       return;
     }
 
-    sendMutation.mutate({
-      amount: parseFloat(amount),
-      currency: fromCurrency,
-      recipientEmail,
-      note,
-      rail: 'SWIFT',
-    });
+    sendMutation.mutate(buildPayload());
   };
 
   if (step === 'success') {
@@ -85,10 +120,10 @@ export default function SendMoneyScreen() {
         <Text style={styles.successIcon}>✅</Text>
         <Text style={styles.successTitle}>Transfer Initiated!</Text>
         <Text style={styles.successSub}>
-          {fromCurrency} {amount} → {toCurrency} {convertedAmount}
+          {fromCurrency} {amount}{convertedAmount != null ? ` → ${toCurrency} ${convertedAmount}` : ''}
         </Text>
-        <Text style={styles.successSub}>to {recipientEmail}</Text>
-        <TouchableOpacity style={styles.button} onPress={() => { setStep('form'); setAmount(''); setRecipientEmail(''); }}>
+        <Text style={styles.successSub}>to {recipientName}</Text>
+        <TouchableOpacity style={styles.button} onPress={() => { setStep('form'); setAmount(''); setRecipientName(''); setRecipientEmail(''); }}>
           <Text style={styles.buttonText}>Send Another</Text>
         </TouchableOpacity>
       </View>
@@ -108,7 +143,9 @@ export default function SendMoneyScreen() {
           </View>
           <View style={styles.confirmRow}>
             <Text style={styles.confirmLabel}>Recipient receives</Text>
-            <Text style={[styles.confirmValue, { color: '#10b981' }]}>{toCurrency} {convertedAmount}</Text>
+            <Text style={[styles.confirmValue, { color: '#10b981' }]}>
+              {convertedAmount != null ? `${toCurrency} ${convertedAmount}` : '—'}
+            </Text>
           </View>
           <View style={styles.confirmRow}>
             <Text style={styles.confirmLabel}>Fee</Text>
@@ -116,12 +153,30 @@ export default function SendMoneyScreen() {
           </View>
           <View style={styles.confirmRow}>
             <Text style={styles.confirmLabel}>To</Text>
-            <Text style={styles.confirmValue}>{recipientEmail}</Text>
+            <Text style={styles.confirmValue}>{recipientName}</Text>
           </View>
           <View style={styles.confirmRow}>
             <Text style={styles.confirmLabel}>Exchange rate</Text>
-            <Text style={styles.confirmValue}>1 {fromCurrency} = {rate.toFixed(4)} {toCurrency}</Text>
+            <Text style={styles.confirmValue}>
+              {rate != null ? `1 ${fromCurrency} = ${rate.toFixed(4)} ${toCurrency}` : 'unavailable'}
+            </Text>
           </View>
+          {totpRequired && (
+            <View style={{ marginTop: 12 }}>
+              <Text style={styles.confirmLabel}>
+                This transfer requires step-up authentication. Enter the 6-digit code from your authenticator app.
+              </Text>
+              <TextInput
+                style={[styles.input, { marginTop: 8 }]}
+                value={totpCode}
+                onChangeText={setTotpCode}
+                placeholder="123456"
+                placeholderTextColor="#6b7280"
+                keyboardType="number-pad"
+                maxLength={6}
+              />
+            </View>
+          )}
           <View style={styles.buttonRow}>
             <TouchableOpacity style={styles.buttonOutline} onPress={() => setStep('form')}>
               <Text style={styles.buttonOutlineText}>Edit</Text>
@@ -159,8 +214,20 @@ export default function SendMoneyScreen() {
           </View>
 
           <View style={styles.rateRow}>
-            <Text style={styles.rateText}>1 {fromCurrency} = {rate.toFixed(4)} {toCurrency}</Text>
-            <Text style={styles.convertedText}>{toCurrency} {convertedAmount}</Text>
+            {ratesLoading ? (
+              <Text style={styles.rateText}>Loading live rate…</Text>
+            ) : rate != null ? (
+              <>
+                <Text style={styles.rateText}>1 {fromCurrency} = {rate.toFixed(4)} {toCurrency}</Text>
+                <Text style={styles.convertedText}>{toCurrency} {convertedAmount}</Text>
+              </>
+            ) : (
+              <TouchableOpacity onPress={() => refetchRates()}>
+                <Text style={[styles.rateText, { color: '#ef4444' }]}>
+                  {ratesError ? 'Live rate unavailable — tap to retry' : `No live rate for ${toCurrency} — tap to retry`}
+                </Text>
+              </TouchableOpacity>
+            )}
           </View>
 
           <View style={styles.card}>
@@ -179,7 +246,19 @@ export default function SendMoneyScreen() {
           </View>
 
           <View style={styles.card}>
-            <Text style={styles.label}>Recipient email *</Text>
+            <Text style={styles.label}>Recipient name *</Text>
+            <TextInput
+              style={styles.input}
+              value={recipientName}
+              onChangeText={setRecipientName}
+              placeholder="Full name of the recipient"
+              placeholderTextColor="#6b7280"
+              autoCapitalize="words"
+            />
+          </View>
+
+          <View style={styles.card}>
+            <Text style={styles.label}>Recipient email (optional)</Text>
             <TextInput
               style={styles.input}
               value={recipientEmail}

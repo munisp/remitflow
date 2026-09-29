@@ -7,13 +7,15 @@ export default function SystemConfigPageScreen() {
   const navigation = useNavigation<any>();
   const { user } = useAuth();
   const [refreshing, setRefreshing] = React.useState(false);
-  const { data, isLoading, refetch } = (trpc as any)?.['systemConfig']?.['getAll']?.useQuery?.() ?? { data: null, isLoading: false, refetch: () => {} };
+  // wave16: systemConfig.getAll does not resolve to a mounted non-legacy
+  // procedure — repointed to the verified mounted pair systemConfig.list.
+  const { data, isLoading, error, refetch } = trpc.systemConfig.list.useQuery();
   const onRefresh = async () => {
     setRefreshing(true);
     await refetch?.();
     setRefreshing(false);
   };
-  const items: any[] = Array.isArray(data) ? data : (data ? [data] : []);
+  const items: any[] = Array.isArray(data) ? data : [];
   return (
     <ScrollView
       style={styles.container}
@@ -28,6 +30,12 @@ export default function SystemConfigPageScreen() {
       </View>
       {isLoading ? (
         <ActivityIndicator color="#6366f1" size="large" style={{ marginTop: 40 }} />
+      ) : error ? (
+        <View style={styles.empty}>
+          <Text style={styles.emptyIcon}>⚠️</Text>
+          <Text style={styles.emptyText}>Unable to load this data</Text>
+          <Text style={styles.emptySubtext}>{(error as any)?.message ?? 'Unknown error'} — pull down to retry</Text>
+        </View>
       ) : items.length === 0 ? (
         <View style={styles.empty}>
           <Text style={styles.emptyIcon}>📭</Text>

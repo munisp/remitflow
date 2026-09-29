@@ -1,49 +1,29 @@
 import React from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, RefreshControl } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
-import { trpc } from '../services/trpc';
 import { useAuth } from '../contexts/AuthContext';
 export default function DocumentVaultScreen() {
   const navigation = useNavigation<any>();
   const { user } = useAuth();
-  const [refreshing, setRefreshing] = React.useState(false);
-  const { data, isLoading, refetch } = (trpc as any)?.['documentVault']?.['list']?.useQuery?.() ?? { data: null, isLoading: false, refetch: () => {} };
-  const onRefresh = async () => {
-    setRefreshing(true);
-    await refetch?.();
-    setRefreshing(false);
-  };
-  const items: any[] = Array.isArray(data) ? data : (data ? [data] : []);
+  // wave16 fail-closed: documentVault is only mounted behind the legacy feature-pack gate (OFF by default) and has no mounted non-legacy equivalent.
+  // No phantom call is attempted; the screen honestly reports the feature state.
   return (
-    <ScrollView
-      style={styles.container}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#6366f1" />}
-    >
+    <ScrollView style={styles.container} contentContainerStyle={{ flexGrow: 1 }}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
           <Text style={styles.backText}>← Back</Text>
         </TouchableOpacity>
-        <Text style={styles.title}>📁 Document Vault</Text>
+        <Text style={styles.title}>Document Vault</Text>
         {user && <Text style={styles.subtitle}>Logged in as {user.name ?? user.email}</Text>}
       </View>
-      {isLoading ? (
-        <ActivityIndicator color="#6366f1" size="large" style={{ marginTop: 40 }} />
-      ) : items.length === 0 ? (
-        <View style={styles.empty}>
-          <Text style={styles.emptyIcon}>📭</Text>
-          <Text style={styles.emptyText}>No data available</Text>
-          <Text style={styles.emptySubtext}>Pull down to refresh</Text>
-        </View>
-      ) : (
-        items.slice(0, 20).map((item, idx) => (
-          <View key={item?.id ?? idx} style={styles.card}>
-            <Text style={styles.cardTitle}>{item?.name ?? item?.title ?? item?.id ?? `Item ${idx + 1}`}</Text>
-            {item?.status && <Text style={styles.badge}>{item.status}</Text>}
-            {item?.amount && <Text style={styles.amount}>${Number(item.amount).toLocaleString()}</Text>}
-            {item?.createdAt && <Text style={styles.date}>{new Date(item.createdAt).toLocaleDateString()}</Text>}
-          </View>
-        ))
-      )}
+      <View style={styles.empty}>
+        <Text style={styles.emptyIcon}>🚧</Text>
+        <Text style={styles.emptyText}>This feature is not yet available</Text>
+        <Text style={styles.emptySubtext}>
+          Document Vault is not part of the currently enabled backend feature set. No data was
+          requested and nothing here is a live record.
+        </Text>
+      </View>
       <View style={{ height: 32 }} />
     </ScrollView>
   );

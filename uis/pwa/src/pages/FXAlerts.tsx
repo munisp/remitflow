@@ -86,6 +86,7 @@ const FXAlerts: React.FC = () => {
   const [rateHistory, setRateHistory] = useState<RateHistory[]>([]);
   const [selectedPair, setSelectedPair] = useState(CURRENCY_PAIRS[0]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showCreateAlert, setShowCreateAlert] = useState(false);
   const [showRedeemModal, setShowRedeemModal] = useState(false);
   
@@ -106,43 +107,13 @@ const FXAlerts: React.FC = () => {
         const aData = data as unknown as { alerts?: FXAlert[] };
         setAlerts(aData.alerts || (Array.isArray(data) ? data as unknown as FXAlert[] : []));
       } else {
-        setAlerts([
-          {
-            alert_id: 'alert-001',
-            source_currency: 'GBP',
-            destination_currency: 'NGN',
-            alert_type: 'RATE_ABOVE',
-            threshold_value: 2000,
-            current_value: 1950.50,
-            status: 'ACTIVE',
-            created_at: new Date(Date.now() - 86400000 * 3).toISOString(),
-            expires_at: new Date(Date.now() + 86400000 * 27).toISOString(),
-          },
-          {
-            alert_id: 'alert-002',
-            source_currency: 'USD',
-            destination_currency: 'NGN',
-            alert_type: 'RATE_BELOW',
-            threshold_value: 1500,
-            current_value: 1535.00,
-            status: 'ACTIVE',
-            created_at: new Date(Date.now() - 86400000 * 7).toISOString(),
-          },
-          {
-            alert_id: 'alert-003',
-            source_currency: 'EUR',
-            destination_currency: 'NGN',
-            alert_type: 'RATE_ABOVE',
-            threshold_value: 1700,
-            current_value: 1680.25,
-            status: 'TRIGGERED',
-            created_at: new Date(Date.now() - 86400000 * 14).toISOString(),
-            triggered_at: new Date(Date.now() - 86400000 * 2).toISOString(),
-          },
-        ]);
+        // Fail closed: never present fabricated alerts as real data.
+        setAlerts([]);
+        setError('Unable to load rate alerts from the backend. Please try again later.');
       }
     } catch {
       setAlerts([]);
+      setError('Unable to load rate alerts from the backend. Please try again later.');
     } finally {
       setLoading(false);
     }
@@ -150,33 +121,13 @@ const FXAlerts: React.FC = () => {
 
   const fetchLoyalty = useCallback(async () => {
     try {
+      // Fail closed: if the rewards endpoint is unreachable, show an honest
+      // "unavailable" state instead of a fabricated loyalty summary.
       const data = await fxAlertService.getRewards().catch(() => null);
       if (data) {
-        setLoyalty(null);
+        setLoyalty(data as unknown as LoyaltySummary);
       } else {
-        setLoyalty({
-          tier: 'GOLD',
-          total_points: 5250,
-          available_points: 3750,
-          lifetime_volume_usd: 12500,
-          transfer_count: 47,
-          referral_count: 3,
-          member_since: new Date(Date.now() - 86400000 * 180).toISOString(),
-          benefits: {
-            fee_discount_percent: 10,
-            priority_support: true,
-            free_transfers_per_month: 3,
-            cashback_percent: 0.25,
-          },
-          next_tier: 'PLATINUM',
-          points_to_next_tier: 19750,
-          recent_rewards: [
-            { type: 'TRANSFER_COMPLETED', points: 10, description: 'Earned 10 points for TRANSFER_COMPLETED', created_at: new Date(Date.now() - 3600000).toISOString() },
-            { type: 'STABLECOIN_USAGE', points: 15, description: 'Earned 15 points for STABLECOIN_USAGE', created_at: new Date(Date.now() - 86400000).toISOString() },
-            { type: 'CHEAPEST_CORRIDOR', points: 5, description: 'Earned 5 points for CHEAPEST_CORRIDOR', created_at: new Date(Date.now() - 86400000).toISOString() },
-            { type: 'REFERRAL_SIGNUP', points: 50, description: 'Earned 50 points for REFERRAL_SIGNUP', created_at: new Date(Date.now() - 86400000 * 3).toISOString() },
-          ],
-        });
+        setLoyalty(null);
       }
     } catch {
       setLoyalty(null);
@@ -185,24 +136,12 @@ const FXAlerts: React.FC = () => {
 
   const fetchRateHistory = useCallback(async () => {
     try {
+      // Fail closed: if the backend is unreachable, show an honest "unavailable"
+      // state instead of a randomly generated rate history.
       const data = await fxAlertService.getAll().catch(() => null);
-      if (data) {
-        setRateHistory([]);
-      } else {
-        const baseRates: Record<string, number> = {
-          'GBP-NGN': 1950.50,
-          'USD-NGN': 1535.00,
-          'EUR-NGN': 1680.25,
-          'USD-GHS': 11.95,
-          'USD-KES': 130.20,
-          'USD-CNY': 7.25,
-        };
-        const baseRate = baseRates[`${selectedPair.from}-${selectedPair.to}`] || 1;
-        const history = Array.from({ length: 30 }, (_, i) => ({
-          date: new Date(Date.now() - (29 - i) * 86400000).toISOString().split('T')[0],
-          rate: baseRate * (1 + (Math.random() - 0.5) * 0.04),
-        }));
-        setRateHistory(history);
+      setRateHistory([]);
+      if (!data) {
+        setError('Rate history is unavailable right now. Please try again later.');
       }
     } catch {
       setRateHistory([]);
@@ -220,7 +159,8 @@ const FXAlerts: React.FC = () => {
 
   const handleCreateAlert = async () => {
     if (!newAlert.threshold_value) return;
-    
+    setError(null);
+
     try {
       const response = await fxAlertService.create({
         sourceCurrency: newAlert.source_currency,
@@ -228,27 +168,17 @@ const FXAlerts: React.FC = () => {
         targetRate: parseFloat(newAlert.threshold_value),
         direction: newAlert.alert_type === 'RATE_ABOVE' ? 'above' : 'below',
       } as unknown as Parameters<typeof fxAlertService.create>[0]).catch(() => null);
-      
+
       if (response) {
         fetchAlerts();
         setShowCreateAlert(false);
         setNewAlert({ source_currency: 'GBP', destination_currency: 'NGN', alert_type: 'RATE_ABOVE', threshold_value: '' });
+      } else {
+        setError('Unable to create the alert. The backend did not accept it — please try again.');
       }
     } catch {
-      const mockAlert: FXAlert = {
-        alert_id: `alert-${Date.now()}`,
-        source_currency: newAlert.source_currency,
-        destination_currency: newAlert.destination_currency,
-        alert_type: newAlert.alert_type,
-        threshold_value: parseFloat(newAlert.threshold_value),
-        current_value: 1950.50,
-        status: 'ACTIVE',
-        created_at: new Date().toISOString(),
-        expires_at: new Date(Date.now() + 86400000 * 30).toISOString(),
-      };
-      setAlerts(prev => [mockAlert, ...prev]);
-      setShowCreateAlert(false);
-      setNewAlert({ source_currency: 'GBP', destination_currency: 'NGN', alert_type: 'RATE_ABOVE', threshold_value: '' });
+      // Fail closed: leave the alerts list unchanged and surface the failure.
+      setError('Unable to create the alert. Please try again.');
     }
   };
 
@@ -257,7 +187,8 @@ const FXAlerts: React.FC = () => {
       await fxAlertService.delete(alertId);
       fetchAlerts();
     } catch {
-      setAlerts(prev => prev.map(a => a.alert_id === alertId ? { ...a, status: 'CANCELLED' } : a));
+      // Fail closed: do not fake a cancellation the backend did not confirm.
+      setError('Unable to cancel the alert. Please try again.');
     }
   };
 
@@ -265,15 +196,17 @@ const FXAlerts: React.FC = () => {
     if (!redeemPoints || !loyalty) return;
     const points = parseInt(redeemPoints);
     if (points > loyalty.available_points) return;
-    
+    setError(null);
+
     try {
       await fxAlertService.claimReward(redeemType);
       fetchLoyalty();
+      setShowRedeemModal(false);
+      setRedeemPoints('');
     } catch {
-      setLoyalty(prev => prev ? { ...prev, available_points: prev.available_points - points } : null);
+      // Fail closed: do not fake a points deduction the backend did not confirm.
+      setError('Unable to redeem points. The backend did not confirm the redemption — please try again.');
     }
-    setShowRedeemModal(false);
-    setRedeemPoints('');
   };
 
   const formatDate = (isoString: string) => {
@@ -304,6 +237,15 @@ const FXAlerts: React.FC = () => {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-slate-900">FX Alerts & Rewards</h1>
       </div>
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-800 flex items-center justify-between">
+          <span>{error}</span>
+          <button onClick={() => setError(null)} className="text-red-600 text-sm underline ml-4">
+            Dismiss
+          </button>
+        </div>
+      )}
 
       <div className="bg-white rounded-2xl shadow-lg border border-slate-100 overflow-hidden">
         <div className="border-b border-slate-200">
@@ -417,6 +359,12 @@ const FXAlerts: React.FC = () => {
                 ))}
               </div>
               
+              {rateHistory.length === 0 ? (
+                <div className="text-center py-8 text-slate-500">
+                  <p>Rate history is not available for {selectedPair.from}/{selectedPair.to} right now.</p>
+                </div>
+              ) : (
+              <>
               <div className="grid grid-cols-3 gap-4">
                 <div className="bg-slate-50 rounded-xl p-4">
                   <p className="text-sm text-slate-500">Current Rate</p>
@@ -456,13 +404,21 @@ const FXAlerts: React.FC = () => {
                 <span>{rateHistory.length > 0 ? formatDate(rateHistory[0].date) : ''}</span>
                 <span>{rateHistory.length > 0 ? formatDate(rateHistory[rateHistory.length - 1].date) : ''}</span>
               </div>
-              
+              </>
+              )}
+
               <button
                 onClick={() => { setNewAlert({ ...newAlert, source_currency: selectedPair.from, destination_currency: selectedPair.to }); setShowCreateAlert(true); }}
                 className="w-full py-3 border border-indigo-600 text-indigo-600 rounded-xl font-medium hover:bg-indigo-50"
               >
                 Set Alert for {selectedPair.from}/{selectedPair.to}
               </button>
+            </div>
+          )}
+
+          {activeTab === 'loyalty' && !loyalty && (
+            <div className="text-center py-8 text-slate-500">
+              <p>Loyalty rewards are not available right now. Please check back later.</p>
             </div>
           )}
 
@@ -571,7 +527,13 @@ const FXAlerts: React.FC = () => {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl max-w-md w-full p-6">
             <h2 className="text-xl font-bold mb-4">Create Rate Alert</h2>
-            
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-3 mb-4 text-sm text-red-800">
+                {error}
+              </div>
+            )}
+
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
@@ -649,7 +611,13 @@ const FXAlerts: React.FC = () => {
           <div className="bg-white rounded-xl max-w-sm w-full p-6">
             <h3 className="text-lg font-bold mb-4">Redeem Points</h3>
             <p className="text-sm text-slate-500 mb-4">Available: {loyalty.available_points.toLocaleString()} points</p>
-            
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-3 mb-4 text-sm text-red-800">
+                {error}
+              </div>
+            )}
+
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">Points to Redeem</label>

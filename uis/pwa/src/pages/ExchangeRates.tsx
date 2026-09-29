@@ -17,6 +17,7 @@ const ExchangeRates: React.FC = () => {
   const [targetCurrency, setTargetCurrency] = useState('USD');
   const [rates, setRates] = useState<RateData[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [alertPair, setAlertPair] = useState('USD/NGN');
   const [alertTarget, setAlertTarget] = useState('');
   const [alertMessage, setAlertMessage] = useState('');
@@ -24,17 +25,9 @@ const ExchangeRates: React.FC = () => {
   const flagMap: Record<string, string> = { USD: '\u{1F1FA}\u{1F1F8}', GBP: '\u{1F1EC}\u{1F1E7}', EUR: '\u{1F1EA}\u{1F1FA}', GHS: '\u{1F1EC}\u{1F1ED}', KES: '\u{1F1F0}\u{1F1EA}', ZAR: '\u{1F1FF}\u{1F1E6}', XOF: '\u{1F1F8}\u{1F1F3}', XAF: '\u{1F1E8}\u{1F1F2}' };
   const nameMap: Record<string, string> = { USD: 'US Dollar', GBP: 'British Pound', EUR: 'Euro', GHS: 'Ghanaian Cedi', KES: 'Kenyan Shilling', ZAR: 'South African Rand', XOF: 'West African CFA', XAF: 'Central African CFA' };
 
-  const fallbackRates: RateData[] = [
-    { from: 'NGN', to: 'USD', rate: 0.000645, change: 0.5, flag: '\u{1F1FA}\u{1F1F8}', name: 'US Dollar' },
-    { from: 'NGN', to: 'GBP', rate: 0.000505, change: -0.3, flag: '\u{1F1EC}\u{1F1E7}', name: 'British Pound' },
-    { from: 'NGN', to: 'EUR', rate: 0.000588, change: 0.2, flag: '\u{1F1EA}\u{1F1FA}', name: 'Euro' },
-    { from: 'NGN', to: 'GHS', rate: 0.008, change: 1.2, flag: '\u{1F1EC}\u{1F1ED}', name: 'Ghanaian Cedi' },
-    { from: 'NGN', to: 'KES', rate: 0.091, change: -0.1, flag: '\u{1F1F0}\u{1F1EA}', name: 'Kenyan Shilling' },
-    { from: 'NGN', to: 'ZAR', rate: 0.012, change: 0.8, flag: '\u{1F1FF}\u{1F1E6}', name: 'South African Rand' },
-  ];
-
   const fetchRates = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const res = await exchangeRateService.getRates('NGN');
       const data: ExchangeRate[] = res.data;
@@ -49,10 +42,11 @@ const ExchangeRates: React.FC = () => {
           name: nameMap[r.to] || r.to,
         })));
       } else {
-        setRates(fallbackRates);
+        setRates([]);
       }
     } catch {
-      setRates(fallbackRates);
+      setRates([]);
+      setError('Exchange rates are currently unavailable. Please try again later.');
     } finally {
       setLoading(false);
     }
@@ -151,8 +145,24 @@ const ExchangeRates: React.FC = () => {
       <div className="bg-white rounded-2xl border border-slate-100 p-5">
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-base font-semibold text-slate-900">Live Rates (NGN Base)</h2>
-          <span className="text-xs text-slate-400 bg-slate-50 px-3 py-1 rounded-full">{loading ? 'Loading...' : 'Updated just now'}</span>
+          <span className="text-xs text-slate-400 bg-slate-50 px-3 py-1 rounded-full">{loading ? 'Loading...' : error ? 'Unavailable' : 'Updated just now'}</span>
         </div>
+        {error && (
+          <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-xl">
+            <p className="text-red-800">{error}</p>
+            <button
+              onClick={() => setError(null)}
+              className="text-red-600 text-sm underline mt-2"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+        {!loading && rates.length === 0 ? (
+          <div className="text-center py-12 text-slate-400">
+            {error ? 'Rates unavailable' : 'No rates available for NGN base'}
+          </div>
+        ) : (
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead>
@@ -189,6 +199,7 @@ const ExchangeRates: React.FC = () => {
             </tbody>
           </table>
         </div>
+        )}
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-100 p-5">

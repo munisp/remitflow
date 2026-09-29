@@ -15,8 +15,12 @@ const RAILS = [
 export default function PaymentRailsScreen() {
   const navigation = useNavigation();
   const [selectedRail, setSelectedRail] = useState('SWIFT');
-  const { data: rates, isLoading } = trpc.paymentRails.getLiveRates.useQuery({ baseCurrency: 'USD' });
-  const { data: railStatus } = trpc.paymentRails.getSupportedRails.useQuery();
+  // wave16: paymentRails.* is mounted only behind the legacy feature-pack gate
+  // (OFF by default). Live rates come from the mounted fx.liveRates procedure
+  // (public, { rates, base, source, … }). There is NO mounted equivalent of
+  // paymentRails.getSupportedRails — per-rail live status is therefore shown
+  // as unavailable instead of fabricating an "Active" badge.
+  const { data: rates, isLoading, isError, refetch } = trpc.fx.liveRates.useQuery({ base: 'USD' });
 
   return (
     <ScrollView style={styles.container}>
@@ -27,40 +31,45 @@ export default function PaymentRailsScreen() {
       <Text style={styles.subtitle}>Select a payment network for your transfer</Text>
 
       <View style={styles.railsGrid}>
-        {RAILS.map((rail) => {
-          const status = railStatus?.find((r: any) => r.id === rail.id);
-          const isActive = status?.active !== false;
-          return (
-            <TouchableOpacity
-              key={rail.id}
-              style={[styles.railCard, selectedRail === rail.id && styles.railCardActive, !isActive && styles.railCardDisabled]}
-              onPress={() => isActive && setSelectedRail(rail.id)}
-            >
-              <Text style={styles.railFlag}>{rail.flag}</Text>
-              <Text style={[styles.railName, { color: rail.color }]}>{rail.name}</Text>
-              <Text style={styles.railDesc}>{rail.desc}</Text>
-              <View style={[styles.railStatus, { backgroundColor: isActive ? '#10b981' + '20' : '#ef4444' + '20' }]}>
-                <Text style={[styles.railStatusText, { color: isActive ? '#10b981' : '#ef4444' }]}>
-                  {isActive ? '● Active' : '● Offline'}
-                </Text>
-              </View>
-            </TouchableOpacity>
-          );
-        })}
+        {RAILS.map((rail) => (
+          <TouchableOpacity
+            key={rail.id}
+            style={[styles.railCard, selectedRail === rail.id && styles.railCardActive]}
+            onPress={() => setSelectedRail(rail.id)}
+          >
+            <Text style={styles.railFlag}>{rail.flag}</Text>
+            <Text style={[styles.railName, { color: rail.color }]}>{rail.name}</Text>
+            <Text style={styles.railDesc}>{rail.desc}</Text>
+            <View style={[styles.railStatus, { backgroundColor: '#9ca3af' + '20' }]}>
+              <Text style={[styles.railStatusText, { color: '#9ca3af' }]}>
+                ● Live status unavailable
+              </Text>
+            </View>
+          </TouchableOpacity>
+        ))}
       </View>
+      <Text style={styles.statusNote}>
+        Per-rail availability is not provided by the current backend build; the network
+        is confirmed again at transfer time.
+      </Text>
 
       <Text style={styles.sectionTitle}>Live Exchange Rates (USD base)</Text>
       {isLoading ? (
         <ActivityIndicator color="#6366f1" style={{ marginVertical: 20 }} />
+      ) : isError ? (
+        <View style={styles.ratesCard}>
+          <TouchableOpacity style={styles.rateRow} onPress={() => refetch()}>
+            <Text style={[styles.rateCurrency, { color: '#ef4444' }]}>
+              Live rates unavailable — tap to retry
+            </Text>
+          </TouchableOpacity>
+        </View>
       ) : (
         <View style={styles.ratesCard}>
           {Object.entries(rates?.rates ?? {}).slice(0, 10).map(([currency, rate]) => (
             <View key={currency} style={styles.rateRow}>
               <Text style={styles.rateCurrency}>{currency}</Text>
               <Text style={styles.rateValue}>{Number(rate).toFixed(4)}</Text>
-              <Text style={[styles.rateChange, { color: Math.random() > 0.5 ? '#10b981' : '#ef4444' }]}>
-                {Math.random() > 0.5 ? '▲' : '▼'} {(Math.random() * 0.5).toFixed(2)}%
-              </Text>
             </View>
           ))}
         </View>
@@ -91,5 +100,5 @@ const styles = StyleSheet.create({
   rateRow: { flexDirection: 'row', alignItems: 'center', padding: 14, borderBottomWidth: 1, borderBottomColor: '#2d2d4e' },
   rateCurrency: { flex: 1, color: '#e2e8f0', fontSize: 15, fontWeight: '600' },
   rateValue: { color: '#9ca3af', fontSize: 14, marginRight: 12 },
-  rateChange: { fontSize: 13, fontWeight: '600', width: 60, textAlign: 'right' },
+  statusNote: { color: '#6b7280', fontSize: 12, marginBottom: 20 },
 });

@@ -96,39 +96,13 @@ const BatchPayments: React.FC = () => {
         const bData = data as unknown as { batches?: PaymentBatch[] };
         setBatches(bData.batches || (Array.isArray(data) ? data as unknown as PaymentBatch[] : []));
       } else {
-        setBatches([
-          {
-            batch_id: 'batch-001',
-            name: 'January Payroll',
-            status: 'COMPLETED',
-            total_amount: 5000000,
-            source_currency: 'NGN',
-            total_payments: 50,
-            completed_payments: 50,
-            failed_payments: 0,
-            progress_percent: 100,
-            created_at: new Date(Date.now() - 86400000 * 7).toISOString(),
-            recurrence: 'MONTHLY',
-            payments: [],
-          },
-          {
-            batch_id: 'batch-002',
-            name: 'Vendor Payments Q1',
-            status: 'PROCESSING',
-            total_amount: 2500000,
-            source_currency: 'NGN',
-            total_payments: 25,
-            completed_payments: 15,
-            failed_payments: 2,
-            progress_percent: 60,
-            created_at: new Date(Date.now() - 3600000).toISOString(),
-            recurrence: 'ONCE',
-            payments: [],
-          },
-        ]);
+        // Fail closed: never present fabricated batches as real data.
+        setBatches([]);
+        setError('Unable to load payment batches from the backend. Please try again later.');
       }
     } catch {
       setBatches([]);
+      setError('Unable to load payment batches from the backend. Please try again later.');
     } finally {
       setLoading(false);
     }
@@ -137,37 +111,10 @@ const BatchPayments: React.FC = () => {
   const fetchScheduledPayments = useCallback(async () => {
     try {
       const data = await batchPaymentService.getAll().catch(() => null);
-      if (data) {
-        setScheduledPayments([]);
-      } else {
-        setScheduledPayments([
-          {
-            schedule_id: 'sched-001',
-            recipient_name: 'Landlord - ABC Properties',
-            recipient_account: '0123456789',
-            recipient_country: 'NG',
-            amount: 150000,
-            source_currency: 'NGN',
-            destination_currency: 'NGN',
-            recurrence: 'MONTHLY',
-            next_run_at: new Date(Date.now() + 86400000 * 5).toISOString(),
-            is_active: true,
-            run_count: 3,
-          },
-          {
-            schedule_id: 'sched-002',
-            recipient_name: 'School Fees - ABC School',
-            recipient_account: '9876543210',
-            recipient_country: 'NG',
-            amount: 250000,
-            source_currency: 'NGN',
-            destination_currency: 'NGN',
-            recurrence: 'QUARTERLY',
-            next_run_at: new Date(Date.now() + 86400000 * 30).toISOString(),
-            is_active: true,
-            run_count: 1,
-          },
-        ]);
+      // Fail closed: never present fabricated scheduled payments as real data.
+      setScheduledPayments([]);
+      if (!data) {
+        setError('Unable to load scheduled payments from the backend. Please try again later.');
       }
     } catch {
       setScheduledPayments([]);
@@ -241,25 +188,8 @@ const BatchPayments: React.FC = () => {
         setError('Failed to create batch');
       }
     } catch {
-      const mockBatch: PaymentBatch = {
-        batch_id: `batch-${Date.now()}`,
-        name: newBatch.name,
-        status: 'PENDING',
-        total_amount: csvPreview.reduce((sum, p) => sum + p.amount, 0),
-        source_currency: newBatch.source_currency,
-        total_payments: csvPreview.length,
-        completed_payments: 0,
-        failed_payments: 0,
-        progress_percent: 0,
-        created_at: new Date().toISOString(),
-        recurrence: newBatch.recurrence,
-        payments: csvPreview,
-      };
-      setBatches(prev => [mockBatch, ...prev]);
-      setNewBatch({ name: '', source_currency: 'NGN', recurrence: 'ONCE', scheduled_at: '' });
-      setCsvContent('');
-      setCsvPreview([]);
-      setActiveTab('batches');
+      // Fail closed: leave the batches list unchanged and surface the failure.
+      setError('Failed to create batch. The backend did not accept it — please try again.');
     } finally {
       setUploading(false);
     }
@@ -270,9 +200,8 @@ const BatchPayments: React.FC = () => {
       await batchPaymentService.execute(batchId);
       fetchBatches();
     } catch {
-      setBatches(prev => prev.map(b => 
-        b.batch_id === batchId ? { ...b, status: 'PROCESSING' } : b
-      ));
+      // Fail closed: do not fake a status change the backend did not confirm.
+      setError('Failed to start batch processing. Please try again.');
     }
   };
 
@@ -281,9 +210,8 @@ const BatchPayments: React.FC = () => {
       await batchPaymentService.cancel(scheduleId);
       fetchScheduledPayments();
     } catch {
-      setScheduledPayments(prev => prev.map(s =>
-        s.schedule_id === scheduleId ? { ...s, is_active: false } : s
-      ));
+      // Fail closed: do not fake a cancellation the backend did not confirm.
+      setError('Failed to cancel the scheduled payment. Please try again.');
     }
   };
 
@@ -325,6 +253,15 @@ const BatchPayments: React.FC = () => {
           + New Batch
         </button>
       </div>
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-800 flex items-center justify-between">
+          <span>{error}</span>
+          <button onClick={() => setError(null)} className="text-red-600 text-sm underline ml-4">
+            Dismiss
+          </button>
+        </div>
+      )}
 
       <div className="bg-white rounded-2xl shadow-lg border border-slate-100 overflow-hidden">
         <div className="border-b border-slate-200">
@@ -476,12 +413,6 @@ const BatchPayments: React.FC = () => {
 
           {activeTab === 'create' && (
             <div className="space-y-6">
-              {error && (
-                <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-800">
-                  {error}
-                </div>
-              )}
-              
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-2">Batch Name</label>
                 <input

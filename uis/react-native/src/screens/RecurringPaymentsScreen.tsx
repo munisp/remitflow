@@ -8,9 +8,11 @@ export default function RecurringPaymentsScreen() {
   const navigation = useNavigation();
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({ recipientEmail: '', amount: '', currency: 'USD', frequency: 'monthly', description: '' });
-  const { data, isLoading, refetch } = trpc.recurringPayments.list.useQuery();
-  const createMutation = trpc.recurringPayments.create.useMutation({ onSuccess: () => { setShowCreate(false); refetch(); }, onError: (e: any) => Alert.alert('Error', e.message) });
-  const cancelMutation = trpc.recurringPayments.cancel.useMutation({ onSuccess: refetch, onError: (e: any) => Alert.alert('Error', e.message) });
+  // wave16 C2: mounted namespace is `recurring` (server/routers.ts:2837) — list/create/cancel.
+  // recurring.create requires `name` + `recipientName` (no recipientEmail field server-side).
+  const { data, isLoading, refetch } = trpc.recurring.list.useQuery();
+  const createMutation = trpc.recurring.create.useMutation({ onSuccess: () => { setShowCreate(false); refetch(); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const cancelMutation = trpc.recurring.cancel.useMutation({ onSuccess: refetch, onError: (e: any) => Alert.alert('Error', e.message) });
   const FREQUENCIES = ['daily', 'weekly', 'monthly', 'quarterly'];
   const STATUS_COLOR: Record<string, string> = { active: '#10b981', paused: '#f59e0b', cancelled: '#6b7280' };
   return (
@@ -21,11 +23,11 @@ export default function RecurringPaymentsScreen() {
           {(!data || data.length === 0) && <View style={s.empty}><Text style={s.emptyIcon}>🔄</Text><Text style={s.emptyText}>No recurring payments</Text><Text style={s.emptySub}>Set up automatic payments to family or bills</Text></View>}
           {data?.map((p: any) => (
             <View key={p.id} style={s.card}>
-              <View style={s.row}><Text style={s.recipient}>{p.recipientEmail}</Text><Text style={[s.badge, { backgroundColor: STATUS_COLOR[p.status] ?? '#6b7280' }]}>{p.status}</Text></View>
+              <View style={s.row}><Text style={s.recipient}>{p.recipientName ?? p.name}</Text><Text style={[s.badge, { backgroundColor: STATUS_COLOR[p.status] ?? '#6b7280' }]}>{p.status}</Text></View>
               <Text style={s.amount}>{p.currency} {Number(p.amount).toLocaleString()} / {p.frequency}</Text>
               {p.description && <Text style={s.desc}>{p.description}</Text>}
-              <Text style={s.next}>Next: {p.nextExecutionAt ? new Date(p.nextExecutionAt).toLocaleDateString() : '—'}</Text>
-              {p.status === 'active' && <TouchableOpacity style={s.cancelBtn} onPress={() => Alert.alert('Cancel', 'Cancel this recurring payment?', [{ text: 'No', style: 'cancel' }, { text: 'Yes', style: 'destructive', onPress: () => cancelMutation.mutate({ id: p.id }) }])}><Text style={s.cancelBtnText}>Cancel Payment</Text></TouchableOpacity>}
+              <Text style={s.next}>Next: {p.nextRunAt ? new Date(p.nextRunAt).toLocaleDateString() : '—'}</Text>
+              {p.status === 'active' && <TouchableOpacity style={s.cancelBtn} onPress={() => Alert.alert('Cancel', 'Cancel this recurring payment?', [{ text: 'No', style: 'cancel' }, { text: 'Yes', style: 'destructive', onPress: () => cancelMutation.mutate({ id: Number(p.id) }) }])}><Text style={s.cancelBtnText}>Cancel Payment</Text></TouchableOpacity>}
             </View>
           ))}
         </ScrollView>
@@ -39,7 +41,7 @@ export default function RecurringPaymentsScreen() {
           ))}
           <Text style={s.label}>Frequency</Text>
           <View style={s.freqRow}>{FREQUENCIES.map((f) => (<TouchableOpacity key={f} style={[s.freqBtn, form.frequency === f && s.freqBtnActive]} onPress={() => setForm((x) => ({ ...x, frequency: f }))}><Text style={[s.freqBtnText, form.frequency === f && s.freqBtnTextActive]}>{f}</Text></TouchableOpacity>))}</View>
-          <TouchableOpacity style={s.submit} onPress={() => createMutation.mutate({ recipientEmail: form.recipientEmail, amount: parseFloat(form.amount) || 0, currency: 'USD', frequency: form.frequency as any, description: form.description })} disabled={createMutation.isPending}>{createMutation.isPending ? <ActivityIndicator color="#fff" /> : <Text style={s.submitText}>Create</Text>}</TouchableOpacity>
+          <TouchableOpacity style={s.submit} onPress={() => createMutation.mutate({ name: form.description || `Recurring payment to ${form.recipientEmail}`, recipientName: form.recipientEmail, amount: parseFloat(form.amount) || 0, currency: form.currency, frequency: form.frequency as any, description: form.description || undefined })} disabled={createMutation.isPending || !form.recipientEmail || !form.amount}>{createMutation.isPending ? <ActivityIndicator color="#fff" /> : <Text style={s.submitText}>Create</Text>}</TouchableOpacity>
           <TouchableOpacity style={s.cancelModal} onPress={() => setShowCreate(false)}><Text style={s.cancelModalText}>Cancel</Text></TouchableOpacity>
         </View></View>
       </Modal>

@@ -23,17 +23,11 @@ const Notifications: React.FC = () => {
   const [filter, setFilter] = useState('all');
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [loading, setLoading] = useState(true);
-
-  const fallbackNotifications: NotificationItem[] = [
-    { id: '1', type: 'transaction', title: 'Transfer Successful', message: 'Your transfer of NGN 50,000 to John Doe was successful.', time: '2 min ago', read: false },
-    { id: '2', type: 'security', title: 'New Login Detected', message: 'A new login was detected from Chrome on Windows in Lagos.', time: '1 hour ago', read: false },
-    { id: '3', type: 'transaction', title: 'Money Received', message: 'You received NGN 25,000 from Jane Smith.', time: '3 hours ago', read: true },
-    { id: '4', type: 'promo', title: 'Zero Fees This Weekend', message: 'Send money to Ghana and Kenya with zero fees this weekend!', time: '1 day ago', read: true },
-    { id: '5', type: 'system', title: 'KYC Reminder', message: 'Complete your KYC verification to unlock higher transfer limits.', time: '2 days ago', read: true },
-  ];
+  const [error, setError] = useState<string | null>(null);
 
   const fetchNotifications = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const res = await notificationService.getAll();
       const data = res.data;
@@ -47,10 +41,11 @@ const Notifications: React.FC = () => {
           read: n.read,
         })));
       } else {
-        setNotifications(fallbackNotifications);
+        setNotifications([]);
       }
     } catch {
-      setNotifications(fallbackNotifications);
+      setNotifications([]);
+      setError('Failed to load notifications');
     } finally {
       setLoading(false);
     }
@@ -99,8 +94,19 @@ const Notifications: React.FC = () => {
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-100">
+        {error && (
+          <div className="m-4 p-4 bg-red-50 border border-red-200 rounded-xl">
+            <p className="text-red-800">{error}</p>
+            <button
+              onClick={() => setError(null)}
+              className="text-red-600 text-sm underline mt-2"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         {filtered.length === 0 ? (
-          <div className="text-center py-12 text-slate-400">No notifications</div>
+          <div className="text-center py-12 text-slate-400">{error ? 'Notifications unavailable' : 'No notifications'}</div>
         ) : (
           <div className="divide-y divide-slate-50">
             {filtered.map((n) => {

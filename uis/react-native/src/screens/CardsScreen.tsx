@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet,
-  ActivityIndicator, Alert, TextInput, Modal,
+  ActivityIndicator, Alert, Modal,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { trpc } from '../services/trpc';
@@ -9,25 +9,26 @@ import { trpc } from '../services/trpc';
 export default function CardsScreen() {
   const navigation = useNavigation();
   const [showCreate, setShowCreate] = useState(false);
-  const [cardLabel, setCardLabel] = useState('');
   const [cardType, setCardType] = useState<'virtual' | 'physical'>('virtual');
+  const [cardBrand, setCardBrand] = useState<'visa' | 'mastercard' | 'verve'>('visa');
 
   const { data, isLoading, refetch } = trpc.cards.list.useQuery();
   const createMutation = trpc.cards.create.useMutation({
-    onSuccess: () => { setShowCreate(false); setCardLabel(''); refetch(); },
+    onSuccess: () => { setShowCreate(false); refetch(); },
     onError: (e: any) => Alert.alert('Error', e.message),
   });
   const freezeMutation = trpc.cards.freeze.useMutation({ onSuccess: refetch, onError: (e: any) => Alert.alert('Error', e.message) });
   const unfreezeMutation = trpc.cards.unfreeze.useMutation({ onSuccess: refetch, onError: (e: any) => Alert.alert('Error', e.message) });
-  const deleteMutation = trpc.cards.delete.useMutation({
+  // wave16 C2: mounted name is cards.cancel (server/routers.ts:2042), not cards.delete.
+  const cancelMutation = trpc.cards.cancel.useMutation({
     onSuccess: refetch,
     onError: (e: any) => Alert.alert('Error', e.message),
   });
 
-  const handleDelete = (id: number) => {
-    Alert.alert('Delete Card', 'Are you sure you want to delete this card?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => deleteMutation.mutate({ id }) },
+  const handleCancel = (id: number) => {
+    Alert.alert('Cancel Card', 'Are you sure you want to cancel this card? This cannot be undone.', [
+      { text: 'Keep Card', style: 'cancel' },
+      { text: 'Cancel Card', style: 'destructive', onPress: () => cancelMutation.mutate({ id: Number(id) }) },
     ]);
   };
 
@@ -63,7 +64,7 @@ export default function CardsScreen() {
                 </Text>
               </View>
               <Text style={styles.cardNumber}>{card.maskedNumber ?? '•••• •••• •••• ' + (card.last4 ?? '????')}</Text>
-              <Text style={styles.cardLabel}>{card.label ?? 'My Card'}</Text>
+              <Text style={styles.cardLabel}>{card.brand ? String(card.brand).toUpperCase() : 'My Card'}</Text>
               <Text style={styles.cardExpiry}>Expires {card.expiryMonth}/{card.expiryYear}</Text>
               <View style={styles.cardActions}>
                 {card.status === 'active' ? (
@@ -75,8 +76,8 @@ export default function CardsScreen() {
                     <Text style={styles.actionBtnText}>🔥 Unfreeze</Text>
                   </TouchableOpacity>
                 )}
-                <TouchableOpacity style={[styles.actionBtn, styles.deleteBtn]} onPress={() => handleDelete(card.id)}>
-                  <Text style={styles.actionBtnText}>🗑️ Delete</Text>
+                <TouchableOpacity style={[styles.actionBtn, styles.deleteBtn]} onPress={() => handleCancel(card.id)}>
+                  <Text style={styles.actionBtnText}>🗑️ Cancel Card</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -88,14 +89,6 @@ export default function CardsScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modal}>
             <Text style={styles.modalTitle}>Add New Card</Text>
-            <Text style={styles.label}>Card Label</Text>
-            <TextInput
-              style={styles.input}
-              value={cardLabel}
-              onChangeText={setCardLabel}
-              placeholder="e.g. Travel Card"
-              placeholderTextColor="#6b7280"
-            />
             <Text style={styles.label}>Card Type</Text>
             <View style={styles.typeRow}>
               {(['virtual', 'physical'] as const).map((t) => (
@@ -110,9 +103,23 @@ export default function CardsScreen() {
                 </TouchableOpacity>
               ))}
             </View>
+            <Text style={styles.label}>Card Brand</Text>
+            <View style={styles.typeRow}>
+              {(['visa', 'mastercard', 'verve'] as const).map((b) => (
+                <TouchableOpacity
+                  key={b}
+                  style={[styles.typeBtn, cardBrand === b && styles.typeBtnActive]}
+                  onPress={() => setCardBrand(b)}
+                >
+                  <Text style={[styles.typeBtnText, cardBrand === b && styles.typeBtnTextActive]}>
+                    {b.charAt(0).toUpperCase() + b.slice(1)}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
             <TouchableOpacity
               style={styles.submitBtn}
-              onPress={() => createMutation.mutate({ label: cardLabel, type: cardType, currency: 'USD' })}
+              onPress={() => createMutation.mutate({ type: cardType, brand: cardBrand, currency: 'USD' })}
               disabled={createMutation.isPending}
             >
               {createMutation.isPending ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitBtnText}>Create Card</Text>}

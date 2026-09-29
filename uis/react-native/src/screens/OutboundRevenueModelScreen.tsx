@@ -7,7 +7,10 @@ export default function OutboundRevenueModelScreen() {
   const navigation = useNavigation();
   const [refreshing, setRefreshing] = React.useState(false);
 
-  const { data, isLoading, error, refetch } = trpc.billing.getRevenueSummary.useQuery(undefined, {
+  // wave16: phantom billing.getRevenueSummary (no `billing` router mounted) repointed to the
+  // mounted billingEngine.getTenantPnL (server/routers/billingEngine.ts) — a real revenue/P&L
+  // summary object. Input schema: { tenantId?: string (default "default"), periodDays?: 1..365 (default 30) }.
+  const { data, isLoading, error, refetch } = trpc.billingEngine.getTenantPnL.useQuery({ periodDays: 30 }, {
     retry: 2,
     staleTime: 60_000,
   });

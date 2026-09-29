@@ -8,7 +8,10 @@ export default function RecipientOnboardingScreen() {
   const [search, setSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
-  const { data, isLoading, error, refetch } = trpc.recipient.listRecipients.useQuery(undefined, {
+  // wave16: phantom recipient.listRecipients (no `recipient` router mounted) repointed to the
+  // mounted beneficiaries.list (server/routers.ts) — the real recipient list, protected query,
+  // no input, returns beneficiary rows for the authenticated user.
+  const { data, isLoading, error, refetch } = trpc.beneficiaries.list.useQuery(undefined, {
     retry: 2,
     staleTime: 30_000,
   });

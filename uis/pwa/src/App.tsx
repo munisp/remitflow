@@ -74,6 +74,16 @@ const CaptureFlow = lazy(() => import("./pages/kyc/CaptureFlow"));
 const KycCaptureSessionsConsole = lazy(
   () => import("./components/enhanced-features/EnhancedKYCVerification"),
 );
+// W16 — investment surfaces (C6/C7) + admin KYC review console (C5)
+const InvestHub = lazy(() => import("./pages/invest/InvestHub"));
+const BondsPage = lazy(() => import("./pages/invest/BondsPage"));
+const BondDetailPage = lazy(() => import("./pages/invest/BondDetailPage"));
+const StocksPage = lazy(() => import("./pages/invest/StocksPage"));
+const InvestRealEstate = lazy(() => import("./pages/invest/RealEstate"));
+const InvestStartups = lazy(() => import("./pages/invest/Startups"));
+const InvestCommunity = lazy(() => import("./pages/invest/Community"));
+const InvestEscrow = lazy(() => import("./pages/invest/Escrow"));
+const KycReviewConsole = lazy(() => import("./pages/admin/kyc-review/KycReviewConsole"));
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -283,6 +293,16 @@ const App: React.FC = () => {
             <Route path="batch-payments" element={<BatchPayments />} />
             <Route path="savings-goals" element={<SavingsGoals />} />
             <Route path="fx-alerts" element={<FXAlerts />} />
+            {/* W16-C6/C7 — investment surfaces (diaspora bonds, NGX stocks,
+                real estate, startups, community, escrow) */}
+            <Route path="invest" element={<InvestHub />} />
+            <Route path="invest/bonds" element={<BondsPage />} />
+            <Route path="invest/bonds/:bondId" element={<BondDetailPage />} />
+            <Route path="invest/stocks" element={<StocksPage />} />
+            <Route path="invest/real-estate" element={<InvestRealEstate />} />
+            <Route path="invest/startups" element={<InvestStartups />} />
+            <Route path="invest/community" element={<InvestCommunity />} />
+            <Route path="invest/escrow" element={<InvestEscrow />} />
             <Route path="operations-map" element={<AdminRoute><OperationsMap /></AdminRoute>} />
             <Route path="platform-status" element={<PlatformHealth />} />
             {/* BDC console (F1). /bdc/rates and /bdc/teller are open to any
@@ -314,6 +334,8 @@ const App: React.FC = () => {
             {/* /W13-PARTNER */}
             {/* W15-K5: admin viewer for kycCapture pipeline sessions */}
             <Route path="admin/kyc-capture-sessions" element={<AdminRoute><KycCaptureSessionsConsole /></AdminRoute>} />
+            {/* W16-C5: admin KYC review console */}
+            <Route path="admin/kyc-review" element={<AdminRoute><KycReviewConsole /></AdminRoute>} />
           </Route>
 
           <Route path="*" element={<Navigate to="/" replace />} />

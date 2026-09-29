@@ -19,6 +19,13 @@ const COIN_INFO: Record<string, { name: string; apy: number }> = {
   PYUSD: { name: 'PayPal USD', apy: 4.0 },
 };
 
+// wave16 C2: yield protocols accepted by the stablecoin engine
+// (grounded: server/middleware/temporalWorkflows.ts:503).
+const YIELD_PROTOCOLS = ['aave_v3', 'compound_v3'];
+
+// wave16 C2: stablecoinExt.* mutations all require idempotencyKey (min 8 chars).
+const newIdempotencyKey = () => `rn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+
 type TabKey = 'onramp' | 'offramp' | 'swap' | 'send' | 'yield' | 'bridge' | 'bill';
 
 export default function StablecoinScreen() {
@@ -29,14 +36,21 @@ export default function StablecoinScreen() {
   const { data: balances, isLoading, refetch } = trpc.stablecoin.balances.useQuery();
 
   // Mutations
-  const buyMutation = trpc.stablecoin.buyWithFiat.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'On-ramp complete!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
-  const sellMutation = trpc.stablecoin.sellToFiat.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Off-ramp complete!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  // wave16 C2: buyWithFiat/sellToFiat/stakeForYield/unstake/bridgeChain/payBill live ONLY on
+  // stablecoinExt (stablecoinExtendedRouter, server/routers/stablecoinEnhanced.ts:674) — the
+  // mounted inline `stablecoin` router has just balance/balances/send/swap (kept untouched
+  // below). All stablecoinExt money ops REQUIRE a TOTP code (requireTotpStepUp never waives)
+  // plus an idempotencyKey — both are collected/generated at submit time.
+  const [totpCode, setTotpCode] = useState('');
+  const clearTotp = () => setTotpCode('');
+  const buyMutation = trpc.stablecoinExt.buyWithFiat.useMutation({ onSuccess: () => { refetch(); clearTotp(); Alert.alert('Success', 'On-ramp complete!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const sellMutation = trpc.stablecoinExt.sellToFiat.useMutation({ onSuccess: () => { refetch(); clearTotp(); Alert.alert('Success', 'Off-ramp complete!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
   const swapMutation = trpc.stablecoin.swap.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Swap complete!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
   const sendMutation = trpc.stablecoin.send.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Sent!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
-  const stakeMutation = trpc.stablecoin.stakeForYield.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Staked!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
-  const unstakeMutation = trpc.stablecoin.unstake.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Unstaked!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
-  const bridgeMutation = trpc.stablecoin.bridgeChain.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Bridge initiated!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
-  const billMutation = trpc.stablecoin.payBill.useMutation({ onSuccess: () => { refetch(); Alert.alert('Success', 'Bill paid!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const stakeMutation = trpc.stablecoinExt.stakeForYield.useMutation({ onSuccess: () => { refetch(); clearTotp(); Alert.alert('Success', 'Staked!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const unstakeMutation = trpc.stablecoinExt.unstake.useMutation({ onSuccess: () => { refetch(); clearTotp(); Alert.alert('Success', 'Unstaked!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const bridgeMutation = trpc.stablecoinExt.bridgeChain.useMutation({ onSuccess: () => { refetch(); clearTotp(); Alert.alert('Success', 'Bridge initiated!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const billMutation = trpc.stablecoinExt.payBill.useMutation({ onSuccess: () => { refetch(); clearTotp(); Alert.alert('Success', 'Bill paid!'); }, onError: (e: any) => Alert.alert('Error', e.message) });
 
   // Form state
   const [buyFiat, setBuyFiat] = useState('USD');
@@ -52,6 +66,7 @@ export default function StablecoinScreen() {
   const [sendAmt, setSendAmt] = useState('');
   const [stakeSymbol, setStakeSymbol] = useState('USDC');
   const [stakeAmt, setStakeAmt] = useState('');
+  const [stakeProtocol, setStakeProtocol] = useState('aave_v3');
   const [bridgeSym, setBridgeSym] = useState('USDC');
   const [bridgeFromChain, setBridgeFromChain] = useState('ethereum');
   const [bridgeToChain, setBridgeToChain] = useState('polygon');
@@ -139,7 +154,9 @@ export default function StablecoinScreen() {
                 <View style={s.infoRow}>
                   <Text style={s.infoText}>Fee: 0.5% | Provider: Circle / Yellow Card</Text>
                 </View>
-                <TouchableOpacity style={s.btn} onPress={() => buyMutation.mutate({ fiatCurrency: buyFiat, stablecoin: buyStable, fiatAmount: parseFloat(buyAmt) || 0 })} disabled={buyMutation.isPending}>
+                <Text style={s.label}>2FA Code (required)</Text>
+                <TextInput style={s.input} value={totpCode} onChangeText={setTotpCode} placeholder="123456" placeholderTextColor="#6b7280" keyboardType="number-pad" maxLength={6} />
+                <TouchableOpacity style={s.btn} onPress={() => buyMutation.mutate({ stablecoin: buyStable, amount: parseFloat(buyAmt) || 0, fiatCurrency: buyFiat, idempotencyKey: newIdempotencyKey(), totpCode: totpCode || undefined })} disabled={buyMutation.isPending}>
                   {buyMutation.isPending ? <ActivityIndicator color="#fff" /> : <Text style={s.btnText}>Buy {buyStable}</Text>}
                 </TouchableOpacity>
               </View>
@@ -161,7 +178,9 @@ export default function StablecoinScreen() {
                 <View style={s.infoRow}>
                   <Text style={s.infoText}>Fee: 0.75%</Text>
                 </View>
-                <TouchableOpacity style={s.btn} onPress={() => sellMutation.mutate({ stablecoin: sellStable, fiatCurrency: sellFiat, stablecoinAmount: parseFloat(sellAmt) || 0 })} disabled={sellMutation.isPending}>
+                <Text style={s.label}>2FA Code (required)</Text>
+                <TextInput style={s.input} value={totpCode} onChangeText={setTotpCode} placeholder="123456" placeholderTextColor="#6b7280" keyboardType="number-pad" maxLength={6} />
+                <TouchableOpacity style={s.btn} onPress={() => sellMutation.mutate({ stablecoin: sellStable, amount: parseFloat(sellAmt) || 0, fiatCurrency: sellFiat, idempotencyKey: newIdempotencyKey(), totpCode: totpCode || undefined })} disabled={sellMutation.isPending}>
                   {sellMutation.isPending ? <ActivityIndicator color="#fff" /> : <Text style={s.btnText}>Sell {sellStable}</Text>}
                 </TouchableOpacity>
               </View>
@@ -232,13 +251,19 @@ export default function StablecoinScreen() {
                 <TouchableOpacity style={s.picker} onPress={() => showPicker(STABLECOINS, setStakeSymbol)}>
                   <Text style={s.pickerText}>{stakeSymbol}</Text>
                 </TouchableOpacity>
+                <Text style={s.label}>Protocol</Text>
+                <TouchableOpacity style={s.picker} onPress={() => showPicker(YIELD_PROTOCOLS, setStakeProtocol)}>
+                  <Text style={s.pickerText}>{stakeProtocol}</Text>
+                </TouchableOpacity>
                 <Text style={s.label}>Amount</Text>
                 <TextInput style={s.input} value={stakeAmt} onChangeText={setStakeAmt} placeholder="0.00" placeholderTextColor="#6b7280" keyboardType="numeric" />
+                <Text style={s.label}>2FA Code (required)</Text>
+                <TextInput style={s.input} value={totpCode} onChangeText={setTotpCode} placeholder="123456" placeholderTextColor="#6b7280" keyboardType="number-pad" maxLength={6} />
                 <View style={s.row}>
-                  <TouchableOpacity style={[s.btn, { flex: 1, marginRight: 6 }]} onPress={() => stakeMutation.mutate({ stablecoin: stakeSymbol, amount: parseFloat(stakeAmt) || 0 })} disabled={stakeMutation.isPending}>
+                  <TouchableOpacity style={[s.btn, { flex: 1, marginRight: 6 }]} onPress={() => stakeMutation.mutate({ stablecoin: stakeSymbol, amount: parseFloat(stakeAmt) || 0, protocol: stakeProtocol, idempotencyKey: newIdempotencyKey(), totpCode: totpCode || undefined })} disabled={stakeMutation.isPending}>
                     {stakeMutation.isPending ? <ActivityIndicator color="#fff" /> : <Text style={s.btnText}>Stake</Text>}
                   </TouchableOpacity>
-                  <TouchableOpacity style={[s.btn, { flex: 1, marginLeft: 6, backgroundColor: '#2d2d4e' }]} onPress={() => unstakeMutation.mutate({ stablecoin: stakeSymbol, amount: parseFloat(stakeAmt) || 0 })} disabled={unstakeMutation.isPending}>
+                  <TouchableOpacity style={[s.btn, { flex: 1, marginLeft: 6, backgroundColor: '#2d2d4e' }]} onPress={() => unstakeMutation.mutate({ stablecoin: stakeSymbol, amount: parseFloat(stakeAmt) || 0, protocol: stakeProtocol, idempotencyKey: newIdempotencyKey(), totpCode: totpCode || undefined })} disabled={unstakeMutation.isPending}>
                     {unstakeMutation.isPending ? <ActivityIndicator color="#fff" /> : <Text style={s.btnText}>Unstake</Text>}
                   </TouchableOpacity>
                 </View>
@@ -271,7 +296,9 @@ export default function StablecoinScreen() {
                 <View style={s.infoRow}>
                   <Text style={s.infoText}>Fee: 0.1% + gas | Route: Across / Stargate</Text>
                 </View>
-                <TouchableOpacity style={s.btn} onPress={() => bridgeMutation.mutate({ stablecoin: bridgeSym, fromChain: bridgeFromChain, toChain: bridgeToChain, amount: parseFloat(bridgeAmt) || 0 })} disabled={bridgeMutation.isPending}>
+                <Text style={s.label}>2FA Code (required)</Text>
+                <TextInput style={s.input} value={totpCode} onChangeText={setTotpCode} placeholder="123456" placeholderTextColor="#6b7280" keyboardType="number-pad" maxLength={6} />
+                <TouchableOpacity style={s.btn} onPress={() => bridgeMutation.mutate({ stablecoin: bridgeSym, amount: parseFloat(bridgeAmt) || 0, fromChain: bridgeFromChain, toChain: bridgeToChain, idempotencyKey: newIdempotencyKey(), totpCode: totpCode || undefined })} disabled={bridgeMutation.isPending}>
                   {bridgeMutation.isPending ? <ActivityIndicator color="#fff" /> : <Text style={s.btnText}>Bridge {bridgeSym}</Text>}
                 </TouchableOpacity>
               </View>
@@ -295,7 +322,9 @@ export default function StablecoinScreen() {
                 <View style={s.infoRow}>
                   <Text style={s.infoText}>Fee: 0.25%</Text>
                 </View>
-                <TouchableOpacity style={s.btn} onPress={() => billMutation.mutate({ billType: billBiller as any, billerName: billBiller, billerAccountNumber: billAcct, stablecoin: billStable, amount: parseFloat(billAmt) || 0 })} disabled={billMutation.isPending}>
+                <Text style={s.label}>2FA Code (required)</Text>
+                <TextInput style={s.input} value={totpCode} onChangeText={setTotpCode} placeholder="123456" placeholderTextColor="#6b7280" keyboardType="number-pad" maxLength={6} />
+                <TouchableOpacity style={s.btn} onPress={() => billMutation.mutate({ stablecoin: billStable, amount: parseFloat(billAmt) || 0, billRef: billAcct, provider: billBiller, idempotencyKey: newIdempotencyKey(), totpCode: totpCode || undefined })} disabled={billMutation.isPending}>
                   {billMutation.isPending ? <ActivityIndicator color="#fff" /> : <Text style={s.btnText}>Pay Bill</Text>}
                 </TouchableOpacity>
               </View>

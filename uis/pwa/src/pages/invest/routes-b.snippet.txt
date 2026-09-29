@@ -1,0 +1,19 @@
+# W16-C7 (pwa-invest-b) — orchestrator wiring snippet for uis/pwa/src/App.tsx
+#
+# Add the lazy imports below next to the other lazy page imports, then add the
+# <Route> entries inside the protected Layout route group (path="/") alongside
+# C6's invest hub routes. Pages are user-facing (ProtectedRoute via Layout) —
+# none of these surfaces expose admin-only procedures, so AdminRoute is NOT
+# required. Do not modify any C6-owned file (hub/routes-a) or C7 page files.
+
+# ── Lazy imports ─────────────────────────────────────────────────────────────
+const InvestRealEstate = lazy(() => import("./pages/invest/RealEstate"));
+const InvestStartups = lazy(() => import("./pages/invest/Startups"));
+const InvestCommunity = lazy(() => import("./pages/invest/Community"));
+const InvestEscrow = lazy(() => import("./pages/invest/Escrow"));
+
+# ── Route entries (children of the path="/" ProtectedRoute>Layout group) ─────
+<Route path="invest/real-estate" element={<InvestRealEstate />} />
+<Route path="invest/startups" element={<InvestStartups />} />
+<Route path="invest/community" element={<InvestCommunity />} />
+<Route path="invest/escrow" element={<InvestEscrow />} />

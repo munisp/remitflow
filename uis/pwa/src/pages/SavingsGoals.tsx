@@ -98,6 +98,7 @@ const SavingsGoals: React.FC = () => {
   const [selectedGoal, setSelectedGoal] = useState<SavingsGoal | null>(null);
   const [contributions, setContributions] = useState<Contribution[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showContributeModal, setShowContributeModal] = useState(false);
   const [showAutoConvertModal, setShowAutoConvertModal] = useState(false);
@@ -125,6 +126,7 @@ const SavingsGoals: React.FC = () => {
       setGoals(goalsData.map((goal) => normalizeGoal(goal as Partial<SavingsGoal>)));
     } catch {
       setGoals([]);
+      setError('Unable to load savings goals from the backend. Please try again later.');
     } finally {
       setLoading(false);
     }
@@ -132,16 +134,9 @@ const SavingsGoals: React.FC = () => {
 
   const fetchContributions = useCallback(async (_goalId: string) => {
     try {
-      const data = await savingsService.getGoals().catch(() => null);
-      if (data) {
-        setContributions([]);
-      } else {
-        setContributions([
-          { contribution_id: 'c-001', amount: 100, stablecoin: 'USDT', source: 'Manual', created_at: new Date(Date.now() - 86400000 * 5).toISOString() },
-          { contribution_id: 'c-002', amount: 50, stablecoin: 'USDT', source: 'Auto-convert from remittance', created_at: new Date(Date.now() - 86400000 * 10).toISOString() },
-          { contribution_id: 'c-003', amount: 75, stablecoin: 'USDT', source: 'Auto-convert from remittance', created_at: new Date(Date.now() - 86400000 * 15).toISOString() },
-        ]);
-      }
+      // No dedicated contributions endpoint exists yet; never fabricate records.
+      await savingsService.getGoals().catch(() => null);
+      setContributions([]);
     } catch {
       setContributions([]);
     }
@@ -159,7 +154,8 @@ const SavingsGoals: React.FC = () => {
 
   const handleCreateGoal = async () => {
     if (!newGoal.name || !newGoal.target_amount) return;
-    
+    setError(null);
+
     try {
       await savingsService.createGoal({
         name: newGoal.name,
@@ -175,75 +171,40 @@ const SavingsGoals: React.FC = () => {
       setShowCreateModal(false);
       setNewGoal({ name: '', category: 'EDUCATION', target_amount: '', currency: 'NGN', target_date: '', enable_auto_save: false });
     } catch {
-      const mockGoal: SavingsGoal = {
-        goal_id: `goal-${Date.now()}`,
-        user_id: 'user-123',
-        name: newGoal.name,
-        category: newGoal.category,
-        target_amount: parseFloat(newGoal.target_amount),
-        current_amount: 0,
-        currency: newGoal.currency,
-        stablecoin: newGoal.currency,
-        target_date: newGoal.target_date || undefined,
-        status: 'ACTIVE',
-        created_at: new Date().toISOString(),
-        progress_percent: 0,
-        auto_convert_rules: [],
-      };
-      setGoals(prev => [mockGoal, ...prev]);
-      setShowCreateModal(false);
-      setNewGoal({ name: '', category: 'EDUCATION', target_amount: '', currency: 'NGN', target_date: '', enable_auto_save: false });
+      // Fail closed: leave the goals list unchanged and surface the failure.
+      setError('Unable to create the savings goal. The backend did not accept it — please try again.');
     }
   };
 
   const handleContribute = async () => {
     if (!selectedGoal || !contributeAmount) return;
-    
+    setError(null);
+
     try {
       await savingsService.contribute(selectedGoal.goal_id, parseFloat(contributeAmount));
       fetchGoals();
       fetchContributions(selectedGoal.goal_id);
+      setShowContributeModal(false);
+      setContributeAmount('');
     } catch {
-      const amount = parseFloat(contributeAmount);
-      setGoals(prev => prev.map(g => 
-        g.goal_id === selectedGoal.goal_id
-          ? {
-              ...g,
-              current_amount: g.current_amount + amount,
-              progress_percent: Math.min(100, Math.round(((g.current_amount + amount) / g.target_amount) * 100)),
-            }
-          : g
-      ));
-      setContributions(prev => [
-        { contribution_id: `c-${Date.now()}`, amount, stablecoin: selectedGoal.stablecoin, source: 'Manual', created_at: new Date().toISOString() },
-        ...prev,
-      ]);
+      // Fail closed: do not fabricate a contribution or balance change.
+      setError('Unable to add funds to this goal. The backend did not accept the contribution — please try again.');
     }
-    setShowContributeModal(false);
-    setContributeAmount('');
   };
 
   const handleAddAutoConvert = async () => {
     if (!selectedGoal || !autoConvertPercentage) return;
-    
+    setError(null);
+
     try {
       await savingsService.contribute(selectedGoal.goal_id, 0);
       fetchGoals();
+      setShowAutoConvertModal(false);
+      setAutoConvertPercentage('10');
     } catch {
-      const newRule: AutoConvertRule = {
-        rule_id: `rule-${Date.now()}`,
-        source_type: 'REMITTANCE_INCOMING',
-        percentage: parseFloat(autoConvertPercentage),
-        is_active: true,
-      };
-      setGoals(prev => prev.map(g =>
-        g.goal_id === selectedGoal.goal_id
-          ? { ...g, auto_convert_rules: [...g.auto_convert_rules, newRule] }
-          : g
-      ));
+      // Fail closed: do not fabricate an auto-convert rule.
+      setError('Unable to save auto-convert settings. The backend did not accept the change — please try again.');
     }
-    setShowAutoConvertModal(false);
-    setAutoConvertPercentage('10');
   };
 
   const getCategoryInfo = (category: string) => {
@@ -290,6 +251,15 @@ const SavingsGoals: React.FC = () => {
           + New Goal
         </button>
       </div>
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-800 flex items-center justify-between">
+          <span>{error}</span>
+          <button onClick={() => setError(null)} className="text-red-600 text-sm underline ml-4">
+            Dismiss
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-4">
         <div className="bg-gradient-to-br from-indigo-500 to-indigo-600 rounded-xl p-4 text-white">
@@ -408,7 +378,13 @@ const SavingsGoals: React.FC = () => {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl max-w-md w-full p-6">
             <h2 className="text-xl font-bold mb-4">Create Savings Goal</h2>
-            
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-3 mb-4 text-sm text-red-800">
+                {error}
+              </div>
+            )}
+
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">Goal Name</label>
@@ -604,6 +580,11 @@ const SavingsGoals: React.FC = () => {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl max-w-sm w-full p-6">
             <h3 className="text-lg font-bold mb-4">Add Funds to {selectedGoal.name}</h3>
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-3 mb-4 text-sm text-red-800">
+                {error}
+              </div>
+            )}
             <div className="mb-4">
               <label className="block text-sm font-medium text-slate-700 mb-1">Amount ({selectedGoal.stablecoin})</label>
               <input
@@ -637,6 +618,11 @@ const SavingsGoals: React.FC = () => {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl max-w-sm w-full p-6">
             <h3 className="text-lg font-bold mb-4">Auto-Convert Settings</h3>
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-3 mb-4 text-sm text-red-800">
+                {error}
+              </div>
+            )}
             <p className="text-sm text-slate-500 mb-4">
               Automatically convert a percentage of every incoming remittance to this goal.
             </p>

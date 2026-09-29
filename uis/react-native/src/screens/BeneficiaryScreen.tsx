@@ -7,7 +7,7 @@ import { trpc } from '../services/trpc';
 // (enforced in styles, texts numberOfLines={1}) + 8 marginBottom.
 const BEN_ROW_HEIGHT = 86 + 8;
 
-type Beneficiary = { id: string; name: string; email: string; bankName: string; currency: string };
+type Beneficiary = { id: number; name: string; email: string; bankName: string; currency: string };
 
 const BeneficiaryRow = React.memo(function BeneficiaryRow({
   item,
@@ -37,14 +37,16 @@ export default function BeneficiaryScreen() {
   const navigation = useNavigation();
   const utils = trpc.useUtils();
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState({ name: '', email: '', bankName: '', accountNumber: '', currency: 'USD', country: '' });
+  const [form, setForm] = useState({ name: '', email: '', bankName: '', accountNumber: '', currency: 'USD', country: '', totpCode: '' });
 
   const { data: beneficiaries, isLoading, refetch } = trpc.beneficiaries.list.useQuery();
-  const createMutation = trpc.beneficiaries.create.useMutation({
-    onSuccess: () => { setShowAdd(false); setForm({ name: '', email: '', bankName: '', accountNumber: '', currency: 'USD', country: '' }); utils.beneficiaries.list.invalidate(); },
+  // wave16 C2: mounted names are add/remove (server/routers.ts:1937/1970), not create/delete.
+  // beneficiaries.add enforces a TOTP step-up when 2FA is enrolled — surface the code input below.
+  const createMutation = trpc.beneficiaries.add.useMutation({
+    onSuccess: () => { setShowAdd(false); setForm({ name: '', email: '', bankName: '', accountNumber: '', currency: 'USD', country: '', totpCode: '' }); utils.beneficiaries.list.invalidate(); },
     onError: (e: any) => Alert.alert('Error', e.message),
   });
-  const deleteMutation = trpc.beneficiaries.delete.useMutation({
+  const deleteMutation = trpc.beneficiaries.remove.useMutation({
     onSuccess: () => utils.beneficiaries.list.invalidate(),
     onError: (e: any) => Alert.alert('Error', e.message),
   });
@@ -56,7 +58,7 @@ export default function BeneficiaryScreen() {
   const handleDelete = useCallback((item: Beneficiary) => {
     Alert.alert('Delete', `Remove ${item.name}?`, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => deleteMutateRef.current({ id: item.id }) },
+      { text: 'Delete', style: 'destructive', onPress: () => deleteMutateRef.current({ id: Number(item.id) }) },
     ]);
   }, []);
   const renderItem = useCallback(
@@ -89,7 +91,7 @@ export default function BeneficiaryScreen() {
       ) : (
         <FlatList
           data={beneficiaries ?? []}
-          keyExtractor={(item) => item.id}
+          keyExtractor={(item) => String(item.id)}
           contentContainerStyle={{ padding: 16 }}
           renderItem={renderItem}
           getItemLayout={getItemLayout}
@@ -124,13 +126,28 @@ export default function BeneficiaryScreen() {
                 />
               </View>
             ))}
+            <View style={styles.field}>
+              <Text style={styles.fieldLabel}>2FA Code (required if 2FA is enabled)</Text>
+              <TextInput
+                style={styles.input}
+                value={form.totpCode}
+                onChangeText={(v) => setForm(f => ({ ...f, totpCode: v.replace(/\D/g, '').slice(0, 6) }))}
+                placeholder="123456"
+                placeholderTextColor="#6b7280"
+                keyboardType="number-pad"
+                maxLength={6}
+              />
+            </View>
             <View style={styles.modalButtons}>
               <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowAdd(false)}>
                 <Text style={styles.cancelBtnText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.saveBtn}
-                onPress={() => createMutation.mutate(form)}
+                onPress={() => {
+                  const { totpCode, ...rest } = form;
+                  createMutation.mutate({ ...rest, ...(totpCode ? { totpCode } : {}) });
+                }}
                 disabled={createMutation.isPending}
               >
                 {createMutation.isPending ? <ActivityIndicator color="#fff" size="small" /> : <Text style={styles.saveBtnText}>Save</Text>}

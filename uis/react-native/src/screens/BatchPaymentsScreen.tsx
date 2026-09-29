@@ -7,11 +7,15 @@ import { DARK } from '../theme/dark';
 export default function BatchPaymentsScreen() {
   const navigation = useNavigation();
   const [showCreate, setShowCreate] = useState(false);
-  const [form, setForm] = useState({ name: '', description: '' });
-  const { data, isLoading, refetch } = trpc.batchPayments.list.useQuery();
-  const createMutation = trpc.batchPayments.create.useMutation({ onSuccess: () => { setShowCreate(false); refetch(); }, onError: (e: any) => Alert.alert('Error', e.message) });
-  const cancelMutation = trpc.batchPayments.cancel.useMutation({ onSuccess: refetch, onError: (e: any) => Alert.alert('Error', e.message) });
-  const STATUS_COLOR: Record<string, string> = { pending: '#f59e0b', processing: '#6366f1', completed: '#10b981', failed: '#ef4444', cancelled: '#6b7280' };
+  const [form, setForm] = useState({ name: '' });
+  // wave16 C2: mounted namespace is `batch` (server/routers.ts:2963) with list/create/process.
+  // There is NO batch.cancel server-side — batches are created as 'draft' and executed via
+  // batch.process (money-moving, maker-checker guarded backend-side). The stale cancel button
+  // is replaced with Process on draft batches.
+  const { data, isLoading, refetch } = trpc.batch.list.useQuery();
+  const createMutation = trpc.batch.create.useMutation({ onSuccess: () => { setShowCreate(false); refetch(); }, onError: (e: any) => Alert.alert('Error', e.message) });
+  const processMutation = trpc.batch.process.useMutation({ onSuccess: refetch, onError: (e: any) => Alert.alert('Error', e.message) });
+  const STATUS_COLOR: Record<string, string> = { draft: '#f59e0b', pending: '#f59e0b', processing: '#6366f1', completed: '#10b981', failed: '#ef4444', cancelled: '#6b7280' };
   return (
     <View style={s.container}>
       <View style={s.header}><TouchableOpacity onPress={() => navigation.goBack()}><Text style={s.back}>← Back</Text></TouchableOpacity><Text style={s.title}>Batch Payments</Text><TouchableOpacity onPress={() => setShowCreate(true)}><Text style={s.addBtn}>+ New</Text></TouchableOpacity></View>
@@ -21,9 +25,9 @@ export default function BatchPaymentsScreen() {
           {data?.map((b: any) => (
             <View key={b.id} style={s.card}>
               <View style={s.row}><Text style={s.batchName}>{b.name ?? `Batch #${b.id}`}</Text><Text style={[s.badge, { backgroundColor: STATUS_COLOR[b.status] ?? '#6b7280' }]}>{b.status}</Text></View>
-              <Text style={s.count}>{b.totalPayments ?? 0} payments · {b.currency ?? 'USD'} {Number(b.totalAmount ?? 0).toLocaleString()}</Text>
+              <Text style={s.count}>{b.totalRecipients ?? 0} payments · {b.currency ?? 'USD'} {Number(b.totalAmount ?? 0).toLocaleString()}</Text>
               <Text style={s.date}>{new Date(b.createdAt).toLocaleDateString()}</Text>
-              {b.status === 'pending' && <TouchableOpacity style={s.cancelBtn} onPress={() => cancelMutation.mutate({ id: b.id })}><Text style={s.cancelBtnText}>Cancel Batch</Text></TouchableOpacity>}
+              {b.status === 'draft' && <TouchableOpacity style={s.processBtn} onPress={() => Alert.alert('Process Batch', `Debit ${b.currency ?? 'USD'} ${Number(b.totalAmount ?? 0).toLocaleString()} and process this batch?`, [{ text: 'No', style: 'cancel' }, { text: 'Yes', onPress: () => processMutation.mutate({ id: Number(b.id) }) }])}><Text style={s.processBtnText}>Process Batch</Text></TouchableOpacity>}
             </View>
           ))}
         </ScrollView>
@@ -32,9 +36,8 @@ export default function BatchPaymentsScreen() {
         <View style={s.overlay}><View style={s.modal}>
           <Text style={s.modalTitle}>New Batch Payment</Text>
           <Text style={s.label}>Batch Name</Text><TextInput style={s.input} value={form.name} onChangeText={(v) => setForm((f) => ({ ...f, name: v }))} placeholder="e.g. November Payroll" placeholderTextColor={DARK.dim} />
-          <Text style={s.label}>Description (optional)</Text><TextInput style={s.input} value={form.description} onChangeText={(v) => setForm((f) => ({ ...f, description: v }))} placeholder="Monthly salary payments" placeholderTextColor={DARK.dim} />
           <View style={s.note}><Text style={s.noteText}>💡 Upload a CSV file via the web portal to add recipients to this batch</Text></View>
-          <TouchableOpacity style={s.submit} onPress={() => createMutation.mutate({ name: form.name, description: form.description, payments: [] })} disabled={createMutation.isPending}>{createMutation.isPending ? <ActivityIndicator color="#fff" /> : <Text style={s.submitText}>Create Batch</Text>}</TouchableOpacity>
+          <TouchableOpacity style={s.submit} onPress={() => createMutation.mutate({ name: form.name, currency: 'USD', recipients: [] })} disabled={createMutation.isPending || !form.name}>{createMutation.isPending ? <ActivityIndicator color="#fff" /> : <Text style={s.submitText}>Create Batch</Text>}</TouchableOpacity>
           <TouchableOpacity style={s.cancelModal} onPress={() => setShowCreate(false)}><Text style={s.cancelModalText}>Cancel</Text></TouchableOpacity>
         </View></View>
       </Modal>
@@ -48,7 +51,7 @@ const s = StyleSheet.create({
   card: { backgroundColor: DARK.card, borderRadius: 12, padding: 16, borderWidth: 1, borderColor: DARK.border }, row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
   batchName: { color: DARK.text, fontSize: 15, fontWeight: '600', flex: 1 }, badge: { fontSize: 11, color: '#fff', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, overflow: 'hidden' },
   count: { color: DARK.muted, fontSize: 13, marginBottom: 4 }, date: { color: DARK.dim, fontSize: 12, marginBottom: 8 },
-  cancelBtn: { backgroundColor: '#3b1a1a', padding: 8, borderRadius: 8, alignItems: 'center' }, cancelBtnText: { color: '#ef4444', fontSize: 13, fontWeight: '500' },
+  processBtn: { backgroundColor: '#1e1b4b', padding: 8, borderRadius: 8, alignItems: 'center' }, processBtnText: { color: DARK.primary, fontSize: 13, fontWeight: '600' },
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-end' }, modal: { backgroundColor: DARK.card, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24 },
   modalTitle: { color: DARK.text, fontSize: 20, fontWeight: '700', marginBottom: 16 }, label: { color: DARK.muted, fontSize: 13, marginBottom: 6, marginTop: 12 },
   input: { backgroundColor: DARK.bg, borderWidth: 1, borderColor: DARK.border, borderRadius: 10, padding: 12, color: DARK.text, fontSize: 15 },

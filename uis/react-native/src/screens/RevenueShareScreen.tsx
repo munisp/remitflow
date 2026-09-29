@@ -1,17 +1,21 @@
 import React from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { trpc } from '../services/trpc';
 
 export default function RevenueShareScreen() {
   const navigation = useNavigation();
-  const { data: summary, isLoading } = trpc.revenueShare.getSummary.useQuery();
-  const { data: payouts } = trpc.revenueShare.getPayouts.useQuery({ limit: 10 });
-
-  const requestPayout = trpc.revenueShare.requestPayout.useMutation({
-    onSuccess: () => Alert.alert('Success', 'Payout request submitted successfully!'),
-    onError: (e: any) => Alert.alert('Error', e.message),
-  });
+  // wave16: revenueShare.getSummary / getPayouts / requestPayout do not exist
+  // server-side. The mounted user-scope equivalent is revenueShare.myEarnings
+  // (protectedProcedure, returns { reports, summary }). There is NO mounted
+  // user-scope payout-request mutation, so that action fails closed below.
+  const { data, isLoading, error } = trpc.revenueShare.myEarnings.useQuery({});
+  const summary = data?.summary ?? null;
+  const reports: any[] = data?.reports ?? [];
+  const now = new Date();
+  const thisMonth = reports
+    .filter((r: any) => r.periodYear === now.getFullYear() && r.periodMonth === now.getMonth() + 1)
+    .reduce((acc: number, r: any) => acc + Number(r.partnerEarnings ?? 0), 0);
 
   return (
     <ScrollView style={styles.container}>
@@ -22,6 +26,10 @@ export default function RevenueShareScreen() {
 
       {isLoading ? (
         <ActivityIndicator color="#6366f1" style={{ marginTop: 40 }} />
+      ) : error ? (
+        <View>
+          <Text style={styles.empty}>Unable to load earnings: {(error as any)?.message ?? 'Unknown error'}</Text>
+        </View>
       ) : (
         <>
           <View style={styles.earningsCard}>
@@ -30,46 +38,39 @@ export default function RevenueShareScreen() {
             <View style={styles.earningsRow}>
               <View style={styles.earningsStat}>
                 <Text style={styles.earningsStatLabel}>Pending</Text>
-                <Text style={styles.earningsStatValue}>${Number(summary?.pendingPayout ?? 0).toFixed(2)}</Text>
+                <Text style={styles.earningsStatValue}>${Number(summary?.totalPending ?? 0).toFixed(2)}</Text>
               </View>
               <View style={styles.earningsStat}>
                 <Text style={styles.earningsStatLabel}>This Month</Text>
-                <Text style={styles.earningsStatValue}>${Number(summary?.thisMonth ?? 0).toFixed(2)}</Text>
+                <Text style={styles.earningsStatValue}>${thisMonth.toFixed(2)}</Text>
               </View>
               <View style={styles.earningsStat}>
-                <Text style={styles.earningsStatLabel}>Tier</Text>
-                <Text style={[styles.earningsStatValue, { color: '#f59e0b' }]}>{summary?.tier ?? 'Bronze'}</Text>
+                <Text style={styles.earningsStatLabel}>Paid Out</Text>
+                <Text style={[styles.earningsStatValue, { color: '#10b981' }]}>${Number(summary?.totalPaid ?? 0).toFixed(2)}</Text>
               </View>
             </View>
           </View>
 
-          <TouchableOpacity
-            style={[styles.payoutBtn, Number(summary?.pendingPayout ?? 0) < 50 && styles.payoutBtnDisabled]}
-            onPress={() => requestPayout.mutate({ amount: Number(summary?.pendingPayout ?? 0) })}
-            disabled={Number(summary?.pendingPayout ?? 0) < 50 || requestPayout.isPending}
-          >
-            {requestPayout.isPending ? <ActivityIndicator color="#fff" /> : (
-              <Text style={styles.payoutBtnText}>
-                {Number(summary?.pendingPayout ?? 0) < 50 ? `Min $50 required (${Number(summary?.pendingPayout ?? 0).toFixed(2)} pending)` : 'Request Payout'}
-              </Text>
-            )}
-          </TouchableOpacity>
+          {/* Fail closed: no mounted user-scope payout-request procedure exists. */}
+          <View style={[styles.payoutBtn, styles.payoutBtnDisabled]}>
+            <Text style={styles.payoutBtnText}>Payout requests are not yet available in this build</Text>
+          </View>
 
-          <Text style={styles.sectionTitle}>Payout History</Text>
+          <Text style={styles.sectionTitle}>Earnings History</Text>
           <View style={styles.payoutList}>
-            {(payouts ?? []).map((p: any) => (
+            {reports.map((p: any) => (
               <View key={p.id} style={styles.payoutItem}>
                 <View>
-                  <Text style={styles.payoutDate}>{new Date(p.createdAt).toLocaleDateString()}</Text>
+                  <Text style={styles.payoutDate}>{p.periodYear}-{String(p.periodMonth).padStart(2, '0')}</Text>
                   <Text style={styles.payoutStatus}>{p.status}</Text>
                 </View>
                 <Text style={[styles.payoutAmount, { color: p.status === 'paid' ? '#10b981' : '#f59e0b' }]}>
-                  ${Number(p.amount).toFixed(2)}
+                  ${Number(p.partnerEarnings ?? 0).toFixed(2)}
                 </Text>
               </View>
             ))}
-            {(!payouts || payouts.length === 0) && (
-              <Text style={styles.empty}>No payouts yet</Text>
+            {reports.length === 0 && (
+              <Text style={styles.empty}>No earnings reports yet</Text>
             )}
           </View>
         </>

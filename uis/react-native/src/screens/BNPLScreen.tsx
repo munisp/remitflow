@@ -9,7 +9,9 @@ export default function BNPLScreen() {
   const [form, setForm] = useState({ amount: '', purpose: '', installments: '3' });
   const { data: eligibility, isLoading: loadingEligibility } = trpc.bnpl.eligibility.useQuery();
   const { data: plans, isLoading: loadingPlans, refetch } = trpc.bnpl.plans.useQuery();
-  const applyMutation = trpc.bnpl.apply.useMutation({
+  // wave16 C2: mounted name is bnpl.applyPlan (server/routers.ts:3926), not bnpl.apply.
+  // applyPlan input: { amount, currency?, description, installments? } — screen's "purpose" maps to description.
+  const applyMutation = trpc.bnpl.applyPlan.useMutation({
     onSuccess: () => { setShowApply(false); refetch(); Alert.alert('Applied', 'Your BNPL application has been submitted'); },
     onError: (e: any) => Alert.alert('Error', e.message),
   });
@@ -63,7 +65,7 @@ export default function BNPLScreen() {
               </TouchableOpacity>
             ))}
           </View>
-          <TouchableOpacity style={s.submit} onPress={() => applyMutation.mutate({ amount: parseFloat(form.amount) || 0, purpose: form.purpose, installments: parseInt(form.installments) })} disabled={applyMutation.isPending}>
+          <TouchableOpacity style={s.submit} onPress={() => applyMutation.mutate({ amount: parseFloat(form.amount) || 0, description: form.purpose, installments: parseInt(form.installments) })} disabled={applyMutation.isPending}>
             {applyMutation.isPending ? <ActivityIndicator color="#fff" /> : <Text style={s.submitText}>Submit Application</Text>}
           </TouchableOpacity>
           <TouchableOpacity style={s.cancelModal} onPress={() => setShowApply(false)}><Text style={s.cancelModalText}>Cancel</Text></TouchableOpacity>

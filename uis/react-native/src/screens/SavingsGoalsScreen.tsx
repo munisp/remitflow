@@ -8,7 +8,8 @@ export default function SavingsGoalsScreen() {
   const [search, setSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
-  const { data, isLoading, error, refetch } = trpc.savings.listGoals.useQuery(undefined, {
+  // wave16 C2: mounted name is savings.getGoals (server/routers.ts:2061); savings.listGoals does not exist.
+  const { data, isLoading, error, refetch } = trpc.savings.getGoals.useQuery(undefined, {
     retry: 2,
     staleTime: 30_000,
   });

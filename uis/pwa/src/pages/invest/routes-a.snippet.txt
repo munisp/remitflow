@@ -1,0 +1,49 @@
+# routes-a.snippet.txt — C6 (pwa-invest-a) wiring for the orchestrator
+#
+# PWA investment surfaces, part A. Add the lazy imports below next to the
+# other lazy page imports in uis/pwa/src/App.tsx, and the <Route> entries
+# inside the authenticated Layout route (alongside "wallet", "send", ...).
+# Do NOT add C7's routes here — C7 delivers routes-b.snippet.txt for
+# real-estate / startups / community / escrow (the hub links to those paths
+# already).
+#
+# Conventions match App.tsx: lazy() imports, relative child paths under the
+# ProtectedRoute+Layout parent.
+
+# ── Imports (with the other lazy page imports) ───────────────────────────────
+const InvestHub = lazy(() => import("./pages/invest/InvestHub"));
+const BondsPage = lazy(() => import("./pages/invest/BondsPage"));
+const BondDetailPage = lazy(() => import("./pages/invest/BondDetailPage"));
+const StocksPage = lazy(() => import("./pages/invest/StocksPage"));
+
+# ── Routes (inside <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>) ──
+<Route path="invest" element={<InvestHub />} />
+<Route path="invest/bonds" element={<BondsPage />} />
+<Route path="invest/bonds/:bondId" element={<BondDetailPage />} />
+<Route path="invest/stocks" element={<StocksPage />} />
+
+# ── Procedures consumed (all verified mounted in audit/routers.json) ─────────
+# diasporaBond.listBonds            (query)
+# diasporaBond.getBond              (query)
+# diasporaBond.getSubscriptionQuote (query)
+# diasporaBond.subscribe            (mutation, tier-2 KYC + TOTP step-up)
+# diasporaBond.confirmPayment       (mutation, TOTP step-up)
+# diasporaBond.getMySubscriptions   (query)
+# diasporaBond.getCouponHistory     (query)
+# diasporaBond.listSecondaryOrders  (query)
+# diasporaBond.createSellOrder      (mutation)
+# diasporaBond.fillBuyOrder         (mutation, TOTP step-up)
+# diasporaBond.requestEarlyRedemption (mutation, TOTP step-up)
+# ngxStocks.list                    (query)
+# ngxStocks.sectors                 (query)
+# ngxStocks.getWatchlist            (query)
+# ngxStocks.addToWatchlist          (mutation)
+# ngxStocks.removeFromWatchlist     (mutation)
+# ngxStocks.placeOrder              (mutation, tier-2 KYC + TOTP + stale-price refusal)
+# ngxStocks.getOrders               (query)
+# ngxStocks.cancelOrder             (mutation)
+#
+# Deliberately NOT exposed (admin-only / intentionally unimplemented):
+#   diasporaBond.adminConfirmPayment, diasporaBond.processUpcomingCoupons
+#   ngxStocks.brokerWebhook (NOT_IMPLEMENTED server-side),
+#   ngxStocks.ingestPrices (admin-only)

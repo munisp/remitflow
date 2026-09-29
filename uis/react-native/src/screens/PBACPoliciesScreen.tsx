@@ -7,13 +7,19 @@ export default function PBACPoliciesScreen() {
   const navigation = useNavigation<any>();
   const { user } = useAuth();
   const [refreshing, setRefreshing] = React.useState(false);
-  const { data, isLoading, refetch } = (trpc as any)?.['pbac']?.['getPolicies']?.useQuery?.() ?? { data: null, isLoading: false, refetch: () => {} };
+  // wave16: pbac.getPolicies does not resolve to a mounted non-legacy
+  // procedure — repointed to the verified mounted pair pbac.myPolicies.
+  const { data, isLoading, error, refetch } = trpc.pbac.myPolicies.useQuery();
   const onRefresh = async () => {
     setRefreshing(true);
     await refetch?.();
     setRefreshing(false);
   };
-  const items: any[] = Array.isArray(data) ? data : (data ? [data] : []);
+  // pbac.myPolicies returns a flat policy-summary object — render its
+  // scalar fields as rows rather than pretending it is a list.
+  const items: any[] = data && typeof data === 'object' && !Array.isArray(data)
+    ? Object.entries(data).map(([k, v]) => ({ name: k, status: String(v) }))
+    : [];
   return (
     <ScrollView
       style={styles.container}
@@ -28,6 +34,12 @@ export default function PBACPoliciesScreen() {
       </View>
       {isLoading ? (
         <ActivityIndicator color="#6366f1" size="large" style={{ marginTop: 40 }} />
+      ) : error ? (
+        <View style={styles.empty}>
+          <Text style={styles.emptyIcon}>⚠️</Text>
+          <Text style={styles.emptyText}>Unable to load this data</Text>
+          <Text style={styles.emptySubtext}>{(error as any)?.message ?? 'Unknown error'} — pull down to retry</Text>
+        </View>
       ) : items.length === 0 ? (
         <View style={styles.empty}>
           <Text style={styles.emptyIcon}>📭</Text>
