@@ -112,20 +112,30 @@ func (s *AuditStore) computeEntryHash(entry *AuditEntry) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// Append adds an entry to the immutable log
-func (s *AuditStore) Append(entry AuditEntry) AuditEntry {
+// Append adds an entry to the immutable log. When Postgres is configured it
+// is the source of truth: chain position/prev-hash are read from PG and the
+// entry is inserted into audit_sink_events BEFORE the in-memory mirror is
+// updated. Fail closed: a persistence failure is an error to the caller.
+func (s *AuditStore) Append(entry AuditEntry) (AuditEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entry.ChainPosition = len(s.entries)
-	if len(s.entries) > 0 {
-		entry.PreviousHash = s.entries[len(s.entries)-1].EntryHash
-	} else {
-		entry.PreviousHash = "genesis"
+	pos, err := nextChainPositionLocked()
+	if err != nil {
+		return entry, fmt.Errorf("chain position lookup failed: %w", err)
 	}
+	prev, err := lastEntryHashLocked()
+	if err != nil {
+		return entry, fmt.Errorf("chain tip lookup failed: %w", err)
+	}
+	entry.ChainPosition = pos
+	entry.PreviousHash = prev
 	entry.EntryHash = s.computeEntryHash(&entry)
+	if err := insertEventLocked(&entry); err != nil {
+		return entry, fmt.Errorf("audit event persist failed: %w", err)
+	}
 	s.entries = append(s.entries, entry)
-	return entry
+	return entry, nil
 }
 
 // VerifyChain checks the integrity of the entire hash chain
@@ -184,7 +194,12 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 		entry.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
 
-	stored := store.Append(entry)
+	stored, err := store.Append(entry)
+	if err != nil {
+		log.Printf("[go-audit-sink] ERROR: ingest persist failed (fail closed): %v", err)
+		http.Error(w, "failed to persist audit entry", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"stored":         true,
@@ -200,6 +215,25 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reads are served from Postgres (source of truth) when configured.
+	if db != nil {
+		entries, err := queryEntriesPG(0, "", 100)
+		if err != nil {
+			log.Printf("[go-audit-sink] ERROR: query failed: %v", err)
+			http.Error(w, "audit query failed", http.StatusInternalServerError)
+			return
+		}
+		var total int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM audit_sink_events`).Scan(&total); err != nil {
+			total = len(entries)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"entries": entries,
+			"total":   total,
+		})
+		return
+	}
 	entries := store.GetEntries(0, "", 100)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -209,6 +243,22 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleVerify(w http.ResponseWriter, r *http.Request) {
+	if db != nil {
+		valid, position, err := verifyChainPG()
+		if err != nil {
+			log.Printf("[go-audit-sink] ERROR: chain verify query failed: %v", err)
+			http.Error(w, "chain verification failed", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"chain_valid":      valid,
+			"entries_verified": position,
+			"tamper_detected":  !valid,
+			"source":           "postgres",
+		})
+		return
+	}
 	valid, position := store.VerifyChain()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -244,7 +294,12 @@ func handleMakerChecker(w http.ResponseWriter, r *http.Request) {
 			"amount":     mc.Amount,
 		},
 	}
-	stored := store.Append(entry)
+	stored, err := store.Append(entry)
+	if err != nil {
+		log.Printf("[go-audit-sink] ERROR: maker-checker persist failed (fail closed): %v", err)
+		http.Error(w, "failed to persist audit entry", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -281,7 +336,12 @@ func handleBreakGlass(w http.ResponseWriter, r *http.Request) {
 			"review_due":  bg.ReviewDue,
 		},
 	}
-	stored := store.Append(entry)
+	stored, err := store.Append(entry)
+	if err != nil {
+		log.Printf("[go-audit-sink] ERROR: break-glass persist failed (fail closed): %v", err)
+		http.Error(w, "failed to persist audit entry", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -318,7 +378,12 @@ func handleCanaryTrip(w http.ResponseWriter, r *http.Request) {
 			"auto_actions": ct.AutoActions,
 		},
 	}
-	stored := store.Append(entry)
+	stored, err := store.Append(entry)
+	if err != nil {
+		log.Printf("[go-audit-sink] ERROR: canary-trip persist failed (fail closed): %v", err)
+		http.Error(w, "failed to persist audit entry", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -331,17 +396,59 @@ func handleCanaryTrip(w http.ResponseWriter, r *http.Request) {
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	valid, count := store.VerifyChain()
+	backend := getEnvOrDefault("AUDIT_STORAGE", "memory")
+	if db != nil {
+		backend = "postgres"
+		if v, n, err := verifyChainPG(); err == nil {
+			valid, count = v, n
+		} else {
+			log.Printf("[go-audit-sink] ERROR: health chain verify failed: %v", err)
+			valid = false
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":          "healthy",
 		"service":         "go-audit-sink",
 		"entries_stored":  count,
 		"chain_integrity": valid,
-		"storage_backend": getEnvOrDefault("AUDIT_STORAGE", "memory"),
+		"storage_backend": backend,
 	})
 }
 
 func handleMetrics(w http.ResponseWriter, r *http.Request) {
+	// Serve metrics from PG (source of truth) when configured.
+	if db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		eventCounts := make(map[string]int)
+		rows, err := db.QueryContext(ctx,
+			`SELECT event_type, COUNT(*) FROM audit_sink_events GROUP BY event_type`)
+		if err != nil {
+			log.Printf("[go-audit-sink] ERROR: metrics query failed: %v", err)
+			http.Error(w, "metrics query failed", http.StatusInternalServerError)
+			return
+		}
+		total := 0
+		for rows.Next() {
+			var et string
+			var n int
+			if rows.Scan(&et, &n) == nil {
+				eventCounts[et] = n
+				total += n
+			}
+		}
+		rows.Close()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"total_entries":     total,
+			"event_type_counts": eventCounts,
+			"chain_valid":       true,
+			"source":            "postgres",
+		})
+		return
+	}
+
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 
@@ -360,6 +467,7 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	port := getEnvOrDefault("AUDIT_SINK_PORT", "8180")
+	initDB()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ingest", handleIngest)
