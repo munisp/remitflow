@@ -13,6 +13,13 @@
  */
 
 import crypto from "crypto";
+import { logger } from "../_core/logger";
+import {
+  acquireLock as redisAcquireLock,
+  releaseLock as redisReleaseLock,
+  redisGet,
+  redisSet,
+} from "../middleware/redisHardened";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -35,36 +42,68 @@ export interface AtomicFlowResult<T = unknown> {
   executedAt: string;
 }
 
-// ─── In-memory idempotency store (replaced by Redis in production) ────────────
+// ─── Redis idempotency store (W19-A: was a per-process Map — the old comment ──
+// claimed "replaced by Redis in production" but no Redis call existed) ────────
+// FAIL-CLOSED on this money path: redisGet/redisSet with the "idempotency-check"
+// critical op throw in production when Redis is unavailable, and acquireLock
+// refuses to fabricate a mutual-exclusion guarantee without Redis.
 
-const idempotencyCache = new Map<string, { result: unknown; expiresAt: number }>();
+const IDEMPOTENCY_TTL_SECONDS = 86_400; // 24h
 
-function getCachedResult(key: string): unknown | null {
-  const entry = idempotencyCache.get(key);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    idempotencyCache.delete(key);
+async function getCachedResult(key: string): Promise<unknown | null> {
+  const raw = await redisGet(`stablecoin:idem:${key}`, "idempotency-check");
+  if (raw === null) return null;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch (err) {
+    logger.warn({ key, err: err instanceof Error ? err.message : String(err) },
+      "[stablecoinAtomicity] corrupt idempotency entry in Redis — treating as miss");
     return null;
   }
-  return entry.result;
 }
 
-function setCachedResult(key: string, result: unknown, ttlMs = 86_400_000): void {
-  idempotencyCache.set(key, { result, expiresAt: Date.now() + ttlMs });
+async function setCachedResult(key: string, result: unknown, ttlSeconds = IDEMPOTENCY_TTL_SECONDS): Promise<void> {
+  const ok = await redisSet(`stablecoin:idem:${key}`, JSON.stringify(result), ttlSeconds, "idempotency-check");
+  if (!ok) {
+    // Non-production fail-open path (production throws inside redisSet).
+    logger.error({ key }, "[stablecoinAtomicity] idempotency result NOT persisted — Redis unavailable (non-prod fail-open)");
+    try {
+      const { trackError } = await import("../middleware/businessMetrics.js");
+      trackError("persistence", "stablecoin_idempotency_write");
+    } catch { /* metrics must never break the hot path */ }
+  }
 }
 
-// ─── In-memory lock store (replaced by Redis SETNX in production) ─────────────
+// ─── Distributed lock store (Redis SET NX PX via redisHardened) ──────────────
+// Production: Redis unavailable => redisAcquireLock throws (fail-closed).
+// Non-production without Redis (e.g. unit tests): loud in-process fallback,
+// matching the documented dev-only fallback in middleware/fundFlowAtomicity.
 
-const activeLocks = new Set<string>();
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+const devLocalLocks = new Set<string>();
 
-function acquireLock(lockKey: string): boolean {
-  if (activeLocks.has(lockKey)) return false;
-  activeLocks.add(lockKey);
-  return true;
+async function acquireLock(lockKey: string): Promise<{ acquired: boolean; token: string }> {
+  try {
+    return await redisAcquireLock(lockKey, 30_000);
+  } catch (err) {
+    if (IS_PRODUCTION) throw err; // fail-closed: never fabricate mutual exclusion
+    logger.warn({ lockKey, err: err instanceof Error ? err.message : String(err) },
+      "[stablecoinAtomicity] Redis lock unavailable — in-process lock fallback (non-production ONLY, NOT safe for production)");
+    if (devLocalLocks.has(lockKey)) return { acquired: false, token: "" };
+    devLocalLocks.add(lockKey);
+    return { acquired: true, token: `dev:${lockKey}` };
+  }
 }
 
-function releaseLock(lockKey: string): void {
-  activeLocks.delete(lockKey);
+async function releaseLock(lockKey: string, token: string): Promise<void> {
+  if (token.startsWith("dev:")) {
+    devLocalLocks.delete(lockKey);
+    return;
+  }
+  const released = await redisReleaseLock(lockKey, token);
+  if (!released) {
+    logger.warn({ lockKey }, "[stablecoinAtomicity] lock release mismatch (token changed or expired via TTL)");
+  }
 }
 
 // ─── Core Atomic Wrapper ──────────────────────────────────────────────────────
@@ -85,7 +124,7 @@ export async function executeAtomicStablecoinFlow<T = unknown>(
   const { userId, stablecoin, flowType, idempotencyKey } = params;
 
   // 1. Check idempotency cache first (before acquiring lock)
-  const cached = getCachedResult(idempotencyKey);
+  const cached = await getCachedResult(idempotencyKey);
   if (cached !== null) {
     return {
       success: true,
@@ -97,9 +136,11 @@ export async function executeAtomicStablecoinFlow<T = unknown>(
     };
   }
 
-  // 2. Acquire distributed lock
-  const lockKey = `stablecoin:lock:${userId}:${flowType}:${stablecoin}`;
-  const lockAcquired = acquireLock(lockKey);
+  // 2. Acquire distributed lock (Redis SET NX PX; fail-closed in production
+  // when Redis is unavailable — acquireLock throws instead of fabricating
+  // mutual exclusion)
+  const lockKey = `stablecoin:${userId}:${flowType}:${stablecoin}`;
+  const { acquired: lockAcquired, token: lockToken } = await acquireLock(lockKey);
 
   // If lock not acquired, still proceed but flag it (in production: wait or reject)
   try {
@@ -107,7 +148,7 @@ export async function executeAtomicStablecoinFlow<T = unknown>(
     const result = await flowFn();
 
     // 4. Cache the result for idempotency
-    setCachedResult(idempotencyKey, result);
+    await setCachedResult(idempotencyKey, result);
 
     return {
       success: true,
@@ -123,7 +164,7 @@ export async function executeAtomicStablecoinFlow<T = unknown>(
   } finally {
     // 5. Always release the lock
     if (lockAcquired) {
-      releaseLock(lockKey);
+      await releaseLock(lockKey, lockToken);
     }
   }
 }
@@ -154,28 +195,15 @@ export interface WalletUpdateResult {
 export async function executeWalletUpdate(
   params: WalletUpdateParams,
 ): Promise<WalletUpdateResult> {
-  const { amount, operation } = params;
-
-  // Simulate pessimistic check (in production: SELECT FOR UPDATE)
-  const mockBalance = 1000;
-
-  if (operation === "debit" && mockBalance < amount) {
-    return {
-      success: false,
-      previousBalance: mockBalance,
-      newBalance: mockBalance,
-      overdrawPrevented: true,
-    };
-  }
-
-  const newBalance = operation === "debit" ? mockBalance - amount : mockBalance + amount;
-
-  return {
-    success: true,
-    previousBalance: mockBalance,
-    newBalance,
-    overdrawPrevented: false,
-  };
+  // W19-A: this helper previously SIMULATED a balance check against a hardcoded
+  // mockBalance of 1000 — a fabricated money-path result. It has no callers
+  // (the real path is middleware/stablecoinAtomicity.pessimisticStablecoinDebit,
+  // which does guarded SQL debits). Fail closed instead of fabricating.
+  throw new Error(
+    `[stablecoinAtomicity] executeWalletUpdate is not wired to a durable wallet store ` +
+    `(refused to fabricate a balance for userId=${params.userId} ${params.operation} ${params.amount} ${params.stablecoin}). ` +
+    `Use middleware/stablecoinAtomicity.pessimisticStablecoinDebit / creditStablecoinWallet.`,
+  );
 }
 
 // ─── Idempotency Key Generator ────────────────────────────────────────────────
