@@ -82,7 +82,6 @@ func TestMandateCancellation(t *testing.T) {
 	t.Log("TestMandateCancellation passed")
 }
 
-
 // ─── Benchmarks ───────────────────────────────────────────────────────────────
 
 func BenchmarkHealthCheck(b *testing.B) {
