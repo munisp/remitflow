@@ -124,3 +124,14 @@ uis/pwa/node_modules/
 infrastructure/cilium/tests/rendered-*.yaml
 
 docs/attached-incident-report-pdf/
+
+# W19: compiled Go service binaries
+services/cbdc-service/cbdc-service
+services/direct-debit-service/direct-debit-service
+services/go-audit-sink/go-audit-sink
+services/go-defi-yield/go-defi-yield
+services/go-fx-hedging/go-fx-hedging
+services/go-liquidity-manager/go-liquidity-manager
+services/go-notification-hub/go-notification-hub
+services/go-odl-orchestrator/go-odl-orchestrator
+services/go-stablecoin-settlement/go-stablecoin-settlement
