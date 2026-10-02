@@ -173,6 +173,12 @@ func createForwardHandler(w http.ResponseWriter, r *http.Request) {
 		Status:          "active", PnL: 0, CreatedAt: time.Now().Unix(),
 	}
 
+	// Fail closed: persist before admitting the contract in-memory.
+	if err := dbUpsert("fx_forward_contracts", contract.ID, contract.UserID, contract.Status, contract); err != nil {
+		slog.Error("[FXHedging] forward persist failed (refusing creation)", "id", contract.ID, "err", err)
+		http.Error(w, "failed to persist forward contract", 500)
+		return
+	}
 	mu.Lock()
 	forwards[contract.ID] = contract
 	mu.Unlock()
@@ -228,6 +234,12 @@ func createOptionHandler(w http.ResponseWriter, r *http.Request) {
 		Status: "active", CreatedAt: time.Now().Unix(),
 	}
 
+	// Fail closed: persist before admitting the option in-memory.
+	if err := dbUpsert("fx_options", opt.ID, opt.UserID, opt.Status, opt); err != nil {
+		slog.Error("[FXHedging] option persist failed (refusing creation)", "id", opt.ID, "err", err)
+		http.Error(w, "failed to persist option", 500)
+		return
+	}
 	mu.Lock()
 	options[opt.ID] = opt
 	mu.Unlock()
@@ -311,6 +323,7 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	slog.Info("[FXHedging] Starting", "port", port)
+	initDB()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
