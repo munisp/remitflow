@@ -382,20 +382,81 @@ function usdEquivalentOf(asset: string, amount: number): number {
  * Fireblocks externalTxId / BitGo comment — provide the durable layer).
  */
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
-const custodyIdempotencyCache = new Map<string, { promise: Promise<unknown>; expiresAt: number }>();
+// W19-A: durable idempotency via the custody_idempotency_keys table
+// (migration 0098). The durable claim (status 'pending') is inserted BEFORE
+// the payout executes, so a replayed key can never trigger a second custody
+// payout — even after a restart or on another replica. FAIL-CLOSED: when the
+// DB is unavailable the transfer is refused (requireDb throws). The Map below
+// only dedupes IN-FLIGHT calls within this process; durability lives in PG.
+const custodyInFlight = new Map<string, Promise<unknown>>();
+
+async function _dedupeCustodyClaim<T>(userId: number, idempotencyKey: string, fn: () => Promise<T>): Promise<T> {
+  const { requireDb } = await import("../db");
+  const db = await requireDb(); // fail-closed: custody payout blocked when DB unavailable
+  const { sql } = await import("drizzle-orm");
+  const expiresAt = new Date(Date.now() + IDEMPOTENCY_TTL_MS);
+
+  // 1. Durable claim BEFORE executing the payout.
+  const claimed = (await (db as any).execute(sql`
+    INSERT INTO custody_idempotency_keys (user_id, idempotency_key, status, expires_at)
+    VALUES (${userId}, ${idempotencyKey}, 'pending', ${expiresAt})
+    ON CONFLICT (user_id, idempotency_key) DO NOTHING
+    RETURNING id
+  `)) as unknown as Array<{ id: number }>;
+
+  if (claimed.length === 0) {
+    const existing = (await (db as any).execute(sql`
+      SELECT id, status, result FROM custody_idempotency_keys
+      WHERE user_id = ${userId} AND idempotency_key = ${idempotencyKey}
+    `)) as unknown as Array<{ id: number; status: string; result: unknown }>;
+    const row = existing[0];
+    if (row && row.status === "completed" && row.id) {
+      return row.result as T; // replay: return the recorded result, never re-execute
+    }
+    if (row && row.status === "pending") {
+      throw new TRPCError({ code: "CONFLICT", message: "A custody payout with this idempotencyKey is already in progress" });
+    }
+    // 'failed' or stale row: remove and re-claim so the retry can proceed.
+    await (db as any).execute(sql`
+      DELETE FROM custody_idempotency_keys WHERE user_id = ${userId} AND idempotency_key = ${idempotencyKey}
+    `);
+    return _dedupeCustodyClaim(userId, idempotencyKey, fn);
+  }
+
+  const claimId = claimed[0]!.id;
+  // 2. Execute the payout, then record the result on the durable claim.
+  try {
+    const result = await fn();
+    await (db as any).execute(sql`
+      UPDATE custody_idempotency_keys
+      SET status = 'completed', result = ${JSON.stringify(result ?? null)}::jsonb
+      WHERE id = ${claimId}
+    `);
+    return result;
+  } catch (err) {
+    // Failed executions are NOT cached — remove the claim so a retry can run.
+    try {
+      await (db as any).execute(sql`DELETE FROM custody_idempotency_keys WHERE id = ${claimId}`);
+    } catch (cleanupErr) {
+      logger.error({ err: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr), claimId },
+        "[Custody] failed to release idempotency claim after payout failure — retry will be blocked until row expires");
+      try {
+        const { trackError } = await import("../middleware/businessMetrics.js");
+        trackError("persistence", "custody_idempotency_release");
+      } catch { /* metrics must never break the hot path */ }
+    }
+    throw err;
+  }
+}
 
 function dedupeCustodyCall<T>(userId: number, idempotencyKey: string, fn: () => Promise<T>): Promise<T> {
   const cacheKey = `${userId}:${idempotencyKey}`;
-  const now = Date.now();
-  const existing = custodyIdempotencyCache.get(cacheKey);
-  if (existing && existing.expiresAt > now) return existing.promise as Promise<T>;
-  const promise = fn();
-  custodyIdempotencyCache.set(cacheKey, { promise, expiresAt: now + IDEMPOTENCY_TTL_MS });
-  if (custodyIdempotencyCache.size > 5000) {
-    for (const [k, v] of custodyIdempotencyCache) {
-      if (v.expiresAt <= now) custodyIdempotencyCache.delete(k);
-    }
-  }
+  const inFlight = custodyInFlight.get(cacheKey);
+  if (inFlight) return inFlight as Promise<T>;
+  const promise = _dedupeCustodyClaim(userId, idempotencyKey, fn);
+  custodyInFlight.set(cacheKey, promise);
+  promise.catch(() => { /* rejection is propagated to awaiters; map cleanup below */ })
+    .finally(() => { custodyInFlight.delete(cacheKey); });
   return promise;
 }
 
