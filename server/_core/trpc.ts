@@ -11,6 +11,8 @@ import { logger } from "./logger";
 // module-registry lookup on every audited/rate-limited call. No import cycle:
 // polyglotClient depends on tenantGuc/db, neither of which imports trpc.
 import { sendAuditLog, checkRateLimit } from "./polyglotClient";
+import { checkRateLimit as redisHardenedRateLimit } from "../middleware/redisHardened";
+import { reportWriteThroughFailure } from "../lib/writeThroughTelemetry";
 
 const trpcTracer = trace.getTracer("remitflow-trpc", "2.0.0");
 
@@ -209,7 +211,9 @@ const auditMiddleware = t.middleware(async opts => {
           });
         } catch {
           // Outbox unavailable — degrade to the direct sidecar call.
-          await sendAuditLog(event).catch(() => {});
+          // W19-B: audit emit is fail-open (never blocks the request) but
+          // never silent — log + count.
+          await sendAuditLog(event).catch((err) => reportWriteThroughFailure("trpc_audit_emit", err));
         }
       })();
     }
@@ -264,6 +268,10 @@ export const auditedAdminProcedure = t.procedure
 // exactly when TOTP brute force / beneficiary-swap abuse become viable.
 // Now fails CLOSED into a low in-process sliding-window limit.
 
+// W19-B: `_inProcessRateBuckets` is now the LAST-resort fallback only.
+// The chain is: Go sidecar (primary) → Redis sliding window via
+// redisHardened (replica-consistent) → this per-process map (dev/degraded,
+// WARN-logged + counted via writeThroughTelemetry every time it engages).
 const _inProcessRateBuckets = new Map<string, number[]>();
 
 function inProcessRateLimit(key: string, limit: number, windowSecs: number): boolean {
@@ -292,8 +300,28 @@ function makeRateLimitMiddleware(limit: number, windowSecs: number) {
       const result = await checkRateLimit(key, limit, windowSecs)
         .catch(() => null);
       if (result === null) {
-        // Sidecar unavailable — fail closed into an in-process sliding window
-        // capped at 5 req/min for strict endpoints (configured limit otherwise).
+        // Sidecar unavailable — try the replica-consistent Redis sliding
+        // window before degrading to the per-process map (W19-B).
+        try {
+          const redisResult = await redisHardenedRateLimit(key, limit, limit, windowSecs * 1000);
+          if (!redisResult.allowed) {
+            throw new TRPCError({
+              code: "TOO_MANY_REQUESTS",
+              message: `Rate limit exceeded for ${path}. Retry in ${windowSecs}s.`,
+            });
+          }
+          return next();
+        } catch (redisErr) {
+          // Rethrow only the rate-limit rejection; Redis-unavailability
+          // errors (incl. redisHardened's degraded-mode TRPCError) fall
+          // through to the in-process limiter below.
+          if (redisErr instanceof TRPCError && redisErr.code === "TOO_MANY_REQUESTS") throw redisErr;
+          reportWriteThroughFailure("trpc_rate_limit_redis", redisErr, "error");
+        }
+        // Redis also unavailable — fail closed into an in-process sliding
+        // window capped at 5 req/min for strict endpoints (configured limit
+        // otherwise). Engaging this path is WARN-logged + counted.
+        reportWriteThroughFailure("trpc_rate_limit_inprocess", new Error(`sidecar+redis down; in-process limiter engaged for ${path}`), "error");
         const fallbackLimit = Math.min(limit, 5);
         if (!inProcessRateLimit(key, fallbackLimit, windowSecs)) {
           throw new TRPCError({

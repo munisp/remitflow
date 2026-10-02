@@ -3,6 +3,17 @@
  * Provides 7 tabs: On-Ramp, Off-Ramp, Swap, Send, Yield, Bridge, Bill Pay
  * Supports 7 chains: ethereum, polygon, bsc, arbitrum, optimism, base, avalanche
  * (Solana/Tron not enabled server-side — no real on-chain adapter)
+ *
+ * W19-F: the Swap/Send/Yield/Bridge/Bill Pay tabs previously called
+ * trpc.stablecoinPlatform.{swap,send,stakeForYield,unstake,bridgeChain,payBill}
+ * — procedures that DO NOT EXIST on stablecoinPlatform (audit w19-alignment §2:
+ * 6 orphan frontend calls, silently dead behind optional chaining). Those
+ * procedures live on stablecoinExt (stablecoinExtendedRouter,
+ * server/routers/stablecoinEnhanced.ts:674+) and ALL exist there, so every tab
+ * is now wired to a real backend procedure. stablecoinExt money ops require an
+ * idempotencyKey (min 8 chars, generated per submit) and accept an optional
+ * TOTP step-up code (requireTotpStepUp enforces it server-side for enrolled
+ * users — never waived).
  */
 
 import React, { useState } from "react";
@@ -31,6 +42,13 @@ const SUPPORTED_CHAINS = [
   "avalanche",
 ] as const;
 
+// Yield protocols accepted by the stablecoin engine (grounded:
+// server/middleware/temporalWorkflows.ts:503; mirrors uis/react-native).
+const YIELD_PROTOCOLS = ["aave_v3", "compound_v3"] as const;
+
+// stablecoinExt.* mutations all require idempotencyKey (min 8 chars).
+const newIdempotencyKey = () => `rn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+
 const SUPPORTED_STABLECOINS = ["USDT", "USDC", "BUSD", "DAI", "NGNT", "cUSD", "PYUSD"] as const;
 const SUPPORTED_FIATS = ["USD", "NGN", "GBP", "EUR", "GHS", "KES", "ZAR", "XOF"] as const;
 
@@ -41,16 +59,31 @@ export function StablecoinScreen() {
   const [selectedChain, setSelectedChain] = useState<string>("ethereum");
   const [selectedCoin, setSelectedCoin] = useState<string>("USDC");
   const [selectedFiat, setSelectedFiat] = useState<string>("USD");
+  const [totpCode, setTotpCode] = useState("");
+  const [stakeProtocol, setStakeProtocol] = useState<string>("aave_v3");
+  const [swapTo, setSwapTo] = useState<string>("USDT");
 
-  // tRPC mutations
+  // tRPC mutations — stablecoinPlatform only hosts onramp/offramp; the other
+  // six operations live on stablecoinExt (see header note).
   const buyWithFiat = trpc.stablecoinPlatform.onramp.useMutation();
   const sellToFiat = trpc.stablecoinPlatform.offramp.useMutation();
-  const swap = trpc.stablecoinPlatform.swap?.useMutation?.();
-  const send = trpc.stablecoinPlatform.send?.useMutation?.();
-  const stakeForYield = trpc.stablecoinPlatform.stakeForYield?.useMutation?.();
-  const unstake = trpc.stablecoinPlatform.unstake?.useMutation?.();
-  const bridgeChain = trpc.stablecoinPlatform.bridgeChain?.useMutation?.();
-  const payBill = trpc.stablecoinPlatform.payBill?.useMutation?.();
+  const swap = trpc.stablecoinExt.swap.useMutation();
+  const send = trpc.stablecoinExt.send.useMutation();
+  const stakeForYield = trpc.stablecoinExt.stakeForYield.useMutation();
+  const unstake = trpc.stablecoinExt.unstake.useMutation();
+  const bridgeChain = trpc.stablecoinExt.bridgeChain.useMutation();
+  const payBill = trpc.stablecoinExt.payBill.useMutation();
+
+  const totpInput = (
+    <TextInput
+      style={styles.input}
+      placeholder="TOTP code (if 2FA enrolled)"
+      value={totpCode}
+      onChangeText={setTotpCode}
+      keyboardType="number-pad"
+      maxLength={6}
+    />
+  );
 
   const renderTab = () => {
     switch (activeTab) {
@@ -112,6 +145,30 @@ export function StablecoinScreen() {
         return (
           <View style={styles.tabContent}>
             <Text style={styles.title}>Swap Stablecoins</Text>
+            <Text style={styles.label}>From:</Text>
+            <ScrollView horizontal>
+              {SUPPORTED_STABLECOINS.filter((c) => c !== swapTo).map((coin) => (
+                <TouchableOpacity
+                  key={coin}
+                  style={[styles.chainChip, selectedCoin === coin && styles.chainChipActive]}
+                  onPress={() => setSelectedCoin(coin)}
+                >
+                  <Text style={styles.chainChipText}>{coin}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <Text style={styles.label}>To:</Text>
+            <ScrollView horizontal>
+              {SUPPORTED_STABLECOINS.filter((c) => c !== selectedCoin).map((coin) => (
+                <TouchableOpacity
+                  key={coin}
+                  style={[styles.chainChip, swapTo === coin && styles.chainChipActive]}
+                  onPress={() => setSwapTo(coin)}
+                >
+                  <Text style={styles.chainChipText}>{coin}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
             <TextInput
               style={styles.input}
               placeholder="Amount"
@@ -119,8 +176,20 @@ export function StablecoinScreen() {
               onChangeText={setAmount}
               keyboardType="numeric"
             />
-            <TouchableOpacity style={styles.button} onPress={() => swap?.mutate?.({ fromStablecoin: "USDC", toStablecoin: "USDT", amount: parseFloat(amount) || 0 })}>
-              <Text style={styles.buttonText}>Swap USDC → USDT</Text>
+            {totpInput}
+            <TouchableOpacity
+              style={styles.button}
+              onPress={() =>
+                swap.mutate({
+                  fromStablecoin: selectedCoin,
+                  toStablecoin: swapTo,
+                  amount: parseFloat(amount) || 0,
+                  idempotencyKey: newIdempotencyKey(),
+                  totpCode: totpCode || undefined,
+                })
+              }
+            >
+              <Text style={styles.buttonText}>Swap {selectedCoin} → {swapTo}</Text>
             </TouchableOpacity>
           </View>
         );
@@ -131,7 +200,7 @@ export function StablecoinScreen() {
             <Text style={styles.title}>Send {selectedCoin}</Text>
             <TextInput
               style={styles.input}
-              placeholder="Recipient address or phone"
+              placeholder="Recipient wallet address"
               value={recipient}
               onChangeText={setRecipient}
             />
@@ -142,8 +211,21 @@ export function StablecoinScreen() {
               onChangeText={setAmount}
               keyboardType="numeric"
             />
-            <TouchableOpacity style={styles.button} onPress={() => send?.mutate?.({ stablecoin: selectedCoin, amount: parseFloat(amount) || 0, toAddress: recipient })}>
-              <Text style={styles.buttonText}>Send</Text>
+            {totpInput}
+            <TouchableOpacity
+              style={styles.button}
+              onPress={() =>
+                send.mutate({
+                  stablecoin: selectedCoin,
+                  amount: parseFloat(amount) || 0,
+                  toAddress: recipient,
+                  chain: selectedChain,
+                  idempotencyKey: newIdempotencyKey(),
+                  totpCode: totpCode || undefined,
+                })
+              }
+            >
+              <Text style={styles.buttonText}>Send on {selectedChain}</Text>
             </TouchableOpacity>
           </View>
         );
@@ -152,6 +234,18 @@ export function StablecoinScreen() {
         return (
           <View style={styles.tabContent}>
             <Text style={styles.title}>Earn Yield on {selectedCoin}</Text>
+            <Text style={styles.label}>Protocol: {stakeProtocol}</Text>
+            <View style={{ flexDirection: "row" }}>
+              {YIELD_PROTOCOLS.map((p) => (
+                <TouchableOpacity
+                  key={p}
+                  style={[styles.chainChip, stakeProtocol === p && styles.chainChipActive]}
+                  onPress={() => setStakeProtocol(p)}
+                >
+                  <Text style={styles.chainChipText}>{p}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
             <TextInput
               style={styles.input}
               placeholder="Amount to stake"
@@ -159,10 +253,33 @@ export function StablecoinScreen() {
               onChangeText={setAmount}
               keyboardType="numeric"
             />
-            <TouchableOpacity style={styles.button} onPress={() => stakeForYield?.mutate?.({ stablecoin: selectedCoin, amount: parseFloat(amount) || 0 })}>
+            {totpInput}
+            <TouchableOpacity
+              style={styles.button}
+              onPress={() =>
+                stakeForYield.mutate({
+                  stablecoin: selectedCoin,
+                  amount: parseFloat(amount) || 0,
+                  protocol: stakeProtocol,
+                  idempotencyKey: newIdempotencyKey(),
+                  totpCode: totpCode || undefined,
+                })
+              }
+            >
               <Text style={styles.buttonText}>Stake for Yield</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={[styles.button, styles.secondaryButton]} onPress={() => unstake?.mutate?.({ stablecoin: selectedCoin, amount: parseFloat(amount) || 0 })}>
+            <TouchableOpacity
+              style={[styles.button, styles.secondaryButton]}
+              onPress={() =>
+                unstake.mutate({
+                  stablecoin: selectedCoin,
+                  amount: parseFloat(amount) || 0,
+                  protocol: stakeProtocol,
+                  idempotencyKey: newIdempotencyKey(),
+                  totpCode: totpCode || undefined,
+                })
+              }
+            >
               <Text style={styles.buttonText}>Unstake</Text>
             </TouchableOpacity>
           </View>
@@ -191,7 +308,20 @@ export function StablecoinScreen() {
               onChangeText={setAmount}
               keyboardType="numeric"
             />
-            <TouchableOpacity style={styles.button} onPress={() => bridgeChain?.mutate?.({ stablecoin: selectedCoin, amount: parseFloat(amount) || 0, fromChain: "ethereum", toChain: selectedChain })}>
+            {totpInput}
+            <TouchableOpacity
+              style={styles.button}
+              onPress={() =>
+                bridgeChain.mutate({
+                  stablecoin: selectedCoin,
+                  amount: parseFloat(amount) || 0,
+                  fromChain: "ethereum",
+                  toChain: selectedChain,
+                  idempotencyKey: newIdempotencyKey(),
+                  totpCode: totpCode || undefined,
+                })
+              }
+            >
               <Text style={styles.buttonText}>Bridge to {selectedChain}</Text>
             </TouchableOpacity>
           </View>
@@ -214,7 +344,20 @@ export function StablecoinScreen() {
               onChangeText={setAmount}
               keyboardType="numeric"
             />
-            <TouchableOpacity style={styles.button} onPress={() => payBill?.mutate?.({ stablecoin: selectedCoin, amount: parseFloat(amount) || 0, billRef: recipient, provider: "generic" })}>
+            {totpInput}
+            <TouchableOpacity
+              style={styles.button}
+              onPress={() =>
+                payBill.mutate({
+                  stablecoin: selectedCoin,
+                  amount: parseFloat(amount) || 0,
+                  billRef: recipient,
+                  provider: "generic",
+                  idempotencyKey: newIdempotencyKey(),
+                  totpCode: totpCode || undefined,
+                })
+              }
+            >
               <Text style={styles.buttonText}>Pay Bill</Text>
             </TouchableOpacity>
           </View>
