@@ -369,6 +369,12 @@ func handleGetQuote(w http.ResponseWriter, r *http.Request) {
 		LockedRate:     true,
 	}
 
+	// Fail closed: persist the rate-locked quote before admitting it in-memory.
+	if err := dbUpsert("odl_quotes", quote.QuoteID, &quote); err != nil {
+		slog.Error("[ODL] quote persist failed (refusing quote)", "id", quote.QuoteID, "err", err)
+		http.Error(w, `{"error":"failed to persist quote"}`, http.StatusInternalServerError)
+		return
+	}
 	store.mu.Lock()
 	store.quotes[quote.QuoteID] = &quote
 	store.mu.Unlock()
@@ -418,6 +424,12 @@ func handleInitiateSettlement(w http.ResponseWriter, r *http.Request) {
 		AuditTrail:    []AuditEvent{},
 	}
 
+	// Fail closed: persist before admitting the settlement in-memory.
+	if err := persistSettlement(settlement); err != nil {
+		slog.Error("[ODL] settlement persist failed (refusing initiation)", "id", settlement.SettlementID, "err", err)
+		http.Error(w, `{"error":"failed to persist settlement"}`, http.StatusInternalServerError)
+		return
+	}
 	store.mu.Lock()
 	store.settlements[settlement.SettlementID] = settlement
 	store.mu.Unlock()
@@ -427,6 +439,11 @@ func handleInitiateSettlement(w http.ResponseWriter, r *http.Request) {
 	// API response can state it explicitly instead of implying settlement is
 	// underway.
 	executeODLSettlement(context.Background(), settlement)
+
+	// Persist the terminal status/audit trail produced by the pipeline.
+	if err := persistSettlement(settlement); err != nil {
+		slog.Error("[ODL] settlement status persist failed", "id", settlement.SettlementID, "status", settlement.Status, "err", err)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if settlement.Status == StatusUnavailable {
@@ -541,8 +558,24 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	// Initialize corridor routes
-	initCorridorRoutes()
+	// Connect to Postgres and warm the stores, then seed corridor routes only
+	// when PG had none (PG-loaded routes win across restarts).
+	initDB()
+	store.mu.RLock()
+	routesEmpty := len(store.routes) == 0
+	store.mu.RUnlock()
+	if routesEmpty {
+		initCorridorRoutes()
+		if db != nil {
+			store.mu.RLock()
+			for key, r := range store.routes {
+				if err := dbUpsert("odl_routes", key, r); err != nil {
+					slog.Error("[ODL] route persist failed", "key", key, "err", err)
+				}
+			}
+			store.mu.RUnlock()
+		}
+	}
 
 	// Background route refresh every 2 minutes
 	go func() {
@@ -555,6 +588,11 @@ func main() {
 			for key, route := range store.routes {
 				route.LastUpdated = time.Now()
 				store.routes[key] = route
+				// Persist refreshed timestamps so boot-loaded routes are not
+				// immediately rejected as stale after a restart.
+				if err := dbUpsert("odl_routes", key, route); err != nil {
+					slog.Error("[ODL] route refresh persist failed", "key", key, "err", err)
+				}
 			}
 			store.mu.Unlock()
 		}

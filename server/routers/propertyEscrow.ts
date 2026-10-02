@@ -892,7 +892,7 @@ const milestoneRouter = router({
       const db = await getDbConn();
       const [plan] = await db.select().from(propertyEscrowPlans).where(eq(propertyEscrowPlans.planId, input.planId)).limit(1);
       if (!plan) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
-      const milestones = await db.select().from(propertyMilestones).where(eq(propertyEscrowPlans.escrowPlanId, plan.id)).orderBy(propertyMilestones.sequenceNumber);
+      const milestones = await db.select().from(propertyMilestones).where(eq(propertyMilestones.escrowPlanId, plan.id)).orderBy(propertyMilestones.sequenceNumber);
 
       const timeline = await Promise.all(milestones.map(async (m: typeof milestones[number]) => {
         const evidence = await db.select().from(milestoneEvidence).where(eq(milestoneEvidence.milestoneId, m.id)).orderBy(desc(milestoneEvidence.createdAt));

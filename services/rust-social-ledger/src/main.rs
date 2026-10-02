@@ -34,6 +34,8 @@
 ///   GET  /links/:code               — Resolve payment link
 ///   GET  /health                    — Health check
 
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::io::{Read, Write};
@@ -116,6 +118,11 @@ struct AppState {
     pools: Mutex<HashMap<String, SavingsPool>>,
     links: Mutex<HashMap<String, PaymentLink>>,
     metrics: Mutex<SocialMetrics>,
+    /// Tokio runtime hosting the sqlx pool (handlers are sync; DB calls use
+    /// `rt.block_on` — money-path writes are fail-closed).
+    rt: Option<Arc<tokio::runtime::Runtime>>,
+    /// PostgreSQL write-through pool (None = degraded in-memory mode, boot WARN).
+    db: Option<PgPool>,
 }
 
 struct SocialMetrics {
@@ -142,7 +149,240 @@ impl AppState {
                 referrals_tracked: 0, rewards_paid: 0, pools_created: 0,
                 links_created: 0, links_resolved: 0,
             }),
+            rt: None,
+            db: None,
         }
+    }
+}
+
+// ── PostgreSQL persistence (boot-load + write-through) ───────────────────────
+
+const MIGRATION_SQL: &str = include_str!("../migrations/0001_init.sql");
+
+fn init_db(rt: &tokio::runtime::Runtime) -> Option<PgPool> {
+    let db_url = match std::env::var("DATABASE_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!("[rust-social-ledger] WARN: DATABASE_URL unset — DEGRADED in-memory mode; ROSCA/pool money records will NOT survive restart");
+            return None;
+        }
+    };
+    let pool = rt.block_on(async {
+        let pool = PgPoolOptions::new().max_connections(5).connect(&db_url).await
+            .expect("DATABASE_URL set but PostgreSQL unreachable — refusing to start social-ledger without durable storage");
+        sqlx::raw_sql(MIGRATION_SQL).execute(&pool).await.expect("failed to apply social_* migrations");
+        pool
+    });
+    eprintln!("[rust-social-ledger] PostgreSQL connected, migrations applied");
+    Some(pool)
+}
+
+fn load_from_db(rt: &tokio::runtime::Runtime, pool: &PgPool, state: &AppState) {
+    rt.block_on(async {
+        // Groups
+        match sqlx::query_as::<_, (String, String, String, i64, String, serde_json::Value, i32, i32, i64, String, i64, i64)>(
+            "SELECT id, name, currency, contribution_amount, contribution_frequency, member_ids, current_round, current_beneficiary_idx, total_pot, status, created_at_unix, next_contribution_due FROM social_rosca_groups"
+        ).fetch_all(pool).await {
+            Ok(rows) => {
+                let mut groups = state.groups.lock().unwrap();
+                for (id, name, currency, amount, freq, members, round, bidx, pot, status, created, due) in rows {
+                    groups.insert(id.clone(), RoscaGroup {
+                        id, name, currency,
+                        contribution_amount: amount as u64,
+                        contribution_frequency: freq,
+                        member_ids: serde_json::from_value(members).unwrap_or_default(),
+                        current_round: round as u32,
+                        current_beneficiary_idx: bidx as u32,
+                        total_pot: pot as u64,
+                        status,
+                        created_at: created as u64,
+                        next_contribution_due: due as u64,
+                    });
+                }
+                eprintln!("[rust-social-ledger] boot-loaded {} ROSCA groups", groups.len());
+            }
+            Err(e) => eprintln!("[rust-social-ledger] ERROR: group boot-load failed: {}", e),
+        }
+        // Contributions
+        match sqlx::query_as::<_, (String, String, String, i64, i32, i64, Option<String>)>(
+            "SELECT id, group_id, member_id, amount, round, timestamp_unix, tigerbeetle_transfer_id FROM social_contributions"
+        ).fetch_all(pool).await {
+            Ok(rows) => {
+                let mut contribs = state.contributions.lock().unwrap();
+                for (id, gid, mid, amount, round, ts, tb) in rows {
+                    contribs.push(Contribution {
+                        id, group_id: gid, member_id: mid, amount: amount as u64,
+                        round: round as u32, timestamp: ts as u64, tigerbeetle_transfer_id: tb,
+                    });
+                }
+                eprintln!("[rust-social-ledger] boot-loaded {} contributions", contribs.len());
+            }
+            Err(e) => eprintln!("[rust-social-ledger] ERROR: contribution boot-load failed: {}", e),
+        }
+        // Referrals
+        match sqlx::query_as::<_, (String, String, i16, String, i64, String, i64, Option<i64>)>(
+            "SELECT referrer_id, referee_id, tier, status, reward_amount, reward_currency, created_at_unix, qualified_at FROM social_referrals"
+        ).fetch_all(pool).await {
+            Ok(rows) => {
+                let mut referrals = state.referrals.lock().unwrap();
+                for (referrer, referee, tier, status, amount, cur, created, qualified) in rows {
+                    referrals.push(ReferralRecord {
+                        referrer_id: referrer, referee_id: referee, tier: tier as u8,
+                        status, reward_amount: amount as u64, reward_currency: cur,
+                        created_at: created as u64, qualified_at: qualified.map(|q| q as u64),
+                    });
+                }
+                eprintln!("[rust-social-ledger] boot-loaded {} referrals", referrals.len());
+            }
+            Err(e) => eprintln!("[rust-social-ledger] ERROR: referral boot-load failed: {}", e),
+        }
+        // Pools
+        match sqlx::query_as::<_, (String, String, i64, i64, String, String, String, String, serde_json::Value, String, i64)>(
+            "SELECT id, name, goal_amount, current_amount, currency, disbursement_rule, disbursement_target, beneficiary_id, member_ids, status, created_at_unix FROM social_pools"
+        ).fetch_all(pool).await {
+            Ok(rows) => {
+                let mut pools = state.pools.lock().unwrap();
+                for (id, name, goal, current, cur, rule, target, beneficiary, members, status, created) in rows {
+                    pools.insert(id.clone(), SavingsPool {
+                        id, name, goal_amount: goal as u64, current_amount: current as u64,
+                        currency: cur, disbursement_rule: rule, disbursement_target: target,
+                        beneficiary_id: beneficiary,
+                        member_ids: serde_json::from_value(members).unwrap_or_default(),
+                        status, created_at: created as u64,
+                    });
+                }
+                eprintln!("[rust-social-ledger] boot-loaded {} savings pools", pools.len());
+            }
+            Err(e) => eprintln!("[rust-social-ledger] ERROR: pool boot-load failed: {}", e),
+        }
+        // Payment links
+        match sqlx::query_as::<_, (String, String, Option<i64>, String, String, i64, Option<i32>, i32, String)>(
+            "SELECT code, creator_id, amount, currency, description, expires_at, max_uses, use_count, status FROM social_payment_links"
+        ).fetch_all(pool).await {
+            Ok(rows) => {
+                let mut links = state.links.lock().unwrap();
+                for (code, creator, amount, cur, desc, expires, max_uses, use_count, status) in rows {
+                    links.insert(code.clone(), PaymentLink {
+                        code, creator_id: creator, amount: amount.map(|a| a as u64), currency: cur,
+                        description: desc, expires_at: expires as u64,
+                        max_uses: max_uses.map(|m| m as u32), use_count: use_count as u32, status,
+                    });
+                }
+                eprintln!("[rust-social-ledger] boot-loaded {} payment links", links.len());
+            }
+            Err(e) => eprintln!("[rust-social-ledger] ERROR: link boot-load failed: {}", e),
+        }
+    });
+}
+
+fn members_json(members: &[String]) -> serde_json::Value {
+    serde_json::to_value(members).unwrap_or_default()
+}
+
+async fn db_insert_group(pool: &PgPool, g: &RoscaGroup) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO social_rosca_groups
+            (id, name, currency, contribution_amount, contribution_frequency, member_ids,
+             current_round, current_beneficiary_idx, total_pot, status, created_at_unix, next_contribution_due)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         ON CONFLICT (id) DO NOTHING"
+    )
+    .bind(&g.id).bind(&g.name).bind(&g.currency).bind(g.contribution_amount as i64)
+    .bind(&g.contribution_frequency).bind(members_json(&g.member_ids))
+    .bind(g.current_round as i32).bind(g.current_beneficiary_idx as i32)
+    .bind(g.total_pot as i64).bind(&g.status).bind(g.created_at as i64).bind(g.next_contribution_due as i64)
+    .execute(pool).await?;
+    Ok(())
+}
+
+async fn db_update_group(pool: &PgPool, g: &RoscaGroup) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE social_rosca_groups SET current_round=$2, current_beneficiary_idx=$3,
+            total_pot=$4, status=$5, updated_at=NOW() WHERE id=$1"
+    )
+    .bind(&g.id).bind(g.current_round as i32).bind(g.current_beneficiary_idx as i32)
+    .bind(g.total_pot as i64).bind(&g.status)
+    .execute(pool).await?;
+    Ok(())
+}
+
+async fn db_insert_referral(pool: &PgPool, r: &ReferralRecord) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO social_referrals (referrer_id, referee_id, tier, status, reward_amount, reward_currency, created_at_unix, qualified_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)"
+    )
+    .bind(&r.referrer_id).bind(&r.referee_id).bind(r.tier as i16).bind(&r.status)
+    .bind(r.reward_amount as i64).bind(&r.reward_currency)
+    .bind(r.created_at as i64).bind(r.qualified_at.map(|q| q as i64))
+    .execute(pool).await?;
+    Ok(())
+}
+
+async fn db_insert_pool(pool: &PgPool, p: &SavingsPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO social_pools (id, name, goal_amount, current_amount, currency, disbursement_rule, disbursement_target, beneficiary_id, member_ids, status, created_at_unix)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (id) DO NOTHING"
+    )
+    .bind(&p.id).bind(&p.name).bind(p.goal_amount as i64).bind(p.current_amount as i64)
+    .bind(&p.currency).bind(&p.disbursement_rule).bind(&p.disbursement_target)
+    .bind(&p.beneficiary_id).bind(members_json(&p.member_ids)).bind(&p.status).bind(p.created_at as i64)
+    .execute(pool).await?;
+    Ok(())
+}
+
+async fn db_update_pool(pool: &PgPool, p: &SavingsPool) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE social_pools SET current_amount=$2, status=$3, updated_at=NOW() WHERE id=$1")
+        .bind(&p.id).bind(p.current_amount as i64).bind(&p.status)
+        .execute(pool).await?;
+    Ok(())
+}
+
+async fn db_insert_link(pool: &PgPool, l: &PaymentLink) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO social_payment_links (code, creator_id, amount, currency, description, expires_at, max_uses, use_count, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (code) DO NOTHING"
+    )
+    .bind(&l.code).bind(&l.creator_id).bind(l.amount.map(|a| a as i64)).bind(&l.currency)
+    .bind(&l.description).bind(l.expires_at as i64).bind(l.max_uses.map(|m| m as i32))
+    .bind(l.use_count as i32).bind(&l.status)
+    .execute(pool).await?;
+    Ok(())
+}
+
+async fn db_update_link(pool: &PgPool, l: &PaymentLink) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE social_payment_links SET use_count=$2, status=$3, updated_at=NOW() WHERE code=$1")
+        .bind(&l.code).bind(l.use_count as i32).bind(&l.status)
+        .execute(pool).await?;
+    Ok(())
+}
+
+/// Fail-closed write-through helper: runs `f` against PG when configured.
+/// Returns Err(()) when the durable write failed (caller returns HTTP 500).
+fn persist<F, Fut>(state: &AppState, f: F) -> Result<(), ()>
+where
+    F: FnOnce(PgPool) -> Fut,
+    Fut: std::future::Future<Output = Result<(), sqlx::Error>>,
+{
+    let (Some(rt), Some(pool)) = (&state.rt, &state.db) else {
+        return Ok(()); // degraded in-memory mode (boot WARN already emitted)
+    };
+    match rt.block_on(f(pool.clone())) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("[rust-social-ledger] ERROR: durable write failed (fail-closed): {}", e);
+            Err(())
+        }
+    }
+}
+
+/// Fail-open write-through helper for non-money increments: logs loudly.
+fn persist_best_effort<F, Fut>(state: &AppState, f: F)
+where
+    F: FnOnce(PgPool) -> Fut,
+    Fut: std::future::Future<Output = Result<(), sqlx::Error>>,
+{
+    if persist(state, f).is_err() {
+        eprintln!("[rust-social-ledger] ERROR: non-critical durable write lost (kept in memory only)");
     }
 }
 
@@ -150,7 +390,15 @@ impl AppState {
 
 fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "9020".to_string());
-    let state = Arc::new(AppState::new());
+    let rt = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime for persistence"));
+    let db = init_db(&rt);
+    let mut state_owned = AppState::new();
+    if let Some(ref pool) = db {
+        load_from_db(&rt, pool, &state_owned);
+    }
+    state_owned.rt = Some(rt);
+    state_owned.db = db;
+    let state = Arc::new(state_owned);
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).expect("Failed to bind");
     eprintln!("[rust-social-ledger] Listening on :{}", port);
 
@@ -265,6 +513,12 @@ fn handle_create_group(body: &str, state: &AppState) -> String {
         next_contribution_due: now_ts() + 30 * 24 * 3600, // 30 days
     };
 
+    let group_to_persist = group.clone();
+    if persist(state, move |p| async move {
+        db_insert_group(&p, &group_to_persist).await
+    }).is_err() {
+        return http_response(503, r#"{"error":"durable store unavailable"}"#);
+    }
     state.groups.lock().unwrap().insert(id.clone(), group);
     state.metrics.lock().unwrap().groups_created += 1;
 
@@ -314,6 +568,7 @@ fn handle_contribute(group_id: &str, body: &str, state: &AppState) -> String {
 
     group.total_pot += amount;
     let round = group.current_round;
+    let group_snapshot = group.clone();
     drop(groups);
 
     let contribution = Contribution {
@@ -325,6 +580,37 @@ fn handle_contribute(group_id: &str, body: &str, state: &AppState) -> String {
         timestamp: now_ts(),
         tigerbeetle_transfer_id: None,
     };
+
+    // Money path: contribution record + pot update must be durable before we
+    // acknowledge. Fail closed on PG error and roll back the in-memory pot.
+    let contribution_to_persist = contribution.clone();
+    let group_to_persist = group_snapshot.clone();
+    if persist(state, move |p| {
+        let c = contribution_to_persist.clone();
+        let g = group_to_persist.clone();
+        async move {
+            let mut tx = p.begin().await?;
+            sqlx::query(
+                "INSERT INTO social_contributions (id, group_id, member_id, amount, round, timestamp_unix, tigerbeetle_transfer_id)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO NOTHING"
+            )
+            .bind(&c.id).bind(&c.group_id).bind(&c.member_id).bind(c.amount as i64)
+            .bind(c.round as i32).bind(c.timestamp as i64).bind(&c.tigerbeetle_transfer_id)
+            .execute(&mut *tx).await?;
+            sqlx::query(
+                "UPDATE social_rosca_groups SET total_pot=$2, updated_at=NOW() WHERE id=$1"
+            )
+            .bind(&g.id).bind(g.total_pot as i64)
+            .execute(&mut *tx).await?;
+            tx.commit().await
+        }
+    }).is_err() {
+        let mut groups = state.groups.lock().unwrap();
+        if let Some(g) = groups.get_mut(group_id) {
+            g.total_pot = g.total_pot.saturating_sub(amount);
+        }
+        return http_response(503, r#"{"error":"durable store unavailable"}"#);
+    }
 
     let contrib_id = contribution.id.clone();
     state.contributions.lock().unwrap().push(contribution);
@@ -359,12 +645,29 @@ fn handle_disburse(group_id: &str, state: &AppState) -> String {
         group.status = "completed".to_string();
     }
 
+    let snapshot = group.clone();
+    let rollback_round = snapshot.current_round - 1;
+    drop(groups);
+
+    // Money path: pot disbursement must be durable before we acknowledge.
+    let group_to_persist = snapshot.clone();
+    if persist(state, move |p| async move { db_update_group(&p, &group_to_persist).await }).is_err() {
+        let mut groups = state.groups.lock().unwrap();
+        if let Some(g) = groups.get_mut(group_id) {
+            g.total_pot = disbursement_amount;
+            g.current_round = rollback_round;
+            g.current_beneficiary_idx = (rollback_round - 1) % g.member_ids.len() as u32;
+            g.status = "active".to_string();
+        }
+        return http_response(503, r#"{"error":"durable store unavailable"}"#);
+    }
+
     state.metrics.lock().unwrap().disbursements_made += 1;
 
     http_response(200, &format!(
         r#"{{"groupId":"{}","beneficiaryId":"{}","disbursementAmount":{},"currency":"{}","newRound":{},"groupStatus":"{}","timestamp":{}}}"#,
-        group_id, beneficiary_id, disbursement_amount, group.currency,
-        group.current_round, group.status, now_ts()
+        group_id, beneficiary_id, disbursement_amount, snapshot.currency,
+        snapshot.current_round, snapshot.status, now_ts()
     ))
 }
 
@@ -397,6 +700,10 @@ fn handle_record_referral(body: &str, state: &AppState) -> String {
         qualified_at: None,
     };
 
+    let referral_to_persist = referral.clone();
+    if persist(state, move |p| async move { db_insert_referral(&p, &referral_to_persist).await }).is_err() {
+        return http_response(503, r#"{"error":"durable store unavailable"}"#);
+    }
     state.referrals.lock().unwrap().push(referral);
     state.metrics.lock().unwrap().referrals_tracked += 1;
 
@@ -455,6 +762,10 @@ fn handle_create_pool(body: &str, state: &AppState) -> String {
         created_at: now_ts(),
     };
 
+    let pool_to_persist = pool.clone();
+    if persist(state, move |p| async move { db_insert_pool(&p, &pool_to_persist).await }).is_err() {
+        return http_response(503, r#"{"error":"durable store unavailable"}"#);
+    }
     state.pools.lock().unwrap().insert(id.clone(), pool);
     state.metrics.lock().unwrap().pools_created += 1;
 
@@ -482,9 +793,22 @@ fn handle_pool_contribute(pool_id: &str, body: &str, state: &AppState) -> String
         pool.status = "goal_reached".to_string();
     }
 
+    let snapshot = pool.clone();
+    drop(pools);
+
+    let pool_to_persist = snapshot.clone();
+    if persist(state, move |p| async move { db_update_pool(&p, &pool_to_persist).await }).is_err() {
+        let mut pools = state.pools.lock().unwrap();
+        if let Some(pl) = pools.get_mut(pool_id) {
+            pl.current_amount = pl.current_amount.saturating_sub(amount);
+            pl.status = "active".to_string();
+        }
+        return http_response(503, r#"{"error":"durable store unavailable"}"#);
+    }
+
     http_response(200, &format!(
         r#"{{"poolId":"{}","contributedAmount":{},"totalAmount":{},"goalAmount":{},"progressPercent":{},"goalReached":{},"status":"{}"}}"#,
-        pool_id, amount, pool.current_amount, pool.goal_amount, progress, goal_reached, pool.status
+        pool_id, amount, snapshot.current_amount, snapshot.goal_amount, progress, goal_reached, snapshot.status
     ))
 }
 
@@ -511,6 +835,10 @@ fn handle_create_link(body: &str, state: &AppState) -> String {
         status: "active".to_string(),
     };
 
+    let link_to_persist = link.clone();
+    if persist(state, move |p| async move { db_insert_link(&p, &link_to_persist).await }).is_err() {
+        return http_response(503, r#"{"error":"durable store unavailable"}"#);
+    }
     state.links.lock().unwrap().insert(code.clone(), link);
     state.metrics.lock().unwrap().links_created += 1;
 
@@ -532,22 +860,32 @@ fn handle_resolve_link(code: &str, state: &AppState) -> String {
             }
             if now_ts() > link.expires_at {
                 link.status = "expired".to_string();
+                let link_snapshot = link.clone();
+                drop(links);
+                persist_best_effort(state, move |p| async move { db_update_link(&p, &link_snapshot).await });
                 return http_response(410, r#"{"error":"Link has expired"}"#);
             }
             if let Some(max) = link.max_uses {
                 if link.use_count >= max {
                     link.status = "exhausted".to_string();
+                    let link_snapshot = link.clone();
+                    drop(links);
+                    persist_best_effort(state, move |p| async move { db_update_link(&p, &link_snapshot).await });
                     return http_response(410, r#"{"error":"Link has reached maximum uses"}"#);
                 }
             }
             link.use_count += 1;
+            let link_snapshot = link.clone();
+            drop(links);
+            let link_for_db = link_snapshot.clone();
+            persist_best_effort(state, move |p| async move { db_update_link(&p, &link_for_db).await });
             state.metrics.lock().unwrap().links_resolved += 1;
 
-            let amount_str = link.amount.map(|a| format!(",\"amount\":{}", a)).unwrap_or_default();
+            let amount_str = link_snapshot.amount.map(|a| format!(",\"amount\":{}", a)).unwrap_or_default();
             http_response(200, &format!(
                 r#"{{"code":"{}","creatorId":"{}","currency":"{}","description":"{}"{},"useCount":{},"status":"active"}}"#,
-                link.code, link.creator_id, link.currency, link.description,
-                amount_str, link.use_count
+                link_snapshot.code, link_snapshot.creator_id, link_snapshot.currency, link_snapshot.description,
+                amount_str, link_snapshot.use_count
             ))
         }
         None => http_response(404, r#"{"error":"Link not found"}"#),

@@ -125,10 +125,159 @@ STABLECOIN_USD_RATES = {
     "EURC": 1.085, "NGNT": 0.000625, "cUSD": 1.0, "BUSD": 1.0,
 }
 
-# ── In-memory state ───────────────────────────────────────────────────────────
+# ── In-memory state (write-through caches backed by Postgres — W19-E) ────────
 wallets: Dict[str, Dict[str, float]] = {}       # user_id -> {cbdc_code: balance}
 transactions: Dict[str, Dict] = {}              # tx_id -> tx_record
 programmable_conditions: Dict[str, Dict] = {}  # condition_id -> condition
+
+# ── PostgreSQL persistence layer (W19-E) ──────────────────────────────────────
+# CBDC balances, transaction records and programmable/escrow conditions are
+# money-path state. They are persisted write-through to Postgres and boot-loaded
+# on startup. If Postgres is unavailable the service runs DEGRADED (in-memory
+# only) with loud ERROR logging; if Postgres is connected but a money-path write
+# fails, the request fails closed with 503.
+import psycopg2
+import psycopg2.extras
+
+_DATABASE_URL = os.getenv("DATABASE_URL")
+_AUTO_MIGRATE = os.getenv("AUTO_MIGRATE", "1") == "1"
+_MIGRATIONS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "migrations")
+_pg_conn = None
+_persistence_degraded = False
+
+
+def _get_pg():
+    """Lazy Postgres connection (5s statement_timeout — SPEC-wave14 §4.6)."""
+    global _pg_conn, _persistence_degraded
+    if not _DATABASE_URL:
+        if not _persistence_degraded:
+            _persistence_degraded = True
+            log.error("[CBDC] DATABASE_URL not set — DEGRADED in-memory mode; balances/transactions will NOT survive restart")
+        return None
+    if _pg_conn is None or _pg_conn.closed:
+        try:
+            _pg_conn = psycopg2.connect(_DATABASE_URL, options="-c statement_timeout=5000")
+            _pg_conn.autocommit = True
+            log.info("[CBDC] PostgreSQL connected")
+        except Exception as e:
+            _pg_conn = None
+            _persistence_degraded = True
+            log.error("[CBDC] PostgreSQL connect failed: %s — DEGRADED in-memory mode", e)
+    return _pg_conn
+
+
+def _apply_migrations(conn) -> None:
+    """Apply this service's own migrations dir (AUTO_MIGRATE=1 pattern)."""
+    if not _AUTO_MIGRATE:
+        return
+    path = os.path.join(_MIGRATIONS_DIR, "0001_init.sql")
+    with open(path, "r", encoding="utf-8") as f:
+        ddl = f.read()
+    with conn.cursor() as cur:
+        cur.execute(ddl)
+    log.info("[CBDC] migrations applied from %s", path)
+
+
+def _persist_write(sql: str, params: tuple, what: str) -> None:
+    """Write-through helper. Fails CLOSED (503) when PG is connected but the
+    write errors; logs loudly and continues only in degraded (no-PG) mode."""
+    global _pg_conn, _persistence_degraded
+    conn = _get_pg()
+    if conn is None:
+        metrics["cbdc_errors_total"] += 1
+        log.error("[CBDC] DEGRADED: %s not persisted (no Postgres connection)", what)
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+    except Exception as e:
+        metrics["cbdc_errors_total"] += 1
+        _persistence_degraded = True
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _pg_conn = None
+        log.error("[CBDC] persistence write failed for %s: %s — failing closed", what, e)
+        raise HTTPException(status_code=503, detail=f"Persistence layer unavailable; {what} not committed")
+
+
+def _persist_wallet_balance(user_id: str, cbdc_code: str, balance: float) -> None:
+    _persist_write(
+        """INSERT INTO cbdc_wallet_balances (user_id, cbdc_code, balance, updated_at)
+           VALUES (%s, %s, %s, NOW())
+           ON CONFLICT (user_id, cbdc_code) DO UPDATE SET balance = %s, updated_at = NOW()""",
+        (user_id, cbdc_code, balance, balance),
+        f"wallet balance {user_id}/{cbdc_code}",
+    )
+
+
+def _persist_tx(record: Dict) -> None:
+    _persist_write(
+        """INSERT INTO cbdc_transactions (id, tx_type, user_id, data, status, created_at)
+           VALUES (%s, %s, %s, %s, %s, %s)
+           ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, data = EXCLUDED.data""",
+        (record["id"], record["type"], record["user_id"],
+         psycopg2.extras.Json(record["data"]), record["status"], record["created_at"]),
+        f"transaction {record['id']}",
+    )
+
+
+def _persist_condition(cond: Dict) -> None:
+    _persist_write(
+        """INSERT INTO cbdc_programmable_conditions
+               (id, user_id, cbdc_code, amount, condition_type, unlock_at, condition_data, status, created_at, released_at)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+           ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, released_at = EXCLUDED.released_at,
+                  condition_data = EXCLUDED.condition_data""",
+        (cond["id"], cond["user_id"], cond["cbdc_code"], cond["amount"], cond["condition_type"],
+         cond.get("unlock_at"), psycopg2.extras.Json(cond.get("condition_data") or {}),
+         cond["status"], cond["created_at"], cond.get("released_at")),
+        f"programmable condition {cond['id']}",
+    )
+
+
+def _boot_load_from_pg() -> None:
+    """Boot-load wallets, transactions and programmable conditions into the
+    in-memory write-through caches."""
+    conn = _get_pg()
+    if conn is None:
+        return
+    try:
+        _apply_migrations(conn)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT user_id, cbdc_code, balance FROM cbdc_wallet_balances")
+            for row in cur.fetchall():
+                uid = str(row["user_id"])
+                if uid not in wallets:
+                    wallets[uid] = {code: 0.0 for code in CBDC_REGISTRY}
+                wallets[uid][row["cbdc_code"]] = float(row["balance"])
+            cur.execute("SELECT id, tx_type, user_id, data, status, created_at FROM cbdc_transactions")
+            for row in cur.fetchall():
+                transactions[row["id"]] = {
+                    "id": row["id"], "type": row["tx_type"], "user_id": row["user_id"],
+                    "data": row["data"], "created_at": int(row["created_at"]),
+                    "status": row["status"],
+                }
+            cur.execute("SELECT * FROM cbdc_programmable_conditions")
+            for row in cur.fetchall():
+                programmable_conditions[row["id"]] = {
+                    "id": row["id"], "user_id": row["user_id"], "cbdc_code": row["cbdc_code"],
+                    "amount": float(row["amount"]), "condition_type": row["condition_type"],
+                    "unlock_at": row["unlock_at"], "condition_data": row["condition_data"],
+                    "status": row["status"], "created_at": int(row["created_at"]),
+                    **({"released_at": int(row["released_at"])} if row.get("released_at") else {}),
+                }
+        global _persistence_degraded
+        _persistence_degraded = False
+        log.info("[CBDC] boot-loaded %d wallets, %d transactions, %d conditions from Postgres",
+                 len(wallets), len(transactions), len(programmable_conditions))
+    except Exception as e:
+        _persistence_degraded = True
+        log.error("[CBDC] boot-load from Postgres failed: %s — DEGRADED in-memory mode", e)
+
+
+_boot_load_from_pg()
 
 # ── Pydantic Models ───────────────────────────────────────────────────────────
 class CBDCTransferRequest(BaseModel):
@@ -187,11 +336,13 @@ def convert_from_usd(asset: str, usd_amount: float) -> float:
 
 def record_tx(tx_type: str, user_id: int, data: Dict) -> str:
     tx_id = str(uuid.uuid4())
-    transactions[tx_id] = {
+    record = {
         "id": tx_id, "type": tx_type, "user_id": user_id,
         "data": data, "created_at": int(time.time()),
         "status": "completed",
     }
+    _persist_tx(record)
+    transactions[tx_id] = record
     return tx_id
 
 # ── FastAPI App ───────────────────────────────────────────────────────────────
@@ -204,6 +355,7 @@ async def health():
         "service": "python-cbdc-gateway",
         "cbdc_count": len(CBDC_REGISTRY),
         "metrics": metrics,
+        "persistence": "degraded_in_memory" if _persistence_degraded else "postgres",
     }
 
 @app.get("/livez")
@@ -274,6 +426,9 @@ async def cbdc_transfer(req: CBDCTransferRequest):
     if wallet[req.cbdc_code] < req.amount:
         raise HTTPException(status_code=422, detail=f"Insufficient {req.cbdc_code} balance")
 
+    # Persist BEFORE mutating the in-memory cache: a PG failure fails closed
+    # (503) without leaving the cache diverged from the durable store.
+    _persist_wallet_balance(str(req.user_id), req.cbdc_code, wallet[req.cbdc_code] - req.amount)
     wallet[req.cbdc_code] -= req.amount
     tx_id = record_tx("transfer", req.user_id, {
         "cbdc_code": req.cbdc_code, "amount": req.amount,
@@ -306,8 +461,10 @@ async def cbdc_swap(req: CBDCSwapRequest):
     if req.from_asset in CBDC_REGISTRY:
         if wallet.get(req.from_asset, 0) < req.amount:
             raise HTTPException(status_code=422, detail=f"Insufficient {req.from_asset} balance")
+        _persist_wallet_balance(str(req.user_id), req.from_asset, wallet[req.from_asset] - req.amount)
         wallet[req.from_asset] -= req.amount
     if req.to_asset in CBDC_REGISTRY:
+        _persist_wallet_balance(str(req.user_id), req.to_asset, wallet.get(req.to_asset, 0) + amount_out)
         wallet[req.to_asset] = wallet.get(req.to_asset, 0) + amount_out
 
     tx_id = record_tx("swap", req.user_id, {
@@ -376,7 +533,7 @@ async def create_programmable_condition(req: ProgrammableCondition):
         raise HTTPException(status_code=422, detail=f"{req.cbdc_code} does not support programmable conditions")
 
     condition_id = str(uuid.uuid4())
-    programmable_conditions[condition_id] = {
+    condition = {
         "id":             condition_id,
         "user_id":        req.user_id,
         "cbdc_code":      req.cbdc_code,
@@ -387,6 +544,8 @@ async def create_programmable_condition(req: ProgrammableCondition):
         "status":         "locked",
         "created_at":     int(time.time()),
     }
+    _persist_condition(condition)
+    programmable_conditions[condition_id] = condition
     log.info(f"[CBDC] Programmable condition created: {condition_id} type={req.condition_type}")
 
     return {
@@ -409,8 +568,11 @@ async def release_programmable(condition_id: str):
         if condition.get("unlock_at") and now < condition["unlock_at"]:
             raise HTTPException(status_code=422, detail=f"Time lock not expired. Unlocks at {condition['unlock_at']}")
 
-    condition["status"] = "released"
-    condition["released_at"] = now
+    # Persist the release BEFORE mutating the cache so a PG failure fails closed
+    # without cache/durable divergence.
+    updated = {**condition, "status": "released", "released_at": now}
+    _persist_condition(updated)
+    condition.update(updated)
     log.info(f"[CBDC] Programmable condition released: {condition_id}")
 
     return {"condition_id": condition_id, "status": "released", "released_at": now}

@@ -322,6 +322,10 @@ func doPublishWithRetry(fn func() (int, error)) error {
 // ── TigerBeetle via Dapr ────────────────────────────────────────────────────
 
 func writeLedgerEntry(entry *LedgerEntry) error {
+	// Durable PG mirror first (fail-open but loud: PG is the recovery record).
+	if err := persistLedgerEntry(entry); err != nil {
+		log.Printf("[TigerBeetle] ERROR: ledger entry PG persist failed id=%s: %v", entry.EntryID, err)
+	}
 	ledgerMu.Lock()
 	if len(ledgerEntries) >= maxLedgerEntries {
 		evictOneLedgerEntryLocked()
@@ -350,10 +354,12 @@ func writeLedgerEntry(entry *LedgerEntry) error {
 		return resp.StatusCode, nil
 	})
 	if err != nil {
-		// TODO(outbox): no outbox table exists in this service — failed writes
-		// are logged, not queued for replay. Mechanism gap, flagged honestly.
-		log.Printf("[TigerBeetle] Dapr write failed after bounded retries (best-effort): %v", err)
-		return nil // Non-blocking in dev
+		// Durable outbox (W19): the failed Dapr write is queued in Postgres
+		// and replayed by runOutboxRelay until delivered — no longer
+		// log-and-drop. PG row above remains the source of truth meanwhile.
+		log.Printf("[TigerBeetle] Dapr write failed after bounded retries — queued to outbox: %v", err)
+		enqueueOutbox(outboxKindLedgerState, "", []byte(fmt.Sprintf("[%s]", string(payload))), err)
+		return nil // Non-blocking; durability is covered by PG + outbox
 	}
 
 	return nil
@@ -378,7 +384,8 @@ func publishKafkaEvent(topic string, event interface{}) {
 		return resp.StatusCode, nil
 	})
 	if err != nil {
-		log.Printf("[Kafka] Publish to %s failed after bounded retries: %v", topic, err)
+		log.Printf("[Kafka] Publish to %s failed after bounded retries — queued to outbox: %v", topic, err)
+		enqueueOutbox(outboxKindKafka, topic, payload, err)
 		return
 	}
 }
@@ -403,7 +410,11 @@ func indexToOpenSearch(indexName string, docID string, doc interface{}) {
 		return resp.StatusCode, nil
 	})
 	if err != nil {
-		log.Printf("[OpenSearch] Index to %s failed after bounded retries: %v", indexName, err)
+		log.Printf("[OpenSearch] Index to %s failed after bounded retries — queued to outbox: %v", indexName, err)
+		envPayload, _ := json.Marshal(map[string]interface{}{
+			"index": indexName, "id": docID, "doc": json.RawMessage(payload),
+		})
+		enqueueOutbox(outboxKindOpenSearch, indexName, envPayload, err)
 		return
 	}
 }
@@ -458,6 +469,10 @@ func executeSettlement(req SettlementRequest) (*SettlementResult, error) {
 		cb.recordSuccess()
 	}
 
+	// Durable PG mirror first — settlement records are money-path state.
+	if err := persistSettlementRecord(result); err != nil {
+		log.Printf("[Settlement] ERROR: settlement record persist failed op=%s: %v", result.OperationID, err)
+	}
 	settlementsMu.Lock()
 	if len(settlements) >= maxSettlementRecords {
 		evictOneSettlementLocked()
@@ -848,13 +863,21 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, provider, secret stri
 	}
 
 	dedupKey := fmt.Sprintf("%s_%s", provider, eventID)
-	webhookMu.Lock()
-	if ts, seen := webhookDedup[dedupKey]; seen && time.Since(ts) < webhookDedupTTL {
-		webhookMu.Unlock()
+	// Cross-replica dedup claim via PG when configured (fail closed: if the
+	// claim cannot be verified, reject with 503 so the provider retries —
+	// never process a webhook whose dedup state is unknown).
+	claimed, claimErr := claimWebhookDedup(dedupKey)
+	if claimErr != nil {
+		log.Printf("[Webhook] ERROR: dedup claim failed key=%s (fail closed, forcing provider retry): %v", dedupKey, claimErr)
+		http.Error(w, "dedup store unavailable — retry", http.StatusServiceUnavailable)
+		return
+	}
+	if !claimed {
 		log.Printf("[Webhook] Duplicate %s event: %s", provider, eventID)
 		json.NewEncoder(w).Encode(map[string]string{"status": "duplicate"})
 		return
 	}
+	webhookMu.Lock()
 	if len(webhookDedup) >= maxWebhookDedupKeys {
 		// Hard cap backstop between sweeps: drop the oldest-seeming entry
 		// (map order is random; the TTL sweeper is the primary eviction path).
@@ -863,7 +886,6 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, provider, secret stri
 			break
 		}
 	}
-	webhookDedup[dedupKey] = time.Now()
 	webhookMu.Unlock()
 
 	event := &WebhookEvent{
@@ -881,6 +903,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, provider, secret stri
 	}
 	webhookEvents[eventID] = event
 	webhookMu.Unlock()
+	persistWebhookEvent(event)
 
 	// Bounded async dispatch: ACK fast, process on a fixed worker pool. If the
 	// queue is full, roll back the dedup/event records (so the provider's retry
@@ -892,6 +915,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, provider, secret stri
 		delete(webhookDedup, dedupKey)
 		delete(webhookEvents, eventID)
 		webhookMu.Unlock()
+		releaseWebhookDedup(dedupKey)
 		http.Error(w, "Webhook processing queue saturated — retry", http.StatusServiceUnavailable)
 		return
 	}
@@ -1009,6 +1033,9 @@ func processWebhookEvent(event *WebhookEvent) {
 			s.Status = status
 			s.Timestamp = time.Now().UTC().Format(time.RFC3339)
 			updated = true
+			if err := persistSettlementRecord(s); err != nil {
+				log.Printf("[Settlement] ERROR: webhook status update persist failed op=%s: %v", s.OperationID, err)
+			}
 		}
 	}
 	settlementsMu.Unlock()
@@ -1061,6 +1088,12 @@ func createClaimHandler(w http.ResponseWriter, r *http.Request) {
 		Status:     "pending",
 	}
 
+	// Fail closed: claims are money; persist before admitting in-memory.
+	if err := persistClaim(claim); err != nil {
+		log.Printf("[Settlement] ERROR: claim persist failed id=%s (refusing creation): %v", req.ClaimID, err)
+		http.Error(w, "failed to persist claim", 500)
+		return
+	}
 	claimsMu.Lock()
 	if len(p2pClaims) >= maxP2PClaims {
 		evictOneP2PClaimLocked()
@@ -1100,8 +1133,69 @@ func redeemClaimHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hold the lock across the entire check-and-set so two concurrent redeems
-	// cannot both observe status=="pending" (double-redeem TOCTOU).
+	// Cross-replica path: PG conditional UPDATE is the atomic check-and-set,
+	// so two replicas cannot both redeem the same claim (W19).
+	if db != nil {
+		claimed, expired, err := redeemClaimPG(req.ClaimID, req.ClaimerID)
+		if err != nil {
+			log.Printf("[Settlement] ERROR: claim redeem persist failed id=%s (fail closed): %v", req.ClaimID, err)
+			http.Error(w, "claim store unavailable", 500)
+			return
+		}
+		if expired {
+			claimsMu.Lock()
+			if cl, ok := p2pClaims[req.ClaimID]; ok {
+				cl.Status = "expired"
+			}
+			claimsMu.Unlock()
+			http.Error(w, "Claim has expired", 410)
+			return
+		}
+		if !claimed {
+			claimsMu.Lock()
+			cl, ok := p2pClaims[req.ClaimID]
+			claimsMu.Unlock()
+			if !ok {
+				http.Error(w, "Claim not found", 404)
+				return
+			}
+			http.Error(w, fmt.Sprintf("Claim already %s", cl.Status), 400)
+			return
+		}
+		claimedAt := time.Now().UTC().Format(time.RFC3339)
+		claimsMu.Lock()
+		claim, ok := p2pClaims[req.ClaimID]
+		if ok {
+			claim.Status = "claimed"
+			claim.ClaimedByID = req.ClaimerID
+			claim.ClaimedAt = claimedAt
+		}
+		claimsMu.Unlock()
+		if !ok {
+			// Claimed in PG but not in this replica's memory (created on
+			// another replica) — reconstruct the response from the request.
+			claim = &P2PClaim{ClaimID: req.ClaimID}
+		}
+		publishKafkaEvent("stablecoin_p2p", map[string]interface{}{
+			"claim_id":   req.ClaimID,
+			"claimer_id": req.ClaimerID,
+			"stablecoin": claim.Stablecoin,
+			"amount":     claim.Amount,
+			"action":     "claim_redeemed",
+		})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":    true,
+			"claim_id":   req.ClaimID,
+			"stablecoin": claim.Stablecoin,
+			"amount":     claim.Amount,
+			"claimed_at": claimedAt,
+		})
+		return
+	}
+
+	// Volatile dev-mode path (no PG): hold the lock across the entire
+	// check-and-set so two concurrent redeems cannot both observe
+	// status=="pending" (double-redeem TOCTOU).
 	claimsMu.Lock()
 	claim, exists := p2pClaims[req.ClaimID]
 	if !exists {
@@ -1167,6 +1261,9 @@ func getClaimHandler(w http.ResponseWriter, r *http.Request) {
 	expiresAt, _ := time.Parse(time.RFC3339, claim.ExpiresAt)
 	if time.Now().After(expiresAt) && claim.Status == "pending" {
 		claim.Status = "expired"
+		if err := persistClaim(claim); err != nil {
+			log.Printf("[Settlement] ERROR: claim expiry persist failed id=%s: %v", claimID, err)
+		}
 	}
 	claimsMu.Unlock()
 
@@ -1248,6 +1345,7 @@ func requireProductionSecrets() {
 
 func main() {
 	requireProductionSecrets()
+	initDB()
 	mux := http.NewServeMux()
 
 	// Health + Metrics
@@ -1271,9 +1369,12 @@ func main() {
 	// Ledger
 	mux.HandleFunc("/ledger/history", ledgerHistoryHandler)
 
-	// Background maintenance + bounded webhook worker pool.
+	// Background maintenance + bounded webhook worker pool + outbox relay
+	// (replays failed Dapr/Kafka/OpenSearch writes queued in Postgres).
 	sweepStop := make(chan struct{})
 	go sweepWebhookDedup(sweepStop)
+	outboxStop := make(chan struct{})
+	go runOutboxRelay(outboxStop)
 	var workerWG sync.WaitGroup
 	for i := 0; i < webhookWorkers; i++ {
 		workerWG.Add(1)
@@ -1303,6 +1404,7 @@ func main() {
 
 	// Stop accepting new dedup-sweep work, drain the server, then the queue.
 	close(sweepStop)
+	close(outboxStop)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {

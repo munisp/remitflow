@@ -316,7 +316,8 @@ func startWorkers(n int) {
 			defer workerWG.Done()
 			for req := range hub.queue {
 				processNotification(req)
-			}()
+			}
+		}()
 	}
 }
 

@@ -9,6 +9,8 @@
 //
 // Port: 8129
 
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
@@ -169,6 +171,11 @@ struct ComplianceBridge {
     sar_filings: RwLock<Vec<SARFiling>>,
     mappings: Vec<ComplianceMapping>,
     metrics: Metrics,
+    /// Tokio runtime hosting the sqlx pool (handlers are sync; DB writes use
+    /// `rt.block_on` — compliance records are fail-closed).
+    rt: Option<Arc<tokio::runtime::Runtime>>,
+    /// PostgreSQL write-through pool (None = degraded in-memory mode, boot WARN).
+    db: Option<PgPool>,
 }
 
 impl ComplianceBridge {
@@ -299,7 +306,23 @@ impl ComplianceBridge {
             sar_filings: RwLock::new(Vec::new()),
             mappings,
             metrics: Metrics::new(),
+            rt: None,
+            db: None,
         }
+    }
+
+    /// Fail-closed durable write. Err(()) => caller returns HTTP 500/503.
+    fn persist<F, Fut>(&self, f: F) -> Result<(), ()>
+    where
+        F: FnOnce(PgPool) -> Fut,
+        Fut: std::future::Future<Output = Result<(), sqlx::Error>>,
+    {
+        let (Some(rt), Some(pool)) = (&self.rt, &self.db) else {
+            return Ok(()); // degraded mode (boot WARN already emitted)
+        };
+        rt.block_on(f(pool.clone())).map_err(|e| {
+            eprintln!("[rust-kyc-compliance-bridge] ERROR: durable write failed (fail-closed): {}", e);
+        })
     }
 
     fn issue_passport(&self, user_id: &str, source_reg: &str, target_reg: &str, tier: u8,
@@ -343,6 +366,11 @@ impl ComplianceBridge {
             updated_at: now,
         };
 
+        // Compliance record: durable write first, fail closed.
+        self.persist(|p| {
+            let rec = passport.clone();
+            async move { db_insert_passport(&p, &rec).await }
+        }).map_err(|_| "durable store unavailable".to_string())?;
         self.passports.write().unwrap().insert(passport_id, passport.clone());
         self.metrics.passports_issued.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if passport.verification_status == "verified" {
@@ -377,7 +405,7 @@ impl ComplianceBridge {
     }
 
     fn screen_transaction(&self, tx_id: &str, sender: &str, recipient: &str,
-                          amount: f64, currency: &str, corridor: &str) -> TransactionScreening {
+                          amount: f64, currency: &str, corridor: &str) -> Result<TransactionScreening, String> {
         let start = std::time::Instant::now();
 
         let risk = self.calculate_transaction_risk(sender, recipient, amount, currency, corridor);
@@ -401,13 +429,18 @@ impl ComplianceBridge {
             screening_duration_ms: start.elapsed().as_millis() as u64,
         };
 
+        // Compliance audit record: durable write first, fail closed.
+        self.persist(|p| {
+            let rec = screening.clone();
+            async move { db_insert_screening(&p, &rec).await }
+        }).map_err(|_| "durable store unavailable".to_string())?;
         self.screenings.write().unwrap().push(screening.clone());
         self.metrics.screenings_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if decision != "pass" {
             self.metrics.screenings_flagged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
-        screening
+        Ok(screening)
     }
 
     fn calculate_transaction_risk(&self, _sender: &str, _recipient: &str,
@@ -433,7 +466,7 @@ impl ComplianceBridge {
         risk.clamp(0.0, 1.0)
     }
 
-    fn file_sar(&self, tx_id: &str, regulator: &str, reason: &str) -> SARFiling {
+    fn file_sar(&self, tx_id: &str, regulator: &str, reason: &str) -> Result<SARFiling, String> {
         let filing = SARFiling {
             filing_id: format!("sar-{}", timestamp_millis()),
             transaction_id: tx_id.into(),
@@ -444,11 +477,128 @@ impl ComplianceBridge {
             filed_at: now_iso(),
         };
 
+        // Regulatory filing: durable write first, fail closed.
+        self.persist(|p| {
+            let rec = filing.clone();
+            async move { db_insert_sar(&p, &rec).await }
+        }).map_err(|_| "durable store unavailable".to_string())?;
         self.sar_filings.write().unwrap().push(filing.clone());
         self.metrics.sar_filings.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        filing
+        Ok(filing)
     }
+}
+
+// ─── PostgreSQL persistence (boot-load + write-through) ────────────────────
+
+const MIGRATION_SQL: &str = include_str!("migrations/0001_init.sql");
+
+fn init_db(rt: &tokio::runtime::Runtime) -> Option<PgPool> {
+    let db_url = match std::env::var("DATABASE_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!("[rust-kyc-compliance-bridge] WARN: DATABASE_URL unset — DEGRADED in-memory mode; KYC/SAR compliance records will NOT survive restart");
+            return None;
+        }
+    };
+    rt.block_on(async {
+        let pool = PgPoolOptions::new().max_connections(5).connect(&db_url).await
+            .expect("DATABASE_URL set but PostgreSQL unreachable — refusing to start compliance bridge without durable storage");
+        sqlx::raw_sql(MIGRATION_SQL).execute(&pool).await.expect("failed to apply kyc_bridge migrations");
+        eprintln!("[rust-kyc-compliance-bridge] PostgreSQL connected, migrations applied");
+        Some(pool)
+    })
+}
+
+fn load_from_db(rt: &tokio::runtime::Runtime, pool: &PgPool, bridge: &ComplianceBridge) {
+    rt.block_on(async {
+        match sqlx::query_as::<_, (String, serde_json::Value)>(
+            "SELECT passport_id, data FROM kyc_bridge_passports"
+        ).fetch_all(pool).await {
+            Ok(rows) => {
+                let mut passports = bridge.passports.write().unwrap();
+                for (id, data) in rows {
+                    match serde_json::from_value::<KYCPassport>(data) {
+                        Ok(p) => { passports.insert(id, p); }
+                        Err(e) => eprintln!("[rust-kyc-compliance-bridge] WARN: skipping corrupt passport row: {}", e),
+                    }
+                }
+                eprintln!("[rust-kyc-compliance-bridge] boot-loaded {} passports", passports.len());
+            }
+            Err(e) => eprintln!("[rust-kyc-compliance-bridge] ERROR: passport boot-load failed: {}", e),
+        }
+        match sqlx::query_as::<_, (serde_json::Value,)>(
+            "SELECT jsonb_build_object('screening_id', screening_id, 'transaction_id', transaction_id, 'sender_name', sender_name, 'recipient_name', recipient_name, 'amount', amount, 'currency', currency, 'corridor', corridor, 'sanctions_result', sanctions_result, 'pep_result', pep_result, 'risk_score', risk_score, 'decision', decision, 'screened_at', screened_at, 'screening_duration_ms', screening_duration_ms) FROM kyc_bridge_screenings"
+        ).fetch_all(pool).await {
+            Ok(rows) => {
+                let mut screenings = bridge.screenings.write().unwrap();
+                for (v,) in rows {
+                    match serde_json::from_value::<TransactionScreening>(v) {
+                        Ok(scr) => screenings.push(scr),
+                        Err(e) => eprintln!("[rust-kyc-compliance-bridge] WARN: skipping corrupt screening row: {}", e),
+                    }
+                }
+                eprintln!("[rust-kyc-compliance-bridge] boot-loaded {} screenings", screenings.len());
+            }
+            Err(e) => eprintln!("[rust-kyc-compliance-bridge] ERROR: screening boot-load failed: {}", e),
+        }
+        match sqlx::query_as::<_, (serde_json::Value,)>(
+            "SELECT jsonb_build_object('filing_id', filing_id, 'transaction_id', transaction_id, 'regulator', regulator, 'filing_type', filing_type, 'reason', reason, 'status', status, 'filed_at', filed_at) FROM kyc_bridge_sar_filings"
+        ).fetch_all(pool).await {
+            Ok(rows) => {
+                let mut filings = bridge.sar_filings.write().unwrap();
+                for (v,) in rows {
+                    match serde_json::from_value::<SARFiling>(v) {
+                        Ok(f) => filings.push(f),
+                        Err(e) => eprintln!("[rust-kyc-compliance-bridge] WARN: skipping corrupt SAR row: {}", e),
+                    }
+                }
+                eprintln!("[rust-kyc-compliance-bridge] boot-loaded {} SAR filings", filings.len());
+            }
+            Err(e) => eprintln!("[rust-kyc-compliance-bridge] ERROR: SAR boot-load failed: {}", e),
+        }
+    });
+}
+
+async fn db_insert_passport(pool: &PgPool, p: &KYCPassport) -> Result<(), sqlx::Error> {
+    let data = serde_json::to_value(p).unwrap_or_default();
+    sqlx::query(
+        "INSERT INTO kyc_bridge_passports
+            (passport_id, user_id, source_regulator, target_regulator, kyc_tier, verification_status, risk_score, valid_until, data)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         ON CONFLICT (passport_id) DO UPDATE SET verification_status=$6, risk_score=$7, data=$9, updated_at=NOW()"
+    )
+    .bind(&p.passport_id).bind(&p.user_id).bind(&p.source_regulator).bind(&p.target_regulator)
+    .bind(p.kyc_tier as i16).bind(&p.verification_status).bind(p.risk_score).bind(&p.valid_until).bind(&data)
+    .execute(pool).await?;
+    Ok(())
+}
+
+async fn db_insert_screening(pool: &PgPool, scr: &TransactionScreening) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO kyc_bridge_screenings
+            (screening_id, transaction_id, sender_name, recipient_name, amount, currency, corridor,
+             sanctions_result, pep_result, risk_score, decision, screened_at, screening_duration_ms)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         ON CONFLICT (screening_id) DO NOTHING"
+    )
+    .bind(&scr.screening_id).bind(&scr.transaction_id).bind(&scr.sender_name).bind(&scr.recipient_name)
+    .bind(scr.amount).bind(&scr.currency).bind(&scr.corridor).bind(&scr.sanctions_result)
+    .bind(&scr.pep_result).bind(scr.risk_score).bind(&scr.decision).bind(&scr.screened_at)
+    .bind(scr.screening_duration_ms as i64)
+    .execute(pool).await?;
+    Ok(())
+}
+
+async fn db_insert_sar(pool: &PgPool, f: &SARFiling) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO kyc_bridge_sar_filings (filing_id, transaction_id, regulator, filing_type, reason, status, filed_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (filing_id) DO NOTHING"
+    )
+    .bind(&f.filing_id).bind(&f.transaction_id).bind(&f.regulator).bind(&f.filing_type)
+    .bind(&f.reason).bind(&f.status).bind(&f.filed_at)
+    .execute(pool).await?;
+    Ok(())
 }
 
 // ─── HTTP Server ─────────────────────────────────────────────────────────────
@@ -456,7 +606,15 @@ impl ComplianceBridge {
 fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8129".into());
     let addr: SocketAddr = format!("0.0.0.0:{}", port).parse().unwrap();
-    let bridge = Arc::new(ComplianceBridge::new());
+    let rt = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime for persistence"));
+    let db = init_db(&rt);
+    let mut bridge_owned = ComplianceBridge::new();
+    if let Some(ref pool) = db {
+        load_from_db(&rt, pool, &bridge_owned);
+    }
+    bridge_owned.rt = Some(rt);
+    bridge_owned.db = db;
+    let bridge = Arc::new(bridge_owned);
 
     println!("[rust-kyc-compliance-bridge] listening on :{}", port);
 
@@ -556,6 +714,8 @@ fn route(method: &str, path: &str, body: &str, bridge: &ComplianceBridge) -> (St
 
             match bridge.issue_passport(user_id, source, target, tier, docs) {
                 Ok(passport) => ("200 OK".into(), serde_json::to_string(&passport).unwrap()),
+                Err(e) if e == "durable store unavailable" =>
+                    ("503 Service Unavailable".into(), serde_json::json!({"error": e}).to_string()),
                 Err(e) => ("400 Bad Request".into(), serde_json::json!({"error": e}).to_string()),
             }
         }
@@ -570,25 +730,29 @@ fn route(method: &str, path: &str, body: &str, bridge: &ComplianceBridge) -> (St
 
         ("POST", "/api/compliance/screen") => {
             let req: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-            let screening = bridge.screen_transaction(
+            match bridge.screen_transaction(
                 req["transactionId"].as_str().unwrap_or("unknown"),
                 req["senderName"].as_str().unwrap_or("unknown"),
                 req["recipientName"].as_str().unwrap_or("unknown"),
                 req["amount"].as_f64().unwrap_or(0.0),
                 req["currency"].as_str().unwrap_or("CAD"),
                 req["corridor"].as_str().unwrap_or("CA-NG"),
-            );
-            ("200 OK".into(), serde_json::to_string(&screening).unwrap())
+            ) {
+                Ok(screening) => ("200 OK".into(), serde_json::to_string(&screening).unwrap()),
+                Err(e) => ("503 Service Unavailable".into(), serde_json::json!({"error": e}).to_string()),
+            }
         }
 
         ("POST", "/api/compliance/sar") => {
             let req: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-            let filing = bridge.file_sar(
+            match bridge.file_sar(
                 req["transactionId"].as_str().unwrap_or("unknown"),
                 req["regulator"].as_str().unwrap_or("FINTRAC"),
                 req["reason"].as_str().unwrap_or("suspicious activity"),
-            );
-            ("200 OK".into(), serde_json::to_string(&filing).unwrap())
+            ) {
+                Ok(filing) => ("200 OK".into(), serde_json::to_string(&filing).unwrap()),
+                Err(e) => ("503 Service Unavailable".into(), serde_json::json!({"error": e}).to_string()),
+            }
         }
 
         ("GET", "/api/compliance/mappings") => {

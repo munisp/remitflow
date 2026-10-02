@@ -15,8 +15,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::time::sleep;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use uuid::Uuid;
+
+const MIGRATION_SQL: &str = include_str!("../migrations/0001_init.sql");
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
@@ -88,6 +91,89 @@ struct AppState {
     dlq:      Arc<Mutex<Vec<DlqEntry>>>,
     policies: Arc<HashMap<String, RailPolicy>>,
     metrics:  Arc<Metrics>,
+    /// PostgreSQL write-through pool (None = degraded in-memory mode, boot WARN).
+    db:       Option<PgPool>,
+}
+
+// ── PostgreSQL persistence (boot-load + write-through) ────────────────────────
+
+async fn init_db() -> Option<PgPool> {
+    let db_url = match std::env::var("DATABASE_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            println!("[PaymentRetry] WARN: DATABASE_URL unset — DEGRADED in-memory mode; retry jobs/DLQ will NOT survive restart");
+            return None;
+        }
+    };
+    let pool = PgPoolOptions::new().max_connections(10).connect(&db_url).await
+        .expect("DATABASE_URL set but PostgreSQL unreachable — refusing to start payment-retry without durable storage");
+    sqlx::raw_sql(MIGRATION_SQL).execute(&pool).await.expect("failed to apply payment_retry migrations");
+    println!("[PaymentRetry] PostgreSQL connected, migrations applied");
+    Some(pool)
+}
+
+async fn load_from_db(pool: &PgPool, state: &AppState) {
+    match sqlx::query_as::<_, (serde_json::Value,)>(
+        "SELECT data FROM payment_retry_jobs WHERE status IN ('queued','retrying')"
+    ).fetch_all(pool).await {
+        Ok(rows) => {
+            let mut jobs = state.jobs.lock().unwrap();
+            for (v,) in rows {
+                match serde_json::from_value::<RetryJob>(v) {
+                    Ok(j) => { jobs.insert(j.id.clone(), j); }
+                    Err(e) => println!("[PaymentRetry] WARN: skipping corrupt job row: {}", e),
+                }
+            }
+            println!("[PaymentRetry] boot-loaded {} pending retry jobs", jobs.len());
+        }
+        Err(e) => println!("[PaymentRetry] ERROR: job boot-load failed: {}", e),
+    }
+    match sqlx::query_as::<_, (serde_json::Value,)>(
+        "SELECT jsonb_build_object('id', id, 'transfer_id', transfer_id, 'rail', rail, 'final_error', final_error, 'attempts', attempts, 'created_at', created_at_unix, 'resolved', resolved) FROM payment_retry_dlq"
+    ).fetch_all(pool).await {
+        Ok(rows) => {
+            let mut dlq = state.dlq.lock().unwrap();
+            for (v,) in rows {
+                match serde_json::from_value::<DlqEntry>(v) {
+                    Ok(d) => dlq.push(d),
+                    Err(e) => println!("[PaymentRetry] WARN: skipping corrupt dlq row: {}", e),
+                }
+            }
+            println!("[PaymentRetry] boot-loaded {} DLQ entries", dlq.len());
+        }
+        Err(e) => println!("[PaymentRetry] ERROR: DLQ boot-load failed: {}", e),
+    }
+}
+
+async fn persist_job(pool: &PgPool, job: &RetryJob) -> Result<(), sqlx::Error> {
+    let data = serde_json::to_value(job).unwrap_or_default();
+    sqlx::query(
+        "INSERT INTO payment_retry_jobs
+            (id, transfer_id, user_id, amount_cents, currency, rail, attempt, max_attempts,
+             next_retry_at, last_error, status, idempotency_key, created_at_unix, updated_at_unix, data)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         ON CONFLICT (id) DO UPDATE SET
+            rail=$6, attempt=$7, max_attempts=$8, next_retry_at=$9, last_error=$10,
+            status=$11, updated_at_unix=$14, data=$15"
+    )
+    .bind(&job.id).bind(&job.transfer_id).bind(job.user_id).bind(job.amount_cents)
+    .bind(&job.currency).bind(&job.rail).bind(job.attempt as i16).bind(job.max_attempts as i16)
+    .bind(job.next_retry_at as i64).bind(&job.last_error).bind(&job.status)
+    .bind(&job.idempotency_key).bind(job.created_at as i64).bind(job.updated_at as i64).bind(&data)
+    .execute(pool).await?;
+    Ok(())
+}
+
+async fn persist_dlq_entry(pool: &PgPool, entry: &DlqEntry) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO payment_retry_dlq (id, transfer_id, rail, final_error, attempts, resolved, created_at_unix)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (id) DO NOTHING"
+    )
+    .bind(&entry.id).bind(&entry.transfer_id).bind(&entry.rail).bind(&entry.final_error)
+    .bind(entry.attempts as i16).bind(entry.resolved).bind(entry.created_at as i64)
+    .execute(pool).await?;
+    Ok(())
 }
 
 // ── Backoff calculation ───────────────────────────────────────────────────────
@@ -148,6 +234,15 @@ async fn enqueue_retry(
         updated_at:      now_ms(),
     };
 
+    // Durable write-through FIRST (payment recovery path — fail closed).
+    if let Some(ref pool) = state.db {
+        if let Err(e) = persist_job(pool, &job).await {
+            println!("[PaymentRetry] ERROR: job persist failed (fail-closed): {}", e);
+            return HttpResponse::ServiceUnavailable()
+                .json(serde_json::json!({"error": "durable store unavailable"}));
+        }
+    }
+
     state.metrics.jobs_queued.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let id = job.id.clone();
     state.jobs.lock().unwrap().insert(id.clone(), job.clone());
@@ -175,8 +270,15 @@ async fn ack_retry(
     if req.success {
         job.status = "succeeded".into();
         job.updated_at = now_ms();
+        let snapshot = job.clone();
+        drop(jobs);
+        if let Some(ref pool) = state.db {
+            if let Err(e) = persist_job(pool, &snapshot).await {
+                println!("[PaymentRetry] ERROR: job status persist failed: {}", e);
+            }
+        }
         state.metrics.jobs_succeeded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return HttpResponse::Ok().json(job.clone());
+        return HttpResponse::Ok().json(snapshot);
     }
 
     job.attempt += 1;
@@ -196,8 +298,15 @@ async fn ack_retry(
                     job.max_attempts = fp.max_retries;
                     job.next_retry_at = now_ms() + compute_next_delay(0, &fp);
                     job.status = "queued".into();
+                    let snapshot = job.clone();
+                    drop(jobs);
+                    if let Some(ref pool) = state.db {
+                        if let Err(e) = persist_job(pool, &snapshot).await {
+                            println!("[PaymentRetry] ERROR: failover job persist failed: {}", e);
+                        }
+                    }
                     state.metrics.rail_failovers.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return HttpResponse::Ok().json(job.clone());
+                    return HttpResponse::Ok().json(snapshot);
                 }
             }
         }
@@ -213,9 +322,23 @@ async fn ack_retry(
             resolved:    false,
         };
         job.status = "dlq".into();
+        let snapshot = job.clone();
         state.metrics.jobs_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         state.metrics.dlq_entries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         drop(jobs);
+        // DLQ is the last-resort record for stuck money — fail closed.
+        if let Some(ref pool) = state.db {
+            if let Err(e) = persist_dlq_entry(pool, &dlq_entry).await {
+                println!("[PaymentRetry] ERROR: DLQ persist failed (fail-closed): {}", e);
+                return HttpResponse::ServiceUnavailable()
+                    .json(serde_json::json!({"error": "durable store unavailable"}));
+            }
+            if let Err(e) = persist_job(pool, &snapshot).await {
+                println!("[PaymentRetry] ERROR: DLQ job-status persist failed (fail-closed): {}", e);
+                return HttpResponse::ServiceUnavailable()
+                    .json(serde_json::json!({"error": "durable store unavailable"}));
+            }
+        }
         state.dlq.lock().unwrap().push(dlq_entry);
         return HttpResponse::Ok().json(serde_json::json!({"status": "dlq", "job_id": req.job_id}));
     }
@@ -225,7 +348,14 @@ async fn ack_retry(
         job.next_retry_at = now_ms() + compute_next_delay(job.attempt, &p);
     }
     job.status = "queued".into();
-    HttpResponse::Ok().json(job.clone())
+    let snapshot = job.clone();
+    drop(jobs);
+    if let Some(ref pool) = state.db {
+        if let Err(e) = persist_job(pool, &snapshot).await {
+            println!("[PaymentRetry] ERROR: requeue persist failed: {}", e);
+        }
+    }
+    HttpResponse::Ok().json(snapshot)
 }
 
 async fn list_jobs(state: web::Data<AppState>) -> HttpResponse {
@@ -269,12 +399,17 @@ async fn main() -> std::io::Result<()> {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8142".into());
     println!("[PaymentRetry] Starting on port {}", port);
 
+    let db = init_db().await;
     let state = web::Data::new(AppState {
         jobs:     Arc::new(Mutex::new(HashMap::new())),
         dlq:      Arc::new(Mutex::new(Vec::new())),
         policies: Arc::new(default_rail_policies()),
         metrics:  Arc::new(Metrics::default()),
+        db,
     });
+    if let Some(ref pool) = state.db {
+        load_from_db(pool, &state).await;
+    }
 
     HttpServer::new(move || {
         App::new()
