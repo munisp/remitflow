@@ -205,8 +205,18 @@ async def _on_shutdown():
 # Initialize PostgreSQL tables (middleware-ready)
 _db_ensure_tables("anomaly_detector")
 
-# ─── Shared In-Memory State ───────────────────────────────────────────────────
-# In production these would be backed by Redis with TTL-based expiry.
+# ─── Shared Behavioral Buffers — Redis-backed with TTL (W19-E) ───────────────
+# These buffers feed fraud/AML scoring that gates money flows. They are backed
+# by REAL Redis (RPUSH + LTRIM ring buffer + EXPIRE TTL) so detection state
+# survives restarts and is shared across replicas. Fail-OPEN on the detection
+# path: if Redis is unavailable the per-process in-memory deques below are used
+# and the degradation is logged loudly (ERROR) so alerting can fire.
+
+log = logging.getLogger("python-anomaly-detector")
+
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+_redis_client: Any = None
+_redis_degraded: bool = False
 
 # Per-IP login event ring buffer (last 200 events per IP)
 _ip_login_events: Dict[str, deque] = defaultdict(lambda: deque(maxlen=200))
@@ -222,6 +232,85 @@ _user_transfers: Dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
 
 # Per-IP API access patterns for ransomware detection
 _ip_api_patterns: Dict[str, deque] = defaultdict(lambda: deque(maxlen=500))
+
+# maxlen = ring buffer size, ttl_s = Redis key TTL, mem = in-memory fallback deque
+_BUFFER_CONFIG: Dict[str, Dict[str, Any]] = {
+    "ip_login_events":          {"maxlen": 200, "ttl_s": 6 * 3600,        "mem": _ip_login_events},
+    "user_locations":           {"maxlen": 10,  "ttl_s": 30 * 24 * 3600,  "mem": _user_locations},
+    "user_beneficiary_changes": {"maxlen": 50,  "ttl_s": 30 * 24 * 3600,  "mem": _user_beneficiary_changes},
+    "user_transfers":           {"maxlen": 100, "ttl_s": 7 * 24 * 3600,   "mem": _user_transfers},
+    "ip_api_patterns":          {"maxlen": 500, "ttl_s": 24 * 3600,       "mem": _ip_api_patterns},
+    "fund_flow_history":        {"maxlen": 200, "ttl_s": 2 * 3600,        "mem": None},  # wired below (declared later)
+}
+
+
+async def _get_redis():
+    """Return a connected redis.asyncio client, or None (fail-open) with loud logging."""
+    global _redis_client, _redis_degraded
+    if os.environ.get("REMITFLOW_TEST_MODE", "false").lower() == "true":
+        return None
+    if _redis_client is not None:
+        return _redis_client
+    try:
+        import redis.asyncio as aioredis
+        client = aioredis.from_url(
+            REDIS_URL, decode_responses=True, socket_timeout=2, socket_connect_timeout=2
+        )
+        await client.ping()
+        _redis_client = client
+        if _redis_degraded:
+            log.info("[Redis] reconnected — behavioral fraud buffers durable again")
+        _redis_degraded = False
+        log.info("[Redis] connected to %s — behavioral fraud buffers durable", REDIS_URL.split("@")[-1])
+        return _redis_client
+    except Exception as e:
+        _redis_client = None
+        if not _redis_degraded:
+            log.error(
+                "[Redis] UNAVAILABLE (%s) — behavioral fraud buffers DEGRADED to per-process memory; "
+                "restart/replica divergence blinds ATO/credential-stuffing/BEC/round-trip/ransomware/fund-flow detection",
+                e,
+            )
+        else:
+            log.warning("[Redis] still unavailable: %s", e)
+        _redis_degraded = True
+        return None
+
+
+def _buf_key(name: str, key: str) -> str:
+    return f"anomaly:{name}:{key}"
+
+
+async def _buf_read(name: str, key: str) -> List[Dict[str, Any]]:
+    """Read a behavioral buffer (oldest → newest). Fail-open to in-memory."""
+    r = await _get_redis()
+    if r is not None:
+        try:
+            items = await r.lrange(_buf_key(name, key), 0, -1)
+            return [json.loads(i) for i in items]
+        except Exception as e:
+            log.error("[Redis] read failed for %s/%s (%s) — DEGRADED, using in-memory fallback", name, key, e)
+    mem = _BUFFER_CONFIG[name]["mem"]
+    return list(mem[key]) if mem is not None else []
+
+
+async def _buf_append(name: str, key: str, item: Dict[str, Any]) -> None:
+    """Append to a behavioral buffer (Redis RPUSH+LTRIM+EXPIRE). Fail-open to in-memory."""
+    cfg = _BUFFER_CONFIG[name]
+    r = await _get_redis()
+    if r is not None:
+        try:
+            k = _buf_key(name, key)
+            pipe = r.pipeline(transaction=False)
+            pipe.rpush(k, json.dumps(item, default=str))
+            pipe.ltrim(k, -cfg["maxlen"], -1)
+            pipe.expire(k, cfg["ttl_s"])
+            await pipe.execute()
+            return
+        except Exception as e:
+            log.error("[Redis] append failed for %s/%s (%s) — DEGRADED, using in-memory fallback", name, key, e)
+    if cfg["mem"] is not None:
+        cfg["mem"][key].append(item)
 
 # ─── Haversine Distance ───────────────────────────────────────────────────────
 
@@ -357,7 +446,7 @@ async def detect_ato(req: ATORequest) -> ATOResponse:
     score = 0.0
 
     now_ms = req.timestamp_ms
-    locations = _user_locations[req.user_id]
+    locations = await _buf_read("user_locations", req.user_id)
 
     # ── Impossible Travel ────────────────────────────────────────────────────
     if locations:
@@ -375,7 +464,7 @@ async def detect_ato(req: ATORequest) -> ATOResponse:
             score = max(score, 0.6)
 
     # ── Login Velocity ───────────────────────────────────────────────────────
-    ip_events = _ip_login_events[req.ip_address]
+    ip_events = await _buf_read("ip_login_events", req.ip_address)
     recent_window_ms = 5 * 60 * 1000  # 5 minutes
     recent_logins = sum(1 for e in ip_events if now_ms - e["ts"] < recent_window_ms)
     if recent_logins > 20:
@@ -391,9 +480,9 @@ async def detect_ato(req: ATORequest) -> ATOResponse:
         flags.append(f"new_device_fingerprint: {req.device_fingerprint[:16]}...")
         score = max(score, 0.4)
 
-    # Record this event
-    locations.append({"lat": req.latitude, "lon": req.longitude, "ts": now_ms, "fp": req.device_fingerprint})
-    ip_events.append({"ts": now_ms, "user": req.user_id})
+    # Record this event (Redis-backed, TTL-bound; fail-open to memory)
+    await _buf_append("user_locations", req.user_id, {"lat": req.latitude, "lon": req.longitude, "ts": now_ms, "fp": req.device_fingerprint})
+    await _buf_append("ip_login_events", req.ip_address, {"ts": now_ms, "user": req.user_id})
 
     # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
     import time as _time
@@ -413,8 +502,10 @@ async def detect_credential_stuffing(req: CredentialStuffingRequest) -> Credenti
     score = 0.0
     now_ms = req.timestamp_ms
 
-    ip_events = _ip_login_events[req.ip_address]
-    ip_events.append({"ts": now_ms, "success": req.success, "user": req.target_user_id})
+    ip_events = await _buf_read("ip_login_events", req.ip_address)
+    current_event = {"ts": now_ms, "success": req.success, "user": req.target_user_id}
+    ip_events.append(current_event)
+    await _buf_append("ip_login_events", req.ip_address, current_event)
 
     window_ms = 10 * 60 * 1000  # 10 minutes
     recent = [e for e in ip_events if now_ms - e["ts"] < window_ms]
@@ -486,7 +577,7 @@ async def detect_bec(req: BECRequest) -> BECResponse:
         score = max(score, 0.5)
 
     # ── Record for future pattern analysis ──────────────────────────────────
-    _user_beneficiary_changes[req.user_id].append({
+    await _buf_append("user_beneficiary_changes", req.user_id, {
         "ts": req.transfer_initiated_at_ms,
         "beneficiary": req.beneficiary_id,
         "amount": req.transfer_amount_usd,
@@ -509,7 +600,20 @@ async def detect_round_trip(req: RoundTripRequest) -> RoundTripResponse:
     flags: List[str] = []
     score = 0.0
 
-    transfers = req.recent_transfers
+    # Merge caller-supplied transfers with persisted per-user history (Redis-backed).
+    stored = await _buf_read("user_transfers", req.user_id)
+    seen = {(t.timestamp_ms, t.destination_account, t.amount_usd, t.direction) for t in req.recent_transfers}
+    transfers = list(req.recent_transfers)
+    for s in stored:
+        key = (s.get("timestamp_ms"), s.get("destination_account"), s.get("amount_usd"), s.get("direction"))
+        if key not in seen:
+            seen.add(key)
+            try:
+                transfers.append(TransferEvent(**s))
+            except Exception:
+                continue
+    for t in req.recent_transfers:
+        await _buf_append("user_transfers", req.user_id, t.model_dump())
     threshold = req.reporting_threshold_usd
 
     # ── Structuring (Smurfing) ────────────────────────────────────────────────
@@ -566,7 +670,20 @@ async def detect_ransomware(req: RansomwareRequest) -> RansomwareResponse:
     flags: List[str] = []
     score = 0.0
 
-    events = req.recent_api_events
+    # Merge caller-supplied API events with persisted per-IP patterns (Redis-backed).
+    stored = await _buf_read("ip_api_patterns", req.ip_address)
+    seen = {(e.timestamp_ms, e.endpoint, e.method) for e in req.recent_api_events}
+    events = list(req.recent_api_events)
+    for s in stored:
+        key = (s.get("timestamp_ms"), s.get("endpoint"), s.get("method"))
+        if key not in seen:
+            seen.add(key)
+            try:
+                events.append(APIAccessEvent(**s))
+            except Exception:
+                continue
+    for e in req.recent_api_events:
+        await _buf_append("ip_api_patterns", req.ip_address, e.model_dump())
     now_ms = int(time.time() * 1000)
     window_ms = 60 * 60 * 1000  # 1 hour
 
@@ -636,7 +753,8 @@ CORE_FUND_FLOW_TOPICS = [
     "remitflow.fund.compensated",
 ]
 
-_fund_flow_history: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+_fund_flow_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=200))
+_BUFFER_CONFIG["fund_flow_history"]["mem"] = _fund_flow_history
 _FUND_FLOW_WINDOW_SECONDS = 3600
 _FUND_FLOW_MAX_OPS_PER_HOUR = 50
 _FUND_FLOW_HIGH_VALUE_USD = 10000.0
@@ -663,11 +781,11 @@ async def detect_fund_flow_anomaly(req: FundFlowEventRequest) -> FundFlowAnomaly
     risk_score = 0.0
     now = time.time()
 
-    history = _fund_flow_history[req.user_id]
-    history.append({"amount": req.amount, "feature": req.feature, "ts": now, "txn": req.transaction_id})
+    event = {"amount": req.amount, "feature": req.feature, "ts": now, "txn": req.transaction_id}
+    await _buf_append("fund_flow_history", str(req.user_id), event)
+    history = await _buf_read("fund_flow_history", str(req.user_id))
     cutoff = now - _FUND_FLOW_WINDOW_SECONDS
-    _fund_flow_history[req.user_id] = [h for h in history if h["ts"] >= cutoff]
-    recent = _fund_flow_history[req.user_id]
+    recent = [h for h in history if h["ts"] >= cutoff]
 
     if len(recent) > _FUND_FLOW_MAX_OPS_PER_HOUR:
         signals.append(f"velocity_spike: {len(recent)} ops in 1h (limit={_FUND_FLOW_MAX_OPS_PER_HOUR})")
