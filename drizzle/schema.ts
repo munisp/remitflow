@@ -7282,3 +7282,115 @@ export const insiderBreakGlassEvents = pgTable("insider_break_glass_events", {
 ]);
 export type InsiderBreakGlassEvent = typeof insiderBreakGlassEvents.$inferSelect;
 export type InsertInsiderBreakGlassEvent = typeof insiderBreakGlassEvents.$inferInsert;
+
+// ─── W19-A: Durable backing for formerly in-memory CRITICAL stores ──────────
+// (audit/w19-inmemory-maps.md TS CRITICAL 1-8; migration 0098_inmemory_persistence.sql)
+
+/** AML structuring counters — 1h rolling window per user (security.attacks.ts detectStructuring). */
+export const amlStructuringCounters = pgTable("aml_structuring_counters", {
+  userId: integer("user_id").primaryKey(),
+  totalUsd: numeric("total_usd", { precision: 18, scale: 2 }).notNull().default("0"),
+  transferCount: integer("transfer_count").notNull().default(0),
+  windowStart: timestamp("window_start").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type AmlStructuringCounter = typeof amlStructuringCounters.$inferSelect;
+export type InsertAmlStructuringCounter = typeof amlStructuringCounters.$inferInsert;
+
+/** Ghost-beneficiary fraud signal — recent beneficiary additions (5-min window). */
+export const amlBeneficiaryAdditions = pgTable("aml_beneficiary_additions", {
+  userId: integer("user_id").notNull(),
+  beneficiaryId: integer("beneficiary_id").notNull(),
+  addedAt: timestamp("added_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("aml_beneficiary_additions_pk").on(t.userId, t.beneficiaryId),
+  index("aml_beneficiary_additions_added_idx").on(t.addedAt),
+]);
+export type AmlBeneficiaryAddition = typeof amlBeneficiaryAdditions.$inferSelect;
+export type InsertAmlBeneficiaryAddition = typeof amlBeneficiaryAdditions.$inferInsert;
+
+/** Rate-limit counters — PG fallback for Redis sliding window (platformHardeningV3.checkRateLimit). */
+export const rateLimitCounters = pgTable("rate_limit_counters", {
+  key: text("key").primaryKey(),
+  count: integer("count").notNull().default(0),
+  resetAt: timestamp("reset_at").notNull(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type RateLimitCounter = typeof rateLimitCounters.$inferSelect;
+export type InsertRateLimitCounter = typeof rateLimitCounters.$inferInsert;
+
+/** Webhook replay-protection dedup (24h TTL via expiresAt). */
+export const webhookProcessedEvents = pgTable("webhook_processed_events", {
+  provider: varchar("provider", { length: 32 }).notNull(),
+  eventId: text("event_id").notNull(),
+  processedAt: timestamp("processed_at").notNull().defaultNow(),
+  expiresAt: timestamp("expires_at").notNull(),
+}, (t) => [
+  uniqueIndex("webhook_processed_events_pk").on(t.provider, t.eventId),
+  index("webhook_processed_events_expires_idx").on(t.expiresAt),
+]);
+export type WebhookProcessedEvent = typeof webhookProcessedEvents.$inferSelect;
+export type InsertWebhookProcessedEvent = typeof webhookProcessedEvents.$inferInsert;
+
+/** Custody payout idempotency — claimed BEFORE payout execution (fail-closed). */
+export const custodyIdempotencyKeys = pgTable("custody_idempotency_keys", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("pending"), // 'pending'|'completed'|'failed'
+  result: jsonb("result"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  expiresAt: timestamp("expires_at").notNull(),
+}, (t) => [
+  uniqueIndex("custody_idempotency_keys_uniq").on(t.userId, t.idempotencyKey),
+  index("custody_idempotency_keys_expires_idx").on(t.expiresAt),
+]);
+export type CustodyIdempotencyKey = typeof custodyIdempotencyKeys.$inferSelect;
+export type InsertCustodyIdempotencyKey = typeof custodyIdempotencyKeys.$inferInsert;
+
+/** Developer webhook registrations — secretEnc is AES-256-GCM at rest (secretBox). */
+export const developerWebhooks = pgTable("developer_webhooks", {
+  id: uuid("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  url: text("url").notNull(),
+  events: jsonb("events").notNull().default([]),
+  secretEnc: text("secret_enc").notNull(),
+  active: boolean("active").notNull().default(true),
+  description: text("description").notNull().default(""),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("developer_webhooks_user_idx").on(t.userId),
+]);
+export type DeveloperWebhook = typeof developerWebhooks.$inferSelect;
+export type InsertDeveloperWebhook = typeof developerWebhooks.$inferInsert;
+
+/** Developer webhook delivery audit log. */
+export const developerWebhookDeliveries = pgTable("developer_webhook_deliveries", {
+  id: uuid("id").primaryKey(),
+  webhookId: uuid("webhook_id").notNull().references(() => developerWebhooks.id, { onDelete: "cascade" }),
+  event: text("event").notNull(),
+  payload: jsonb("payload"),
+  statusCode: integer("status_code"),
+  latencyMs: integer("latency_ms"),
+  success: boolean("success").notNull().default(false),
+  attempt: integer("attempt").notNull().default(1),
+  error: text("error"),
+  deliveredAt: timestamp("delivered_at").notNull().defaultNow(),
+}, (t) => [
+  index("developer_webhook_deliveries_hook_idx").on(t.webhookId, t.deliveredAt),
+]);
+export type DeveloperWebhookDelivery = typeof developerWebhookDeliveries.$inferSelect;
+export type InsertDeveloperWebhookDelivery = typeof developerWebhookDeliveries.$inferInsert;
+
+/** Corridor kill switches — persisted; readers fail closed on unknown state. */
+export const corridorKillSwitches = pgTable("corridor_kill_switches", {
+  corridor: varchar("corridor", { length: 8 }).primaryKey(), // "<FROM>-<TO>"
+  enabled: boolean("enabled").notNull().default(true),
+  disabledAt: timestamp("disabled_at"),
+  disabledBy: varchar("disabled_by", { length: 64 }),
+  reason: text("reason"),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type CorridorKillSwitch = typeof corridorKillSwitches.$inferSelect;
+export type InsertCorridorKillSwitch = typeof corridorKillSwitches.$inferInsert;

@@ -38,6 +38,10 @@ import { fetchLiveRates } from "./fx-rates.service";
 import { startTransferWorkflow, startKYCWorkflow } from "./temporal/client";
 import { publishPaymentInitiated, publishTransactionEvent, publishKYCEvent, publishRiskScoreEvent, publishAuditEvent } from "./middleware/kafka";
 import { auditCoreOperation, CORE_TOPICS, generateOpRef, generateIdempotencyKey, checkIdempotency, claimIdempotency, storeIdempotency } from "./middleware/coreAtomicity";
+// W19-F: TigerBeetle write-through for money paths missing ledger dual-write
+// (fail-open emit; PG stays source of truth; outbox fallback inside helper).
+import { recordTigerBeetleDualWrite } from "./_core/fundFlowHardening";
+import { TB_ACCOUNT_CODES } from "./_core/tigerBeetle";
 import { checkInsiderThreat, requiresMakerChecker } from "./middleware/insiderThreat";
 import { bnplRouter, travelRuleRouter, agentNetworkRouter, corridorAnalyticsRouter, referralEngineRouter, whiteLabelPreviewRouter, apiChangelogRouter, familyEnhancedRouter, tenantAnalyticsRouter } from "./routers/productionFeatures";
 import { partnerOnboardingRouter, adminInviteCodesRouter } from "./routers/partnerOnboarding";
@@ -3030,6 +3034,10 @@ export const appRouter = router({
       await db.update(batchPayments).set({ status: "completed" }).where(eq(batchPayments.id, input.id)).returning();
       const batchRef = generateOpRef("BATCH", ctx.user.id);
       await auditCoreOperation({ userId: ctx.user.id, action: 'BATCH_PAYMENT', description: `Batch payment: ${batch.totalRecipients} recipients, total ${totalAmount} ${batch.currency ?? "NGN"}`, amount: totalAmount, currency: batch.currency ?? "NGN", featureLabel: 'batch', operationRef: batchRef, kafkaTopic: CORE_TOPICS.BATCH_PAYMENT, metadata: { batchId: input.id, recipientCount: batch.totalRecipients } });
+      // W19-F: TigerBeetle dual-write of the payroll/batch debit (sender
+      // wallet → platform settlement). Fail-open: PG above is authoritative;
+      // a missed ledger write is logged loudly + queued via PG outbox.
+      await recordTigerBeetleDualWrite({ reference: batchRef, fromUserId: ctx.user.id, fromCode: TB_ACCOUNT_CODES.USER_WALLET, toCode: TB_ACCOUNT_CODES.SETTLEMENT, amount: totalAmount, currency: batch.currency ?? "NGN" });
       return { success: true, batchId: input.id, status: "completed", totalDebited: totalAmount, reference: batchRef };
     }),
   }),
