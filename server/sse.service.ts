@@ -16,6 +16,16 @@ export interface AdminSseEvent {
 }
 
 // In-memory registry: userId → array of SSE response objects (multiple tabs)
+//
+// W19-B decision (SPEC-wave19): this registry INTENTIONALLY stays per-process.
+// SSE connections are long-lived HTTP response objects bound to the socket of
+// the process that accepted them — they cannot be serialized to Redis/PG or
+// shared across replicas by definition. Sticky routing (or a Redis pub/sub
+// fan-out, deferred) is the correct cross-replica answer, not persistence.
+// Audit: NO durable records are associated with these registries — events are
+// fire-and-forget notifications; the durable sources of truth (kyc cases,
+// compliance cases, transfers, fraud alerts) all live in PG tables owned by
+// their respective routers, so nothing durable is lost on restart.
 const clients = new Map<number, Response[]>();
 
 /**
