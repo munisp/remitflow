@@ -243,12 +243,67 @@ export const transferLimitsRouter = router({
 
 // ─── FX Rate Lock Router ──────────────────────────────────────────────────────
 import { BoundedCache, registerCache } from "../lib/boundedCache";
+import { getRedisClient } from "../middleware/redis";
+import { isFundFlowStrictMode } from "../middleware/redisHardened";
+import { logger } from "../_core/logger";
+import { reportWriteThroughFailure } from "../lib/writeThroughTelemetry";
+
+// W19-B: quotes are rate locks (money path). PRIMARY store is Redis
+// (`fx:quote:<quoteId>`, SET PX 15 min — replica-consistent, survives
+// restarts). The BoundedCache below is now ONLY a non-production fallback
+// when Redis is unavailable; in production (strict mode) a Redis outage
+// fails CLOSED: quotes cannot be issued or validated without the shared
+// store, and the failure is logged + counted.
+const QUOTE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const QUOTE_CACHE = new BoundedCache<string, { rate: number; fee: number; expiresAt: number; quoteId: string }>({
   maxSize: 5000,
-  defaultTtlMs: 15 * 60 * 1000, // 15 minutes
+  defaultTtlMs: QUOTE_TTL_MS,
   name: "fx-quote-cache",
 });
 registerCache(QUOTE_CACHE as unknown as BoundedCache<unknown, unknown>);
+
+type QuoteRecord = { rate: number; fee: number; expiresAt: number; quoteId: string };
+const quoteRedisKey = (quoteId: string) => `fx:quote:${quoteId}`;
+
+async function storeQuote(quote: QuoteRecord): Promise<void> {
+  const redis = getRedisClient();
+  if (redis) {
+    try {
+      await redis.set(quoteRedisKey(quote.quoteId), JSON.stringify(quote), "PX", QUOTE_TTL_MS);
+      return;
+    } catch (err) {
+      reportWriteThroughFailure("fx_quote_cache", err, "error");
+      if (isFundFlowStrictMode()) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Quote service unavailable — please retry" });
+      }
+    }
+  } else {
+    reportWriteThroughFailure("fx_quote_cache", new Error("Redis client unavailable"), "error");
+    if (isFundFlowStrictMode()) {
+      throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Quote service unavailable — please retry" });
+    }
+  }
+  logger.warn({ quoteId: quote.quoteId }, "[fxRateLock] Redis unavailable — quote stored process-locally (dev only, NOT valid across replicas)");
+  QUOTE_CACHE.set(quote.quoteId, quote);
+}
+
+async function loadQuote(quoteId: string): Promise<QuoteRecord | null> {
+  const redis = getRedisClient();
+  if (redis) {
+    try {
+      const raw = await redis.get(quoteRedisKey(quoteId));
+      if (raw) return JSON.parse(raw) as QuoteRecord;
+      return null;
+    } catch (err) {
+      reportWriteThroughFailure("fx_quote_cache", err, "error");
+      if (isFundFlowStrictMode()) return null; // fail closed: do not honor unverifiable quotes
+    }
+  } else if (isFundFlowStrictMode()) {
+    reportWriteThroughFailure("fx_quote_cache", new Error("Redis client unavailable"), "error");
+    return null; // fail closed in production
+  }
+  return QUOTE_CACHE.get(quoteId) ?? null;
+}
 
 export const fxRateLockRouter = router({
   lockQuote: protectedProcedure
@@ -258,11 +313,11 @@ export const fxRateLockRouter = router({
       amount: z.number().positive().max(10_000_000),
       rate: z.number().positive(),
     }))
-    .mutation(({ ctx, input }) => {
+    .mutation(async ({ ctx, input }) => {
       const quoteId = `QT-${ctx.user.id}-${Date.now()}`;
       const fee = calculateFee(input.fromCurrency, input.toCurrency, input.amount);
-      const expiresAt = Date.now() + 15 * 60 * 1000; // 15 minutes
-      QUOTE_CACHE.set(quoteId, { rate: input.rate, fee, expiresAt, quoteId });
+      const expiresAt = Date.now() + QUOTE_TTL_MS;
+      await storeQuote({ rate: input.rate, fee, expiresAt, quoteId });
       return {
         quoteId,
         fromCurrency: input.fromCurrency,
@@ -278,8 +333,8 @@ export const fxRateLockRouter = router({
 
   validateQuote: protectedProcedure
     .input(z.object({ quoteId: z.string() }))
-    .query(({ input }) => {
-      const quote = QUOTE_CACHE.get(input.quoteId);
+    .query(async ({ input }) => {
+      const quote = await loadQuote(input.quoteId);
       if (!quote) return { valid: false, reason: "Quote not found or expired" };
       if (Date.now() > quote.expiresAt) {
         QUOTE_CACHE.delete(input.quoteId);
