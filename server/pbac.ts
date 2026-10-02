@@ -38,6 +38,9 @@ import type { TrpcContext } from "./_core/context";
 import { getPermifyClient } from "./middleware/permify";
 import { flagBeneficiarySwap, emitSecurityEvent } from "./security.attacks";
 import { getRedisClient } from "./middleware/redis";
+import { isFundFlowStrictMode } from "./middleware/redisHardened";
+import { logger } from "./_core/logger";
+import { reportWriteThroughFailure } from "./lib/writeThroughTelemetry";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface PolicyContext {
@@ -90,7 +93,13 @@ function parseKycTier(kycTier: unknown): number {
 }
 
 // ─── Redis-backed daily spend tracker (in-process fallback for dev) ─────────
-const _fallbackSpend = new Map<string, number>(); // fallback when Redis unavailable
+// W19-B hardening: spend tracking enforces KYC daily limits (money path).
+// In production (strict mode) a Redis outage FAILS CLOSED — spend checks
+// throw rather than silently reading a per-process map that undercounts
+// (audit note: money paths deny on Redis loss). Outside production the
+// in-process map fallback is WARN-logged + counted (writeThroughTelemetry)
+// and write-through to the durable wt_pbac_fallback_spend table (0099).
+const _fallbackSpend = new Map<string, number>(); // fallback when Redis unavailable (non-prod only)
 function getDailyRedisKey(userId: number): string {
   const date = new Date().toISOString().slice(0, 10);
   return `pbac:daily_spend:${userId}:${date}`;
@@ -103,13 +112,28 @@ export async function recordSpendAsync(userId: number, amountCents: number): Pro
       await redis.incrby(key, amountCents);
       await redis.expire(key, 86400); // expire at end of day
       return;
-    } catch { /* fall through to in-process */ }
+    } catch (err) {
+      reportWriteThroughFailure("pbac_daily_spend", err, "error");
+      if (isFundFlowStrictMode()) {
+        throw new Error("[PBAC] Redis unavailable — cannot record spend against daily limit (fail-closed in production)");
+      }
+    }
+  } else {
+    reportWriteThroughFailure("pbac_daily_spend", new Error("Redis client unavailable"), "error");
+    if (isFundFlowStrictMode()) {
+      throw new Error("[PBAC] Redis unavailable — cannot record spend against daily limit (fail-closed in production)");
+    }
   }
+  logger.warn({ userId, amountCents }, "[PBAC] Redis unavailable — in-process spend fallback (dev only, NOT replica-consistent)");
   _fallbackSpend.set(key, (_fallbackSpend.get(key) ?? 0) + amountCents);
-  _writeThrough("wt_pbac_fallback_spend", String(key), (_fallbackSpend.get(key) ?? 0) + amountCents).catch(() => {});
+  _writeThrough("wt_pbac_fallback_spend", String(key), _fallbackSpend.get(key) ?? 0)
+    .catch((err) => reportWriteThroughFailure("wt_pbac_fallback_spend", err, "error"));
 }
 export function recordSpend(userId: number, amountCents: number): void {
-  recordSpendAsync(userId, amountCents).catch(() => {});
+  recordSpendAsync(userId, amountCents).catch((err) => {
+    // Post-commit accounting path: log + count loudly; never silent.
+    reportWriteThroughFailure("pbac_daily_spend", err, "error");
+  });
 }
 async function getDailySpendAsync(userId: number): Promise<number> {
   const redis = getRedisClient();
@@ -118,8 +142,17 @@ async function getDailySpendAsync(userId: number): Promise<number> {
     try {
       const val = await redis.get(key);
       return val ? parseInt(val, 10) : 0;
-    } catch { /* fall through */ }
+    } catch (err) {
+      reportWriteThroughFailure("pbac_daily_spend", err, "error");
+      if (isFundFlowStrictMode()) {
+        throw new Error("[PBAC] Redis unavailable — cannot verify daily spend limit (fail-closed in production)");
+      }
+    }
+  } else if (isFundFlowStrictMode()) {
+    reportWriteThroughFailure("pbac_daily_spend", new Error("Redis client unavailable"), "error");
+    throw new Error("[PBAC] Redis unavailable — cannot verify daily spend limit (fail-closed in production)");
   }
+  logger.warn({ userId }, "[PBAC] Redis unavailable — reading spend from in-process fallback (dev only)");
   return _fallbackSpend.get(key) ?? 0;
 }
 
@@ -544,7 +577,10 @@ async function _writeThrough(table: string, key: string, value: unknown): Promis
       VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
       ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
     `);
-  } catch { /* hot cache still works */ }
+  } catch (err) {
+    // W19-B: hot cache still works, but the durable divergence is never silent.
+    reportWriteThroughFailure(String(table), err, "error");
+  }
 }
 async function _deleteFromDb(table: string, key: string): Promise<void> {
   const db = await _getWtDb_pbacts();
@@ -552,7 +588,9 @@ async function _deleteFromDb(table: string, key: string): Promise<void> {
   try {
     const { sql } = await import("drizzle-orm");
     await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
-  } catch {}
+  } catch (err) {
+    reportWriteThroughFailure(String(table), err);
+  }
 }
 
 

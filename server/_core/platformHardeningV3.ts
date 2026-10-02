@@ -434,28 +434,75 @@ const RATE_LIMITS: Record<string, RateLimitConfig> = {
   "api.general": { windowMs: 60_000, maxRequests: 100 },
 };
 
-const rateLimitCounters = new Map<string, { count: number; resetAt: number }>();
+// W19-A: the per-process `rateLimitCounters` Map was replaced with the
+// distributed Redis sliding window (middleware/redisHardened.checkRateLimit),
+// with PostgreSQL table "rate_limit_counters" (migration 0098) as the durable
+// fallback when Redis is unavailable. These counters gate money paths
+// (kyc.submit, stablecoin.swap/bridge, auth.login) and must be consistent
+// across replicas. If BOTH stores are unavailable the check FAILS CLOSED
+// (throws) rather than fabricating an "allowed" verdict.
 
-export function checkRateLimit(userId: string, endpoint: string): { allowed: boolean; remaining: number; resetAt: number } {
+/**
+ * PG fallback rate check: atomic window reset + increment in a single
+ * INSERT ... ON CONFLICT statement (safe under concurrent replicas).
+ */
+async function _checkRateLimitPg(
+  key: string,
+  config: RateLimitConfig,
+): Promise<{ allowed: boolean; remaining: number; resetAt: number }> {
+  const { requireDb } = await import("../db.js");
+  const db = await requireDb(); // throws when unavailable -> caller fails closed
+  const rows = (await (db as any).execute(sql`
+    INSERT INTO rate_limit_counters (key, count, reset_at, updated_at)
+    VALUES (${key}, 1, NOW() + (${config.windowMs} || ' milliseconds')::interval, NOW())
+    ON CONFLICT (key) DO UPDATE SET
+      count = CASE WHEN rate_limit_counters.reset_at <= NOW()
+                   THEN 1 ELSE rate_limit_counters.count + 1 END,
+      reset_at = CASE WHEN rate_limit_counters.reset_at <= NOW()
+                      THEN NOW() + (${config.windowMs} || ' milliseconds')::interval
+                      ELSE rate_limit_counters.reset_at END,
+      updated_at = NOW()
+    RETURNING count, reset_at
+  `)) as unknown as Array<{ count: number; reset_at: string | Date }>;
+  const row = rows[0]!;
+  const allowed = row.count <= config.maxRequests;
+  return {
+    allowed,
+    remaining: Math.max(0, config.maxRequests - row.count),
+    resetAt: new Date(row.reset_at).getTime(),
+  };
+}
+
+export async function checkRateLimit(userId: string, endpoint: string): Promise<{ allowed: boolean; remaining: number; resetAt: number }> {
   const config = RATE_LIMITS[endpoint] || RATE_LIMITS["api.general"]!;
   const key = `${userId}:${endpoint}`;
-  const now = Date.now();
 
-  let entry = rateLimitCounters.get(key);
-  if (!entry || now > entry.resetAt) {
-    entry = { count: 0, resetAt: now + config.windowMs };
-    rateLimitCounters.set(key, entry);
+  // 1. Primary: Redis sliding window (replica-consistent, low latency).
+  try {
+    const { checkRateLimit: redisRateLimit, isRedisAvailable } = await import("../middleware/redisHardened.js");
+    if (isRedisAvailable()) {
+      const result = await redisRateLimit(`v3:${key}`, config.maxRequests, config.maxRequests, config.windowMs);
+      if (!result.allowed) {
+        logger.warn({ userId, endpoint, store: "redis" }, "Rate limit exceeded");
+      }
+      return result;
+    }
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err), userId, endpoint },
+      "[platformHardeningV3] Redis rate-limit check failed — falling back to PostgreSQL rate_limit_counters");
+    try {
+      const { trackError } = await import("../middleware/businessMetrics.js");
+      trackError("persistence", "rate_limit_redis_fallback");
+    } catch { /* metrics must never break the hot path */ }
   }
 
-  entry.count++;
-  const allowed = entry.count <= config.maxRequests;
-  const remaining = Math.max(0, config.maxRequests - entry.count);
-
-  if (!allowed) {
-    logger.warn({ userId, endpoint, count: entry.count }, "Rate limit exceeded");
+  // 2. Fallback: durable PostgreSQL counter (fail-closed when DB unavailable —
+  // requireDb() throws and the caller's request is rejected).
+  const result = await _checkRateLimitPg(key, config);
+  if (!result.allowed) {
+    logger.warn({ userId, endpoint, count: config.maxRequests, store: "postgres" }, "Rate limit exceeded");
   }
-
-  return { allowed, remaining, resetAt: entry.resetAt };
+  return result;
 }
 
 // ── Distributed Tracing (OpenTelemetry) ─────────────────────────────────────
