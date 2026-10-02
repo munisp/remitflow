@@ -14,36 +14,53 @@ import { sql } from "drizzle-orm";
 import { logger } from "./_core/logger";
 import { advanceTransferState } from "./transfer-state-machine.js";
 import { verifyWebhookSignature, isWebhookDuplicate } from "./lib/webhookHmac.js";
+import { checkRateLimit as hardenedCheckRateLimit } from "./middleware/redisHardened";
+import { reportWriteThroughFailure } from "./lib/writeThroughTelemetry";
 
 // ─── Webhook Rate Limiter ──────────────────────────────────────────────────────
-// Sliding window rate limiter for webhook endpoints to prevent replay attacks
-// and DDoS via webhook flooding. 100 requests per minute per IP.
+// W19-B: PRIMARY limiter is Redis (atomic sliding window via redisHardened)
+// so the limit is enforced consistently across ALL replicas — a per-process
+// map lets an attacker multiply their budget by the replica count. The
+// in-process map below is ONLY a degraded-mode fallback when Redis is down;
+// its use is WARN-logged + counted (writeThroughTelemetry). 100 req/min/IP.
 const webhookRateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const WEBHOOK_RATE_LIMIT = 100;
 const WEBHOOK_RATE_WINDOW_MS = 60_000;
 
-function webhookRateLimiter(req: Request, res: Response, next: NextFunction): void {
-  const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
+function inProcessWebhookRateLimit(ip: string): boolean {
   const now = Date.now();
   const entry = webhookRateLimitMap.get(ip);
-
   if (!entry || now > entry.resetAt) {
     webhookRateLimitMap.set(ip, { count: 1, resetAt: now + WEBHOOK_RATE_WINDOW_MS });
-    next();
-    return;
+    return true;
+  }
+  entry.count++;
+  return entry.count <= WEBHOOK_RATE_LIMIT;
+}
+
+async function webhookRateLimiter(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
+
+  let allowed: boolean;
+  try {
+    const result = await hardenedCheckRateLimit(`webhook:rail:${ip}`, WEBHOOK_RATE_LIMIT, WEBHOOK_RATE_LIMIT, WEBHOOK_RATE_WINDOW_MS);
+    allowed = result.allowed;
+  } catch (err) {
+    // Redis/sidecar unavailable — degraded in-process limiting (never silent).
+    reportWriteThroughFailure("webhook_rail_rate_limit", err, "error");
+    logger.warn({ ip }, "[Webhook] Redis unavailable — in-process rate limit fallback (per-replica, degraded)");
+    allowed = inProcessWebhookRateLimit(ip);
   }
 
-  entry.count++;
-  if (entry.count > WEBHOOK_RATE_LIMIT) {
-    logger.warn({ ip, count: entry.count }, "[Webhook] Rate limit exceeded");
+  if (!allowed) {
+    logger.warn({ ip }, "[Webhook] Rate limit exceeded");
     res.status(429).json({ error: "Too many webhook requests" });
     return;
   }
-
   next();
 }
 
-// Clean up stale entries every 5 minutes
+// Clean up stale fallback entries every 5 minutes
 setInterval(() => {
   const now = Date.now();
   webhookRateLimitMap.forEach((entry, ip) => {
@@ -101,7 +118,7 @@ function handlePixCallback(app: Express) {
     }
 
     // Deduplication check
-    if (isWebhookDuplicate("pix", endToEndId)) {
+    if (await isWebhookDuplicate("pix", endToEndId)) {
       res.status(200).json({ received: true, duplicate: true });
       return;
     }
@@ -194,7 +211,7 @@ function handleUpiCallback(app: Express) {
       return;
     }
 
-    if (isWebhookDuplicate("upi", transactionId)) {
+    if (await isWebhookDuplicate("upi", transactionId)) {
       res.status(200).json({ received: true, duplicate: true });
       return;
     }
@@ -290,7 +307,7 @@ function handleCipsCallback(app: Express) {
       return;
     }
 
-    if (isWebhookDuplicate("cips", transactionId)) {
+    if (await isWebhookDuplicate("cips", transactionId)) {
       res.status(200).json({ received: true, duplicate: true });
       return;
     }

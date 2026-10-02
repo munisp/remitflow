@@ -141,8 +141,9 @@ export async function releaseFundLock(op: AtomicOperation, lockToken: string): P
     const script = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
     await redis.eval(script, 1, lockKey, lockToken);
     return;
-  } catch {
-    // Best-effort release — lock will expire via TTL anyway
+  } catch (err) {
+    // Best-effort release — lock will expire via TTL anyway; never silent.
+    logger.warn({ err, lockKey }, "[FundLock] Redis lock release failed — relying on TTL expiry");
   }
 
   // In-memory fallback (development only)
@@ -346,8 +347,9 @@ export async function publishFundFlowEvent(event: FundFlowEvent): Promise<void> 
   try {
     const { fluvioProduce } = await import("../integrations/fluvio/streaming");
     await fluvioProduce("fund-flow-stream", event.operationId ?? event.eventId, event);
-  } catch {
-    // Fluvio is best-effort for real-time streaming
+  } catch (err) {
+    // Fluvio is best-effort for real-time streaming — fail-open but not silent.
+    logger.warn({ err, eventId: event.eventId }, "[FundFlow] Fluvio stream emit failed (telemetry path, continuing)");
   }
 }
 
