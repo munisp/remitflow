@@ -27,7 +27,7 @@ import (
 type CBDCCurrency string
 
 const (
-	eNaira       CBDCCurrency = "eNGN"
+	ENaira       CBDCCurrency = "eNGN"
 	DigitalEuro  CBDCCurrency = "eDEUR"
 	DigitalPound CBDCCurrency = "eGBP"
 )
