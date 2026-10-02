@@ -22,6 +22,14 @@ import { Request, Response } from "express";
 
 // In-memory last-known rates for delta computation
 // Populated from universalConversion router on each rate refresh
+//
+// W19-B decision (SPEC-wave19): `sseClients` INTENTIONALLY stays per-process —
+// SSE Response objects are bound to this process's sockets and cannot be
+// persisted or shared (see sse.service.ts for the full rationale; cross-replica
+// fan-out via Redis pub/sub is a deferred W20+ concern). `lastRates` is a
+// derived cache of externally-owned rate data (universalConversion refreshes
+// it every tick), so restart loss is self-healing on the next poll. NO durable
+// records are associated with this module.
 let lastRates: Record<string, number> = {};
 const sseClients: Set<Response> = new Set();
 

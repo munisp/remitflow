@@ -4,12 +4,20 @@
  * This standalone tree cannot import `server/routers` (separate package, no
  * server deps installed), so — mirroring uis/pwa/src/types/appRouter.ts — we
  * declare the client-side contract for exactly the procedures consumed here:
- *   - server/routers/stablecoinEnhanced.ts (stablecoinPlatform.*)
+ *   - server/routers/stablecoinEnhanced.ts:
+ *       stablecoinPlatform.{onramp,offramp}
+ *       stablecoinExt.{swap,send,stakeForYield,unstake,bridgeChain,payBill}
+ *
+ * W19-F: swap/send/stakeForYield/unstake/bridgeChain/payBill were moved from
+ * stablecoinPlatform (where they DO NOT exist — audit w19-alignment §2) to
+ * stablecoinExt (stablecoinExtendedRouter, stablecoinEnhanced.ts:674+), their
+ * real home. All stablecoinExt money ops require idempotencyKey (min 8) and
+ * accept an optional TOTP step-up code; requireTotpStepUp is enforced
+ * server-side for enrolled users.
  *
  * Procedure NAMES and kinds are verified 1:1 against the server router.
- * Inputs are typed as `unknown` on purpose: StablecoinScreen predates the
- * current server zod schemas (it sends payloads with `as any` casts and no
- * idempotencyKey), so a strict schema mirror would not compile. Wire-level
+ * Inputs are typed as `unknown` on purpose: StablecoinScreen sends payloads
+ * with `as any` casts, so a strict schema mirror would drift. Wire-level
  * validation is enforced server-side by the zod schemas in
  * stablecoinEnhanced.ts; this contract only fixes the client type graph.
  *
@@ -31,6 +39,8 @@ export const mobileTrpcContract = t.router({
   stablecoinPlatform: t.router({
     onramp: t.procedure.input(z.unknown()).mutation(neverRuns),
     offramp: t.procedure.input(z.unknown()).mutation(neverRuns),
+  }),
+  stablecoinExt: t.router({
     swap: t.procedure.input(z.unknown()).mutation(neverRuns),
     send: t.procedure.input(z.unknown()).mutation(neverRuns),
     stakeForYield: t.procedure.input(z.unknown()).mutation(neverRuns),
