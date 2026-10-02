@@ -1,15 +1,17 @@
 /**
  * RemitFlow — ML Pipeline Router
  *
- * tRPC router integrating all real AI/ML/DL/GNN services:
- *   - NLU Intent Classifier (Transformer, port 8110)
- *   - FX Forecasting (LSTM+Transformer, port 8111)
- *   - GNN Fraud Detection (GAT, port 8112)
- *   - Investment ML (XGBoost/MLP, port 8122)
- *   - Ray Training Pipeline (port 8114)
- *   - MLflow Model Registry (port 8115)
- *   - ML Retraining Orchestrator (port 8116)
+ * tRPC router integrating AI/ML services. REAL services (exist in services/):
+ *   - FX Forecasting (python-fx-forecasting, port 8111)
+ *   - GNN Fraud Detection (python-gnn-fraud, port 8112)
+ *   - MLflow Model Registry (python-mlflow-registry, port 8115)
+ *   - ML Retraining Orchestrator (python-ml-retraining, port 8116)
  *   - GPU-Agnostic Training Engine (port 8120)
+ * NOT INTEGRATED (no such service exists — W19-F fail-closed NOT_IMPLEMENTED
+ * unless an explicit env URL is configured for a real deployment):
+ *   - NLU Intent Classifier (NLU_SERVICE_URL)
+ *   - Investment ML (INVESTMENT_ML_SERVICE_URL)
+ *   - Ray Training Pipeline (RAY_TRAINING_SERVICE_URL)
  *
  * Each endpoint calls the real Python service with proper error handling
  * and circuit-breaker fallback.
@@ -22,14 +24,32 @@ import { createAuditLog } from "../db.js";
 
 // ─── Service URLs ───────────────────────────────────────────────────────────
 
-const NLU_URL = process.env.NLU_SERVICE_URL || "http://localhost:8110";
+const NLU_URL = process.env.NLU_SERVICE_URL;
 const FX_FORECAST_URL = process.env.FX_FORECAST_SERVICE_URL || "http://localhost:8111";
 const GNN_FRAUD_URL = process.env.GNN_FRAUD_SERVICE_URL || "http://localhost:8112";
-const INVESTMENT_ML_URL = process.env.INVESTMENT_ML_SERVICE_URL || "http://localhost:8122";
-const RAY_TRAINING_URL = process.env.RAY_TRAINING_SERVICE_URL || "http://localhost:8114";
+// W19-F: NLU (was :8110), Investment-ML (was :8122) and Ray-Training (was
+// :8114) services DO NOT EXIST anywhere in the tree (audit
+// w19-middleware-db §3.5) — the localhost defaults made this router call
+// phantoms and surface circuit-breaker errors as if a real service were
+// merely down. Now env-gated fail-closed: dependent endpoints throw
+// NOT_IMPLEMENTED unless an explicit *_SERVICE_URL is configured for a real
+// deployment.
+const INVESTMENT_ML_URL = process.env.INVESTMENT_ML_SERVICE_URL;
+const RAY_TRAINING_URL = process.env.RAY_TRAINING_SERVICE_URL;
 const MLFLOW_REGISTRY_URL = process.env.MLFLOW_REGISTRY_SERVICE_URL || "http://localhost:8115";
 const ML_RETRAINING_URL = process.env.ML_RETRAINING_SERVICE_URL || "http://localhost:8116";
 const GPU_ENGINE_URL = process.env.GPU_ENGINE_SERVICE_URL || "http://localhost:8120";
+
+/** W19-F: fail-closed guard for services with no real deployment. */
+function requireMLServiceUrl(url: string | undefined, serviceName: string): string {
+  if (!url) {
+    throw new TRPCError({
+      code: "NOT_IMPLEMENTED",
+      message: `${serviceName} is not integrated: no such service exists in this deployment. Set its service URL env var only when a real service is deployed — this endpoint never fabricates ML results.`,
+    });
+  }
+  return url;
+}
 
 // ─── HTTP Client with Circuit Breaker ───────────────────────────────────────
 
@@ -123,7 +143,7 @@ const nluRouter = router({
         entities: Record<string, unknown>;
         all_scores?: Record<string, number>;
         latency_ms: number;
-      }>(NLU_URL, "/classify", "POST", {
+      }>(requireMLServiceUrl(NLU_URL, "NLU Intent Classifier"), "/classify", "POST", {
         text: input.text,
         include_all_scores: input.includeAllScores,
       });
@@ -135,15 +155,15 @@ const nluRouter = router({
       return callMLService<{
         results: Array<{ intent: string; confidence: number; entities: Record<string, unknown> }>;
         latency_ms: number;
-      }>(NLU_URL, "/batch", "POST", { texts: input.texts });
+      }>(requireMLServiceUrl(NLU_URL, "NLU Intent Classifier"), "/batch", "POST", { texts: input.texts });
     }),
 
   modelInfo: protectedProcedure.query(async () => {
-    return callMLService<Record<string, unknown>>(NLU_URL, "/model-info");
+    return callMLService<Record<string, unknown>>(requireMLServiceUrl(NLU_URL, "NLU Intent Classifier"), "/model-info");
   }),
 
   retrain: adminProcedure.mutation(async () => {
-    return callMLService<Record<string, unknown>>(NLU_URL, "/train", "POST");
+    return callMLService<Record<string, unknown>>(requireMLServiceUrl(NLU_URL, "NLU Intent Classifier"), "/train", "POST");
   }),
 });
 
@@ -256,7 +276,7 @@ const investmentMLRouter = router({
         expected_return_1y: number;
         investor_segment: number;
         latency_ms: number;
-      }>(INVESTMENT_ML_URL, "/risk-score", "POST", {
+      }>(requireMLServiceUrl(INVESTMENT_ML_URL, "Investment ML"), "/risk-score", "POST", {
         age: input.age,
         monthly_income_usd: input.monthlyIncomeUsd,
         monthly_expenses_usd: input.monthlyExpensesUsd,
@@ -269,11 +289,11 @@ const investmentMLRouter = router({
     }),
 
   modelInfo: protectedProcedure.query(async () => {
-    return callMLService<Record<string, unknown>>(INVESTMENT_ML_URL, "/model-info");
+    return callMLService<Record<string, unknown>>(requireMLServiceUrl(INVESTMENT_ML_URL, "Investment ML"), "/model-info");
   }),
 
   retrain: adminProcedure.mutation(async () => {
-    return callMLService<Record<string, unknown>>(INVESTMENT_ML_URL, "/train", "POST");
+    return callMLService<Record<string, unknown>>(requireMLServiceUrl(INVESTMENT_ML_URL, "Investment ML"), "/train", "POST");
   }),
 });
 
@@ -291,7 +311,7 @@ const rayTrainingRouter = router({
     }))
     .mutation(async ({ input }) => {
       return callMLService<{ job_id: string; status: string }>(
-        RAY_TRAINING_URL, "/submit-job", "POST", {
+        requireMLServiceUrl(RAY_TRAINING_URL, "Ray Training Pipeline"), "/submit-job", "POST", {
           model_name: input.modelName,
           algorithm: input.algorithm,
           task: "fraud_detection",
@@ -310,7 +330,7 @@ const rayTrainingRouter = router({
     }))
     .mutation(async ({ input }) => {
       return callMLService<{ job_id: string; status: string; trials: number }>(
-        RAY_TRAINING_URL, "/hyperparameter-search", "POST", {
+        requireMLServiceUrl(RAY_TRAINING_URL, "Ray Training Pipeline"), "/hyperparameter-search", "POST", {
           model_name: input.modelName,
           base_samples: input.baseSamples,
         },
@@ -318,17 +338,17 @@ const rayTrainingRouter = router({
     }),
 
   listJobs: adminProcedure.query(async () => {
-    return callMLService<Array<Record<string, unknown>>>(RAY_TRAINING_URL, "/jobs");
+    return callMLService<Array<Record<string, unknown>>>(requireMLServiceUrl(RAY_TRAINING_URL, "Ray Training Pipeline"), "/jobs");
   }),
 
   getJob: adminProcedure
     .input(z.object({ jobId: z.string() }))
     .query(async ({ input }) => {
-      return callMLService<Record<string, unknown>>(RAY_TRAINING_URL, `/jobs/${input.jobId}`);
+      return callMLService<Record<string, unknown>>(requireMLServiceUrl(RAY_TRAINING_URL, "Ray Training Pipeline"), `/jobs/${input.jobId}`);
     }),
 
   lakehouseIngest: adminProcedure.mutation(async () => {
-    return callMLService<Record<string, unknown>>(RAY_TRAINING_URL, "/lakehouse/ingest", "POST");
+    return callMLService<Record<string, unknown>>(requireMLServiceUrl(RAY_TRAINING_URL, "Ray Training Pipeline"), "/lakehouse/ingest", "POST");
   }),
 });
 
@@ -574,6 +594,9 @@ const mlHealthRouter = router({
 
     const results = await Promise.allSettled(
       services.map(async (svc) => {
+        // W19-F: services with no configured URL are reported honestly as
+        // not_configured instead of probing a localhost phantom.
+        if (!svc.url) return { ...svc, status: "not_configured", details: null };
         try {
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 3000);
@@ -600,6 +623,7 @@ const mlHealthRouter = router({
 
     const results = await Promise.allSettled(
       modelInfoEndpoints.map(async (ep) => {
+        if (!ep.url) return { name: ep.name, info: null, error: "not_configured" };
         try {
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 3000);

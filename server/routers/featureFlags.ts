@@ -10,6 +10,7 @@ import { getDb } from "../db.js";
 import {
   featureFlags, tenantFeatureFlags, userFeatureFlags,
   tenants, tenantUsers, whiteLabelConfigs,
+  corridorKillSwitches as corridorKillSwitchesTable,
 } from "../../drizzle/schema.js";
 import { eq, and, desc, asc, ilike, or, sql, inArray } from "drizzle-orm";
 import { billingTenants } from "../../drizzle/schema.js";
@@ -52,8 +53,11 @@ const PLATFORM_FLAGS = [
 ] as const;
 
 // ─── Corridor Kill Switches ──────────────────────────────────────────────────
-// In-memory corridor state for instant kill switches without DB writes.
-// Admin can disable/enable any corridor via API — no deploy required.
+// W19-A: corridor state is persisted in the corridor_kill_switches table
+// (migration 0098) so a kill survives restarts and is consistent across
+// replicas. The Map below is a short-TTL hot cache ONLY. Reads FAIL CLOSED:
+// if the cache has never been successfully warmed from PG, corridors are
+// treated as disabled rather than silently assumed live.
 
 interface CorridorState {
   enabled: boolean;
@@ -62,9 +66,57 @@ interface CorridorState {
   reason?: string;
 }
 
+const CORRIDOR_CACHE_TTL_MS = 30_000;
 const corridorKillSwitches = new Map<string, CorridorState>();
+let corridorCacheLoadedAt = 0; // 0 = never successfully loaded
+
+async function _corridorPersistenceFailure(op: string, err: unknown): Promise<void> {
+  const { logger } = await import("../_core/logger");
+  logger.error({ op, err: err instanceof Error ? err.message : String(err) },
+    `[FeatureFlags] corridor kill-switch persistence ${op} failed`);
+  try {
+    const { trackError } = await import("../middleware/businessMetrics.js");
+    trackError("persistence", `corridor_kill_switches_${op}`);
+  } catch { /* metrics must never break the hot path */ }
+}
+
+/** Refresh the corridor cache from PostgreSQL. Throws (fail-closed) on DB error. */
+export async function refreshCorridorStates(): Promise<Record<string, CorridorState>> {
+  const db = await getDb();
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable — corridor state unknown (fail-closed)" });
+  const rows = await db.select().from(corridorKillSwitchesTable);
+  corridorKillSwitches.clear();
+  for (const r of rows) {
+    corridorKillSwitches.set(r.corridor, {
+      enabled: r.enabled,
+      disabledAt: r.disabledAt ? (r.disabledAt instanceof Date ? r.disabledAt.toISOString() : String(r.disabledAt)) : undefined,
+      disabledBy: r.disabledBy ?? undefined,
+      reason: r.reason ?? undefined,
+    });
+  }
+  corridorCacheLoadedAt = Date.now();
+  return getCorridorStates();
+}
+
+async function _maybeRefreshCorridorCache(): Promise<void> {
+  if (Date.now() - corridorCacheLoadedAt < CORRIDOR_CACHE_TTL_MS) return;
+  try {
+    await refreshCorridorStates();
+  } catch (err) {
+    // Fail-closed read: stale/unknown state must not silently enable corridors.
+    _corridorPersistenceFailure("read", err);
+  }
+}
+
+// Warm the cache at module load (observed — never a silent swallow).
+_maybeRefreshCorridorCache().catch((err: unknown) => _corridorPersistenceFailure("boot_warm", err));
 
 export function isCorridorEnabled(from: string, to: string): boolean {
+  if (corridorCacheLoadedAt === 0) {
+    // Fail-closed: PG state never loaded — do not assume the corridor is live.
+    return false;
+  }
+  _maybeRefreshCorridorCache().catch((err: unknown) => _corridorPersistenceFailure("read", err));
   const key = `${from}-${to}`;
   const state = corridorKillSwitches.get(key);
   if (!state) return true;
@@ -866,7 +918,8 @@ export const whiteLabelRouter = router({
   // ─── Corridor Kill Switches ──────────────────────────────────────────────
   corridorStates: protectedProcedure
     .query(async () => {
-      return getCorridorStates();
+      // Fail-closed read: refresh from PG; throws when DB unavailable.
+      return refreshCorridorStates();
     }),
 
   disableCorridor: adminProcedure
@@ -877,12 +930,29 @@ export const whiteLabelRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const key = `${input.from}-${input.to}`;
-      corridorKillSwitches.set(key, {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable — kill switch NOT persisted (fail-closed)" });
+      const state: CorridorState = {
         enabled: false,
         disabledAt: new Date().toISOString(),
         disabledBy: String(ctx.user?.id ?? "admin"),
         reason: input.reason ?? "Kill switch activated",
-      });
+      };
+      // Persist first (fail-closed), then update the hot cache.
+      await db.insert(corridorKillSwitchesTable)
+        .values({
+          corridor: key,
+          enabled: false,
+          disabledAt: new Date(state.disabledAt!),
+          disabledBy: state.disabledBy,
+          reason: state.reason,
+          updatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: corridorKillSwitchesTable.corridor,
+          set: { enabled: false, disabledAt: new Date(state.disabledAt!), disabledBy: state.disabledBy, reason: state.reason, updatedAt: new Date() },
+        });
+      corridorKillSwitches.set(key, state);
       return { corridor: key, enabled: false };
     }),
 
@@ -893,6 +963,9 @@ export const whiteLabelRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const key = `${input.from}-${input.to}`;
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable — kill switch NOT persisted (fail-closed)" });
+      await db.delete(corridorKillSwitchesTable).where(eq(corridorKillSwitchesTable.corridor, key));
       corridorKillSwitches.delete(key);
       return { corridor: key, enabled: true };
     }),
@@ -903,6 +976,8 @@ export const whiteLabelRouter = router({
       to: z.string().length(3),
     }))
     .query(async ({ input }) => {
+      // Fail-closed read: force a fresh PG read; throws when DB unavailable.
+      await refreshCorridorStates();
       return { enabled: isCorridorEnabled(input.from, input.to) };
     }),
 });
