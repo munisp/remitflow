@@ -722,7 +722,7 @@ services:
     ports:
       - "8090:8090"
     environment:
-      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       PORT: "8090"
       RUST_LOG: "info"
     depends_on:
@@ -743,7 +743,7 @@ services:
     ports:
       - "8091:8091"
     environment:
-      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       PORT: "8091"
     depends_on:
       - postgres
@@ -764,7 +764,7 @@ services:
       # Host port moved 8092 → 8093 (collision with python-compliance-service host port).
       - "8093:8092"
     environment:
-      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379/0
       PORT: "8092"
     depends_on:
@@ -822,7 +822,7 @@ services:
       - "8121:8121"
     environment:
       - PORT=8121
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL is required}
     networks:
       - remitflow-network
     security_opt:
@@ -848,7 +848,7 @@ services:
       - "8122:8122"
     environment:
       - PORT=8122
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL is required}
       - NOTABENE_API_KEY=${NOTABENE_API_KEY:-}
       - SYGNA_API_KEY=${SYGNA_API_KEY:-}
       - VASP_DID=${VASP_DID:-did:ethr:0xRemitFlowVASP}
@@ -876,7 +876,7 @@ services:
     ports:
       - "8148:8148"
     environment:
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL is required}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - REDIS_URL=redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379
@@ -903,7 +903,7 @@ services:
     ports:
       - "8149:8149"
     environment:
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL is required}
       - REDIS_URL=redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379
     depends_on:
       - postgres
@@ -1166,6 +1166,259 @@ services:
     networks:
       - remitflow-internal
     profiles: [full, dapr]
+
+  # ─── W20 Lane D: compose coverage for previously undeployed persistence services ───
+  # All of the services below FAIL CLOSED at boot when DATABASE_URL is unset
+  # outside dev/test (see each service's persistence.go), so compose requires it.
+
+  # ── CBDC Service (Go) ──────────────────────────────────────────────────────
+  cbdc-service:
+    build:
+      context: ./services/cbdc-service
+      dockerfile: Dockerfile
+    image: remitflow/cbdc-service:latest
+    container_name: remitflow-cbdc-service
+    ports:
+      - "8097:8097"
+    environment:
+      PORT: "8097"
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      AUTO_MIGRATE: "1"
+      APP_ENV: ${APP_ENV:-production}
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - remitflow-internal
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8097/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    profiles: ["full"]
+
+  # ── Direct Debit Service (Go) ──────────────────────────────────────────────
+  direct-debit-service:
+    build:
+      context: ./services/direct-debit-service
+      dockerfile: Dockerfile
+    image: remitflow/direct-debit-service:latest
+    container_name: remitflow-direct-debit-service
+    ports:
+      - "8098:8098"
+    environment:
+      PORT: "8098"
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      AUTO_MIGRATE: "1"
+      APP_ENV: ${APP_ENV:-production}
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - remitflow-internal
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8098/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    profiles: ["full"]
+
+  # ── DeFi Yield (Go) ────────────────────────────────────────────────────────
+  go-defi-yield:
+    build:
+      context: ./services/go-defi-yield
+      dockerfile: Dockerfile
+    image: remitflow/go-defi-yield:latest
+    container_name: remitflow-go-defi-yield
+    ports:
+      - "8131:8131"
+    environment:
+      PORT: "8131"
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      AUTO_MIGRATE: "1"
+      APP_ENV: ${APP_ENV:-production}
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - remitflow-internal
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8131/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    profiles: ["full"]
+
+  # ── ODL Orchestrator (Go) ──────────────────────────────────────────────────
+  go-odl-orchestrator:
+    build:
+      context: ./services/go-odl-orchestrator
+      dockerfile: Dockerfile
+    image: remitflow/go-odl-orchestrator:latest
+    container_name: remitflow-go-odl-orchestrator
+    ports:
+      - "8250:8250"
+    environment:
+      PORT: "8250"
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      AUTO_MIGRATE: "1"
+      APP_ENV: ${APP_ENV:-production}
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - remitflow-internal
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8250/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    profiles: ["full"]
+
+  # ── Liquidity Manager (Go) ─────────────────────────────────────────────────
+  go-liquidity-manager:
+    build:
+      context: ./services/go-liquidity-manager
+      dockerfile: Dockerfile
+    image: remitflow/go-liquidity-manager:latest
+    container_name: remitflow-go-liquidity-manager
+    ports:
+      - "8133:8133"
+    environment:
+      PORT: "8133"
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      AUTO_MIGRATE: "1"
+      APP_ENV: ${APP_ENV:-production}
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - remitflow-internal
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8133/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    profiles: ["full"]
+
+  # ── Stablecoin Settlement (Go) — resolves the dangling depends_on/──────────
+  # ── SETTLEMENT_URL referenced by go-stablecoin-saga (lines ~794/799). ──────
+  # Container port pinned to 8109 to match SETTLEMENT_URL; host port 8215 to
+  # avoid the go-permify-service host binding on 8109.
+  go-stablecoin-settlement:
+    build:
+      context: ./services/go-stablecoin-settlement
+      dockerfile: Dockerfile
+    image: remitflow/go-stablecoin-settlement:latest
+    container_name: remitflow-go-stablecoin-settlement
+    ports:
+      - "8215:8109"
+    environment:
+      PORT: "8109"
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      AUTO_MIGRATE: "1"
+      APP_ENV: ${APP_ENV:-production}
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - remitflow-network
+      - remitflow-internal
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8109/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    profiles: ["stablecoin", "full"]
+
+  # ── Audit Sink (Go) — DL-25: consumes the audit Kafka topics into the ─────
+  # ── immutable hash-chained log (consumer group "go-audit-sink"). ──────────
+  # Container port 8180 (AUDIT_SINK_PORT default); host 8181 to avoid the
+  # go-notification-hub host binding on 8180 (docker-compose.middleware.yml).
+  go-audit-sink:
+    build:
+      context: ./services/go-audit-sink
+      dockerfile: Dockerfile
+    image: remitflow/go-audit-sink:latest
+    container_name: remitflow-go-audit-sink
+    ports:
+      - "8181:8180"
+    environment:
+      AUDIT_SINK_PORT: "8180"
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      AUTO_MIGRATE: "1"
+      APP_ENV: ${APP_ENV:-production}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      # Audit topics from server/middleware/kafka.ts KAFKA_TOPICS (DL-25).
+      AUDIT_KAFKA_TOPICS: ${AUDIT_KAFKA_TOPICS:-remitflow.audit.stream}
+      AUDIT_KAFKA_GROUP: ${AUDIT_KAFKA_GROUP:-go-audit-sink}
+    depends_on:
+      - postgres
+      - kafka
+    restart: unless-stopped
+    networks:
+      - remitflow-internal
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8180/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    profiles: ["full"]
+
+  # ── Python Reconciliation Engine — HTTP fallback target for the ───────────
+  # ── fund-flow DLQ (PYTHON_RECONCILIATION_URL, /dlq/submit). ───────────────
+  # Container port 8170 (its default); host 8171 to avoid the
+  # go-corridor-engine host binding on 8170 (docker-compose.middleware.yml).
+  python-reconciliation-engine:
+    build:
+      context: ./services/python-reconciliation-engine
+      dockerfile: Dockerfile
+    image: remitflow/python-reconciliation-engine:latest
+    container_name: remitflow-python-reconciliation-engine
+    ports:
+      - "8171:8170"
+    environment:
+      PORT: "8170"
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      TEMPORAL_HOST_PORT: ${TEMPORAL_HOST_PORT:-temporal:7233}
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    networks:
+      - remitflow-internal
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8170/health').status==200 else 1)\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    profiles: ["full"]
 
 volumes:
   redis-data:

@@ -483,6 +483,11 @@ func main() {
 	log.Printf("[go-audit-sink] Storage backend: %s", getEnvOrDefault("AUDIT_STORAGE", "memory"))
 	log.Printf("[go-audit-sink] HMAC chain verification: enabled")
 
+	// DL-25: consume the audit Kafka topics into the immutable log.
+	consumerCtx, stopConsumer := context.WithCancel(context.Background())
+	defer stopConsumer()
+	go startKafkaConsumer(consumerCtx)
+
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           mux,

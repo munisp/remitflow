@@ -39,6 +39,12 @@ import { podLifecycleMiddleware, recordStartupComplete, recordShutdownStart, rec
 import { registerProductionHardeningRoutes } from "./productionHardening";
 import { ensureFeatureTables } from "./featurePersistence";
 import { registerRestCompatibilityProxy } from "./restCompatibilityProxy";
+import { reportWriteThroughFailure } from "../lib/writeThroughTelemetry";
+// W20-F (integration contract, SPEC-wave20): worker/boot-task wiring for
+// modules delivered by Lanes A (pendingDeliveryWorker) and C
+// (fundFlowHardening). Imported exactly as named; calls are guarded below.
+import { startPendingDeliveryWorker } from "./pendingDeliveryWorker";
+import { resumeIncompleteSagas } from "./fundFlowHardening";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -831,7 +837,7 @@ function requireScheduledTaskAuth(req: express.Request, res: express.Response): 
           await notifyOwner({
             title: `Monthly Payout Reports Generated — ${periodYear}-${String(periodMonth).padStart(2, "0")}`,
             content: `Generated ${reportsGenerated} revenue share reports for ${periodMonth}/${periodYear}. ${activeAgreements.length} active agreements processed. ${notificationsSent} partner notifications sent.`,
-          }).catch(() => {});
+          }).catch((err) => reportWriteThroughFailure("monthly_payout_owner_notify", err));
         }
       } catch (dbErr: any) {
         logger.warn({ data: dbErr.message }, "[MonthlyPayouts] DB error (non-fatal):");
@@ -899,7 +905,7 @@ function requireScheduledTaskAuth(req: express.Request, res: express.Response): 
       await notifyOwner({
         title: "Daily Savings Interest Accrued",
         content: `Accrued interest on ${accrued} savings accounts. Total interest paid: ${totalInterestPaid.toFixed(2)} USD. Date: ${new Date().toISOString().split("T")[0]}`,
-      }).catch(() => {});
+      }).catch((err) => reportWriteThroughFailure("savings_interest_owner_notify", err));
 
       logger.info(`[SavingsInterest] Accrued interest on ${accrued} accounts, total: ${totalInterestPaid.toFixed(2)}`);
       return res.json({
@@ -960,7 +966,7 @@ function requireScheduledTaskAuth(req: express.Request, res: express.Response): 
             logger.info(`[FX Alert] Triggered for user ${alert.userId}: ${pairLabel} = ${currentRate} (target: ${alert.targetRate})`);
             // Web Push (background, even when app is closed)
             const { sendPushToUser, NotificationTemplates } = await import("../pushNotifications.js");
-            sendPushToUser(alert.userId, NotificationTemplates.fxRateAlert(pairLabel, rateStr, targetStr)).catch(() => {});
+            sendPushToUser(alert.userId, NotificationTemplates.fxRateAlert(pairLabel, rateStr, targetStr)).catch((err) => reportWriteThroughFailure("fx_alert_push_notify", err));
             // Email notification
             const { sendEmail } = await import("../email.service.js");
             const { sql: sqlTag } = await import("drizzle-orm");
@@ -971,7 +977,7 @@ function requireScheduledTaskAuth(req: express.Request, res: express.Response): 
                 to: u.email,
                 subject: `FX Alert: ${pairLabel} has reached your target`,
                 html: `<p>Hi ${u.name ?? "there"},</p><p>Your FX rate alert has been triggered!</p><ul><li><strong>Pair:</strong> ${pairLabel}</li><li><strong>Direction:</strong> ${alert.direction === "above" ? "Rate went above" : "Rate went below"} ${targetStr}</li><li><strong>Current rate:</strong> ${rateStr}</li></ul><p>Log in to RemitFlow to send money now and lock in this rate.</p>`,
-              }).catch(() => {});
+              }).catch((err) => reportWriteThroughFailure("fx_alert_email_notify", err));
             }
             // SSE in-app notification
             const { broadcastUserEvent } = await import("../sse.service.js");
@@ -1388,6 +1394,23 @@ function requireScheduledTaskAuth(req: express.Request, res: express.Response): 
       startOutboxWorker();
       logger.info("[Outbox] Worker started at boot");
     }).catch(err => logger.error({ errMsg: err?.message }, "[Outbox] Worker init FAILED — outbox events will accumulate unpublished:"));
+    // ── W20 boot registrations (SPEC-wave20 integration contract) ────────────
+    // Fail-open telemetry: worker start failures are logged loudly (never
+    // silent, never block boot). Modules delivered by Lanes A and C.
+    try {
+      startPendingDeliveryWorker();
+      logger.info("[W20/PendingDelivery] Worker started at boot — pending airtime/bills deliveries will be fulfilled or auto-refunded");
+    } catch (err: unknown) {
+      logger.error({ errMsg: err instanceof Error ? err.message : String(err) }, "[W20/PendingDelivery] Worker start FAILED — pending deliveries require manual reconciliation:");
+      reportWriteThroughFailure("boot_pending_delivery_worker", err, "error");
+    }
+    try {
+      await resumeIncompleteSagas();
+      logger.info("[W20/SagaResume] Incomplete saga scan complete");
+    } catch (err: unknown) {
+      logger.error({ errMsg: err instanceof Error ? err.message : String(err) }, "[W20/SagaResume] resumeIncompleteSagas FAILED — in-progress sagas require manual reconciliation:");
+      reportWriteThroughFailure("boot_saga_resume", err, "error");
+    }
     // ── W10 boot registrations (SPEC-wave10) — all guarded, non-blocking ─────
     // C2: daily AR aging schedule (Temporal cron `0 6 * * *`, queue ar-aging).
     // If Temporal is unavailable the schedule is simply not registered — the

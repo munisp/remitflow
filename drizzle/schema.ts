@@ -653,6 +653,64 @@ export const idempotencyKeys = pgTable("idempotency_keys", {
   index("idempotencyKeys_expiresAt_idx").on(t.expiresAt),
 ]);
 
+// ─── W20-A (DL-23): Payment Idempotency Keys ─────────────────────────────────
+// Durable, transaction-integrated idempotency for money mutations. Unlike
+// `idempotency_keys` above (gateway-scoped, unused by the money routers), one
+// row here is claimed with INSERT ... ON CONFLICT DO NOTHING INSIDE the same
+// db.transaction as the debit, then marked completed with the serialized
+// response before commit — a crash anywhere rolls claim + debit back together,
+// and a replayed request is served the recorded responseJson (or 409 while the
+// first attempt is still in flight). UNIQUE(tenant_id, key) is the arbiter.
+export const paymentIdempotencyKeys = pgTable("payment_idempotency_keys", {
+  id: serial("id").primaryKey(),
+  // Platform default tenant is 1 (matches routers.ts:4601 convention); NOT
+  // NULL so the unique claim below cannot be bypassed via NULL tenant rows.
+  tenantId: integer("tenant_id").notNull().default(1).references(() => tenants.id),
+  key: varchar("key", { length: 200 }).notNull(),
+  userId: integer("user_id").notNull(),
+  procedure: varchar("procedure", { length: 100 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("in_progress"),
+  responseJson: jsonb("response_json"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  completedAt: timestamp("completed_at"),
+}, (t) => [
+  uniqueIndex("payment_idempotency_keys_tenant_key_uidx").on(t.tenantId, t.key),
+  index("payment_idempotency_keys_user_idx").on(t.userId),
+]);
+
+// ─── W20-A (DL-24): Pending Deliveries ───────────────────────────────────────
+// Airtime/bill payments debit the wallet first and record the transaction as
+// PENDING_DELIVERY; one row here tracks provider fulfillment. The
+// pendingDeliveryWorker (server/_core/pendingDeliveryWorker.ts) drives each
+// row to a terminal state: fulfilled by a provider adapter when a real one is
+// configured (none exists today — verified by grep), else auto-refunded after
+// MAX_ATTEMPTS, with refund + status transition + audit row in ONE
+// db.transaction. Every transition is audited; the worker fails closed.
+export const pendingDeliveries = pgTable("pending_deliveries", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().default(1),
+  userId: integer("user_id").notNull(),
+  kind: varchar("kind", { length: 20 }).notNull(), // 'airtime' | 'bill'
+  reference: varchar("reference", { length: 100 }).notNull(), // transactions.reference
+  currency: varchar("currency", { length: 8 }).notNull(),
+  amount: varchar("amount", { length: 40 }).notNull(), // decimal-as-string (wallets.balance convention)
+  provider: varchar("provider", { length: 100 }),
+  destination: varchar("destination", { length: 200 }), // phone number / bill account number
+  status: varchar("status", { length: 20 }).notNull().default("pending"), // pending | fulfilled | refunded | failed
+  attempts: integer("attempts").notNull().default(0),
+  lastAttemptAt: timestamp("last_attempt_at"),
+  lastError: text("last_error"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  resolvedAt: timestamp("resolved_at"),
+}, (t) => [
+  uniqueIndex("pending_deliveries_reference_uidx").on(t.reference),
+  index("pending_deliveries_status_idx").on(t.status),
+  index("pending_deliveries_user_idx").on(t.userId),
+]);
+
 // ─── Outbox Events ────────────────────────────────────────────────────────────
 export const outboxEvents = pgTable("outbox_events", {
   id: serial("id").primaryKey(),

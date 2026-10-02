@@ -179,10 +179,29 @@ impl AppState {
 
 // ── PostgreSQL persistence (boot-load + write-through) ──────────────────────
 
+
+/// dev_env reports whether the process runs in a dev/test environment where
+/// volatile in-memory mode is tolerated. Outside dev/test the service fails
+/// closed (W20 DL-12/13/14) instead of silently losing durable state.
+fn dev_env() -> bool {
+    for k in ["APP_ENV", "ENV", "GO_ENV", "RUST_ENV"] {
+        if let Ok(v) = std::env::var(k) {
+            match v.trim().to_lowercase().as_str() {
+                "dev" | "development" | "test" => return true,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 async fn init_db() -> Option<PgPool> {
     let db_url = match std::env::var("DATABASE_URL") {
         Ok(u) if !u.is_empty() => u,
         _ => {
+            if !dev_env() {
+                panic!("DATABASE_URL is required outside dev/test — refusing to boot in volatile in-memory mode (fail closed)");
+            }
             eprintln!("[TransactionGuard] WARN: DATABASE_URL unset — DEGRADED in-memory mode; receipts/double-spend state will NOT survive restart");
             return None;
         }

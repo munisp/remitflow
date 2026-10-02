@@ -12,6 +12,7 @@ import {
   referrals, savingsGoals, transactions, users, virtualAccounts, wallets,
   posTerminals, agentAccounts, partnerWebhooks as webhooksTable,
   cbdcWallets, africbdcTransfers, idempotencyKeys,
+  paymentIdempotencyKeys, pendingDeliveries,
 } from "../drizzle/schema";
 import {
   createAuditLog, createTransaction, getAuditLogsByUserId, getBatchPaymentsByUserId,
@@ -37,7 +38,7 @@ import { featureFlagsRouter, tenantsRouter, whiteLabelRouter } from "./routers/f
 import { fetchLiveRates } from "./fx-rates.service";
 import { startTransferWorkflow, startKYCWorkflow } from "./temporal/client";
 import { publishPaymentInitiated, publishTransactionEvent, publishKYCEvent, publishRiskScoreEvent, publishAuditEvent } from "./middleware/kafka";
-import { auditCoreOperation, CORE_TOPICS, generateOpRef, generateIdempotencyKey, checkIdempotency, claimIdempotency, storeIdempotency } from "./middleware/coreAtomicity";
+import { auditCoreOperation, CORE_TOPICS, generateOpRef, generateIdempotencyKey, checkIdempotency, claimIdempotency, releaseIdempotencyClaim, storeIdempotency } from "./middleware/coreAtomicity";
 // W19-F: TigerBeetle write-through for money paths missing ledger dual-write
 // (fail-open emit; PG stays source of truth; outbox fallback inside helper).
 import { recordTigerBeetleDualWrite } from "./_core/fundFlowHardening";
@@ -448,6 +449,72 @@ const CURRENCY_META: Record<string, { symbol: string; flag: string; name: string
 function formatWallet(w: any) {
   const meta = CURRENCY_META[w.currency] ?? { symbol: w.currency, flag: "\ud83d\udcb1", name: w.currency };
   return { ...w, balance: Number(w.balance), lockedBalance: Number(w.lockedBalance ?? 0), symbol: meta.symbol, flag: meta.flag, name: meta.name, change: "0.00" };
+}
+
+// ─── W20-A (DL-23): Durable payment idempotency ──────────────────────────────
+// Money mutations below (wallet.withdraw, savings withdraw/topups,
+// airtime.topup, bills.pay, qr.pay, transfer.send fallback) are protected by
+// TWO layers:
+//   1. claimIdempotency/storeIdempotency — cross-instance Redis claim (fast
+//      path; fails closed in production when Redis is down).
+//   2. withPaymentIdempotency — durable PG claim: the payment_idempotency_keys
+//      row is inserted in the SAME db.transaction as the debit
+//      (INSERT ... ON CONFLICT DO NOTHING; UNIQUE(tenant_id, key) arbitrates).
+//      A lost claim replays the stored response (status='completed') or 409s
+//      while the first attempt is in flight. The row is marked completed with
+//      the serialized response inside the same transaction, so a crash rolls
+//      claim + debit back together and no money moves without a durable record.
+//
+// Key derivation when the client does NOT supply idempotencyKey:
+//   sha256(userId : PROCEDURE : canonical params : hour-bucket)
+// via generateIdempotencyKey + paymentHourBucket(). The hour bucket is the
+// ONLY time component — never a bare Date.now(): identical requests submitted
+// within the same hour are deduped (double-tap / rapid retry), while a
+// deliberately repeated operation an hour later is treated as new. Clients
+// needing a longer dedupe window must supply an explicit idempotencyKey.
+function paymentHourBucket(): string {
+  return String(Math.floor(Date.now() / 3_600_000));
+}
+
+function paymentRequestHash(parts: Record<string, unknown>): string {
+  return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+}
+
+/**
+ * Claim-or-replay + execute + mark-completed, all in ONE db.transaction.
+ * `execute(tx)` performs the money mutation and returns the response to be
+ * serialized onto the key row. Returns the fresh or replayed response.
+ * Throws TRPCError CONFLICT when a prior attempt with this key is still
+ * in flight (never double-executes).
+ */
+async function withPaymentIdempotency<T>(opts: {
+  db: any;
+  userId: number;
+  procedure: string;
+  key: string;
+  requestHash: string;
+  execute: (tx: any) => Promise<T>;
+}): Promise<T> {
+  return await opts.db.transaction(async (tx: any) => {
+    const claimed = await tx.insert(paymentIdempotencyKeys).values({
+      key: opts.key, userId: opts.userId, procedure: opts.procedure,
+      requestHash: opts.requestHash, status: "in_progress",
+    }).onConflictDoNothing().returning({ id: paymentIdempotencyKeys.id });
+    if (claimed.length === 0) {
+      const [existing] = await tx.select().from(paymentIdempotencyKeys)
+        .where(and(eq(paymentIdempotencyKeys.key, opts.key), eq(paymentIdempotencyKeys.userId, opts.userId)))
+        .limit(1);
+      if (existing && existing.status === "completed" && existing.responseJson != null) {
+        return existing.responseJson as T;
+      }
+      throw new TRPCError({ code: "CONFLICT", message: `Duplicate ${opts.procedure} request already in progress — retry later (idempotency key ${opts.key.slice(0, 16)}…)` });
+    }
+    const result = await opts.execute(tx);
+    await tx.update(paymentIdempotencyKeys)
+      .set({ status: "completed", responseJson: result as any, completedAt: new Date() })
+      .where(eq(paymentIdempotencyKeys.id, claimed[0].id));
+    return result;
+  });
 }
 
 // ─── Router ───────────────────────────────────────────────────────────────────
@@ -1289,8 +1356,17 @@ export const appRouter = router({
       broadcastUserEvent(ctx.user.id, { type: "transfer_received", payload: { title: "Flutterwave Top-up Successful", message: `Your ${input.walletCurrency} wallet has been credited via Flutterwave`, amount: ver.data.amount, currency: input.walletCurrency } });
       return { success: true, newBalance: Number(newBalance), sandboxMode: false };
     }),
-    withdraw: walletWithdrawProcedure.input(z.object({ currency: z.string(), amount: z.number().positive().max(10_000_000), bankAccount: z.string().optional(), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
+    withdraw: walletWithdrawProcedure.input(z.object({ currency: z.string(), amount: z.number().positive().max(10_000_000), bankAccount: z.string().optional(), totpCode: z.string().regex(/^\d{6}$/).optional(), idempotencyKey: z.string().max(200).optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // W20-A (DL-23): durable idempotency. When the client omits the key, it
+      // is derived server-side as sha256(userId:WALLET_WITHDRAW:currency:
+      // amount:bankAccount:hour-bucket) — see paymentHourBucket() note; never
+      // Date.now()-only. Layer 1: cross-instance Redis claim; layer 2: PG
+      // claim row inserted in the SAME db.transaction as the debit below.
+      const wdIdempKey = input.idempotencyKey ?? generateIdempotencyKey(ctx.user!.id, "WALLET_WITHDRAW", input.currency, input.amount.toString(), input.bankAccount ?? "", paymentHourBucket());
+      const wdCached = await claimIdempotency(wdIdempKey);
+      if (wdCached.cached) return wdCached.result as any;
+      try {
       // ─── D4: TOTP step-up for full-balance bank cash-out (Contract 2) ────────
       const { getTotpEnrollment, verifyTOTP } = await import("./totp");
       const enrollmentW = await getTotpEnrollment(ctx.user!.id);
@@ -1317,21 +1393,32 @@ export const appRouter = router({
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user!.id), eq(wallets.currency, input.currency))).limit(1);
       if (!wallet) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
-      const { ref: wdRef, newBalance: wdBalance } = await db.transaction(async (tx: any) => {
-        const [updWithdraw] = await tx.update(wallets)
-          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
-          .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
-          .returning({ balance: wallets.balance });
-        if (!updWithdraw) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
-        const wRef = `WD-${ctx.user!.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
-        await tx.insert(transactions).values({
-          userId: ctx.user!.id, type: "withdrawal" as any, status: "completed" as any,
-          fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0",
-          description: "Wallet withdrawal", reference: wRef,
-        });
-        return { ref: wRef, newBalance: updWithdraw.balance };
+      const wdResult = await withPaymentIdempotency<{ success: true; reference: string; newBalance: number }>({
+        db, userId: ctx.user!.id, procedure: "wallet.withdraw", key: wdIdempKey,
+        requestHash: paymentRequestHash({ op: "WALLET_WITHDRAW", currency: input.currency, amount: input.amount, bankAccount: input.bankAccount ?? "" }),
+        execute: async (tx: any) => {
+          const [updWithdraw] = await tx.update(wallets)
+            .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
+            .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+            .returning({ balance: wallets.balance });
+          if (!updWithdraw) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+          const wRef = `WD-${ctx.user!.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
+          await tx.insert(transactions).values({
+            userId: ctx.user!.id, type: "withdrawal" as any, status: "completed" as any,
+            fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0",
+            description: "Wallet withdrawal", reference: wRef, idempotencyKey: wdIdempKey,
+          } as any);
+          return { success: true as const, reference: wRef, newBalance: Number(updWithdraw.balance) };
+        },
       });
-      return { success: true, reference: wdRef, newBalance: Number(wdBalance) };
+      storeIdempotency(wdIdempKey, wdResult);
+      return wdResult;
+      } catch (wdErr) {
+        // Release the Redis claim on failure so an honest retry is not denied
+        // as "in flight" for the claim TTL (the PG claim rolled back with tx).
+        await releaseIdempotencyClaim(wdIdempKey);
+        throw wdErr;
+      }
     }),
     create: protectedProcedure.input(z.object({ currency: z.string() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
@@ -1416,6 +1503,15 @@ export const appRouter = router({
 
     send: transferSendProcedure.input(z.object({ fromCurrency: z.string().max(8), amount: z.number().positive().max(10_000_000), toCurrency: z.string().max(8), recipientName: z.string().min(1).max(128).trim(), recipientAccount: z.string().max(64).optional(), recipientEmail: z.string().email().max(320).optional(), recipientBank: z.string().max(128).optional(), recipientCountry: z.string().max(64).optional(), deliveryMethod: z.string().max(32).optional(), description: z.string().max(500).optional(), idempotencyKey: z.string().max(200).optional(), totpCode: z.string().length(6).optional(), rateLockToken: z.string().max(64).optional() })).mutation(async ({ ctx, input }) => {
       // ─── 2FA enforcement for high-value transfers (> $1,000 USD equivalent) ───
+      // W20-A (DL-23): the transfer idempotency key is REQUIRED to be
+      // deterministic — client-supplied, or derived server-side as
+      // sha256(userId:TRANSFER_SEND:fromCurrency:toCurrency:amount:recipient:
+      // corridor:hour-bucket) — see paymentHourBucket() (hour-bucketed, NEVER
+      // bare Date.now()). The previous `TRF${Date.now()}` fallbacks (gRPC
+      // fraud transactionId, compliance transferRef, ledger idempotencyKey)
+      // made every retry a brand-new, undedupable operation and are removed;
+      // ALL downstream uses share this single key.
+      const transferIdempKey = input.idempotencyKey ?? generateIdempotencyKey(ctx.user!.id, "TRANSFER_SEND", input.fromCurrency, input.toCurrency, input.amount.toString(), input.recipientAccount ?? input.recipientName, input.recipientCountry ?? "", paymentHourBucket());
       const HIGH_VALUE_THRESHOLD_USD = 1000;
       const ratesFor2fa = await getLiveRates("USD");
       const fromRateUsd = ratesFor2fa[input.fromCurrency] ?? 1;
@@ -1511,7 +1607,7 @@ export const appRouter = router({
       const [fraudCheck, grpcFraud] = await Promise.all([
         checkFraud({ userId: ctx.user!.id, amount: input.amount, currency: input.fromCurrency, toCurrency: input.toCurrency, beneficiaryName: input.recipientName, beneficiaryAccount: input.recipientAccount }),
         grpcFraudCheck({
-          transactionId: input.idempotencyKey ?? `TRF${Date.now()}`,
+          transactionId: transferIdempKey,
           userId: String(ctx.user!.id),
           amount: String(input.amount),
           currency: input.fromCurrency,
@@ -1534,7 +1630,7 @@ export const appRouter = router({
       const goRateLimit = await goCheckRateLimit(`transfer:user:${ctx.user!.id}`, 10, 60);
       if (!goRateLimit.allowed) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: `Transfer rate limit exceeded. Retry in ${Math.ceil(goRateLimit.retryAfterMs / 1000)}s.` });
       // 2. Python compliance service: AML/KYC rules engine
-      const transferRef = input.idempotencyKey ?? `TRF${Date.now()}`;
+      const transferRef = transferIdempKey;
       // 2a. Python anomaly detector: ML-based ATO/BEC/round-tripping detection (parallel)
       const anomalyPromise = detectAnomaly({
         userId: ctx.user!.id,
@@ -1635,7 +1731,8 @@ export const appRouter = router({
           });
         }
       }
-      const idempotencyKey = input.idempotencyKey ?? `TRF-${ctx.user!.id}-${Date.now()}`;
+      // W20-A: single deterministic key (derived at handler entry — no Date.now fallback).
+      const idempotencyKey = transferIdempKey;
       // ─── Idempotency guard: reject duplicate transfers within 24h window ──────
       if (input.idempotencyKey) {
         const { checkIdempotency } = await import("./fraud.service");
@@ -1644,6 +1741,12 @@ export const appRouter = router({
           throw new TRPCError({ code: "CONFLICT", message: `Duplicate transfer detected (idempotency key already used within 24h). Existing transaction ID: ${idempCheck.existingTxId}` });
         }
       }
+      // W20-A (DL-23): cross-instance Redis claim BEFORE any debit attempt
+      // (Temporal saga or direct-DB fallback) — a replay returns the recorded
+      // outcome; an in-flight duplicate is denied (409), never double-executed.
+      const transferCached = await claimIdempotency(transferIdempKey);
+      if (transferCached.cached) return transferCached.result as any;
+      try {
       // ─── Attempt Temporal workflow (full 6-step saga) ─────────────────────────
       const temporalResult = await startTransferWorkflow({
         userId: ctx.user!.id,
@@ -1666,7 +1769,7 @@ export const appRouter = router({
         logger.info(`[Transfer] Temporal workflow started: ${temporalResult.workflowId}`);
         // PBAC daily-spend accounting (otherwise the tier daily cap never accumulates)
         recordSpend(ctx.user!.id, Math.round(amountInUsd * 100));
-        return {
+        const temporalResponse = {
           success: true,
           reference: temporalResult.workflowId,
           toAmount: Math.round(toAmount * 100) / 100,
@@ -1676,6 +1779,9 @@ export const appRouter = router({
           orchestrated: true,
           mlRisk: anomalyResult ? { isAnomaly: anomalyResult.isAnomaly, confidence: anomalyResult.confidence, requiresReview: anomalyResult.isAnomaly && anomalyResult.confidence > 0.65 } : null,
         };
+        // W20-A: publish the replayable outcome onto the claimed key.
+        storeIdempotency(transferIdempKey, temporalResponse);
+        return temporalResponse;
       }
 
       // ─── Fallback: direct DB execution (Temporal unavailable) ─────────────────
@@ -1686,7 +1792,13 @@ export const appRouter = router({
       const totalDeduct = input.amount + fee;
       if (Number(wallet.balance) < totalDeduct) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
       // ─── Wrap wallet debit + transaction record in a DB transaction ───────────
-      const { ref, newBalance } = await db.transaction(async (tx: any) => {
+      // W20-A (DL-23): the durable PG idempotency claim row joins this same
+      // transaction (claim-or-replay / 409-in-progress; crash rolls claim +
+      // debit back together).
+      const { ref, newBalance } = await withPaymentIdempotency<{ ref: string; newBalance: string }>({
+        db, userId: ctx.user!.id, procedure: "transfer.send", key: transferIdempKey,
+        requestHash: paymentRequestHash({ op: "TRANSFER_SEND", fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, amount: input.amount, recipientAccount: input.recipientAccount ?? input.recipientName, recipientCountry: input.recipientCountry ?? "" }),
+        execute: async (tx: any) => {
         const [updTransfer] = await tx.update(wallets)
           .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${totalDeduct} AS VARCHAR)` })
           .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${totalDeduct}`))
@@ -1703,9 +1815,10 @@ export const appRouter = router({
           recipientBank: input.recipientBank, recipientCountry: input.recipientCountry,
           channel: input.deliveryMethod ?? "bank_transfer",
           metadata: input.deliveryMethod ? JSON.stringify({ deliveryMethod: input.deliveryMethod }) : undefined,
-          reference: txRef,
-        });
+          reference: txRef, idempotencyKey: transferIdempKey,
+        } as any);
         return { ref: txRef, newBalance: updTransfer.balance };
+        },
       });
       // PBAC daily-spend accounting (otherwise the tier daily cap never accumulates)
       recordSpend(ctx.user!.id, Math.round(amountInUsd * 100));
@@ -1846,7 +1959,16 @@ export const appRouter = router({
           }
         })
       ).catch(err => logger.error({ err }, "[ComplianceFiling] Auto-filing module failed"));
-      return { success: true, reference: ref, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, fxRate, orchestrated: false, mlRisk: anomalyResult ? { isAnomaly: anomalyResult.isAnomaly, confidence: anomalyResult.confidence, requiresReview: anomalyResult.isAnomaly && anomalyResult.confidence > 0.65 } : null };
+      const fallbackResponse = { success: true, reference: ref, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, fxRate, orchestrated: false, mlRisk: anomalyResult ? { isAnomaly: anomalyResult.isAnomaly, confidence: anomalyResult.confidence, requiresReview: anomalyResult.isAnomaly && anomalyResult.confidence > 0.65 } : null };
+      // W20-A: publish the replayable outcome onto the claimed key.
+      storeIdempotency(transferIdempKey, fallbackResponse);
+      return fallbackResponse;
+      } catch (transferErr) {
+        // Release the Redis claim on failure so an honest retry is not denied
+        // as "in flight" for the claim TTL (the PG claim rolled back with tx).
+        await releaseIdempotencyClaim(transferIdempKey);
+        throw transferErr;
+      }
     }),
     quote: protectedProcedure.input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) })).query(async ({ ctx, input }) => {
       const { rates, source: rateSource, stale: ratesStale } = await getLiveRatesDetailed("USD"); const fromRate = rates[input.fromCurrency] ?? 1; const toRate = rates[input.toCurrency] ?? 1; const fxRate = toRate / fromRate;
@@ -2146,8 +2268,16 @@ export const appRouter = router({
       storeIdempotency(savDepIdempKey, savDepResult);
       return savDepResult;
     }),
-    withdraw: protectedProcedure.input(z.object({ amount: z.number().positive().max(1_000_000), goalId: z.number().optional(), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
+    withdraw: protectedProcedure.input(z.object({ amount: z.number().positive().max(1_000_000), goalId: z.number().optional(), totpCode: z.string().regex(/^\d{6}$/).optional(), idempotencyKey: z.string().max(200).optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+      // W20-A (DL-23): durable idempotency — server-derived key
+      // sha256(userId:SAVINGS_WITHDRAW:amount:goalId:hour-bucket) when the
+      // client omits one (see paymentHourBucket note; never Date.now()-only).
+      // Redis claim first; PG claim row + debit commit in ONE db.transaction.
+      const savWdIdempKey = input.idempotencyKey ?? generateIdempotencyKey(ctx.user.id, "SAVINGS_WITHDRAW", input.amount.toString(), String(input.goalId ?? "flex"), paymentHourBucket());
+      const savWdCached = await claimIdempotency(savWdIdempKey);
+      if (savWdCached.cached) return savWdCached.result as any;
+      try {
       // TOTP step-up — funds leave the savings vault back to the wallet (Contract 2).
       const { getTotpEnrollment, verifyTOTP } = await import("./totp");
       const enrollmentS = await getTotpEnrollment(ctx.user.id);
@@ -2180,7 +2310,10 @@ export const appRouter = router({
         // statements — a crash between them minted the wallet credit without
         // the goal debit, and concurrent withdrawals lost each other's value.
         const newAmt = Number((target as any).currentAmount) - input.amount;
-        await db.transaction(async (tx: any) => {
+        const goalWdResult = await withPaymentIdempotency<{ success: true; withdrawn: number; remainingBalance: number }>({
+          db, userId: ctx.user.id, procedure: "savings.withdraw", key: savWdIdempKey,
+          requestHash: paymentRequestHash({ op: "SAVINGS_WITHDRAW", amount: input.amount, goalId: input.goalId }),
+          execute: async (tx: any) => {
           const [debitedGoal] = await tx.update(savingsGoals)
             .set({
               currentAmount: sql`CAST(CAST(${savingsGoals.currentAmount} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)`,
@@ -2201,10 +2334,13 @@ export const appRouter = router({
           await tx.insert(transactions).values({
             userId: ctx.user.id, type: "receive" as any, status: "completed" as any,
             fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0",
-            description: `Savings withdrawal from goal: $${input.amount}`,
-          });
+            description: `Savings withdrawal from goal: $${input.amount}`, idempotencyKey: savWdIdempKey,
+          } as any);
+          return { success: true as const, withdrawn: input.amount, remainingBalance: newAmt };
+          },
         });
-        return { success: true, withdrawn: input.amount, remainingBalance: newAmt };
+        storeIdempotency(savWdIdempKey, goalWdResult);
+        return goalWdResult;
       }
       const totalFlex = withdrawableGoals.reduce((s: number, g: any) => s + Number(g.currentAmount), 0);
       if (input.amount > totalFlex) throw new TRPCError({ code: 'BAD_REQUEST', message: `Insufficient withdrawable balance. Available: $${totalFlex.toFixed(2)}` });
@@ -2213,7 +2349,10 @@ export const appRouter = router({
       // the ledger record commit in ONE db.transaction (any failure rolls
       // everything back; no partial vault-to-wallet state).
       const savingsWdRef = generateOpRef("SAVWD", ctx.user.id);
-      await db.transaction(async (tx: any) => {
+      const flexWdResult = await withPaymentIdempotency<{ success: true; withdrawn: number }>({
+        db, userId: ctx.user.id, procedure: "savings.withdraw", key: savWdIdempKey,
+        requestHash: paymentRequestHash({ op: "SAVINGS_WITHDRAW", amount: input.amount, goalId: null }),
+        execute: async (tx: any) => {
         let remaining = input.amount;
         for (const g of withdrawableGoals) {
           if (remaining <= 0) break;
@@ -2241,11 +2380,20 @@ export const appRouter = router({
         await tx.insert(transactions).values({
           userId: ctx.user.id, type: "receive" as any, status: "completed" as any,
           fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0",
-          description: `Savings withdrawal: $${input.amount}`, reference: savingsWdRef,
-        });
+          description: `Savings withdrawal: $${input.amount}`, reference: savingsWdRef, idempotencyKey: savWdIdempKey,
+        } as any);
+        return { success: true as const, withdrawn: input.amount };
+        },
       });
       await auditCoreOperation({ userId: ctx.user.id, action: 'SAVINGS_WITHDRAWAL', description: `Withdrawal: $${input.amount}`, amount: input.amount, currency: 'USD', featureLabel: 'savings', operationRef: savingsWdRef, kafkaTopic: CORE_TOPICS.SAVINGS_WITHDRAW });
-      return { success: true, withdrawn: input.amount };
+      storeIdempotency(savWdIdempKey, flexWdResult);
+      return flexWdResult;
+      } catch (savWdErr) {
+        // Release the Redis claim on failure so an honest retry is not denied
+        // as "in flight" for the claim TTL (the PG claim rolled back with tx).
+        await releaseIdempotencyClaim(savWdIdempKey);
+        throw savWdErr;
+      }
     }),
     createGoal: protectedProcedure.input(z.object({ name: z.string().min(1).max(100), targetAmount: z.number().positive().max(10_000_000), deadline: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
@@ -2265,8 +2413,16 @@ export const appRouter = router({
       const [created] = await db.insert(savingsGoals).values({ userId: ctx.user.id, ...input, targetAmount: input.targetAmount.toString(), currentAmount: "0.00", autoSaveAmount: input.autoSaveAmount?.toString(), targetDate: input.targetDate ? new Date(input.targetDate) : undefined, status: "active" }).returning();
       return { success: true, goalId: created.id, name: input.name, targetAmount: input.targetAmount };
     }),
-    topup: protectedProcedure.input(z.object({ id: z.number(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
+    topup: protectedProcedure.input(z.object({ id: z.number(), amount: z.number().positive().max(10_000_000), idempotencyKey: z.string().max(200).optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // W20-A (DL-23): durable idempotency — server-derived key
+      // sha256(userId:SAVINGS_TOPUP:goalId:amount:hour-bucket) when the client
+      // omits one (see paymentHourBucket note; never Date.now()-only). Redis
+      // claim first; PG claim row + wallet debit in ONE db.transaction below.
+      const savTopIdempKey = input.idempotencyKey ?? generateIdempotencyKey(ctx.user.id, "SAVINGS_TOPUP", String(input.id), input.amount.toString(), paymentHourBucket());
+      const savTopCached = await claimIdempotency(savTopIdempKey);
+      if (savTopCached.cached) return savTopCached.result as any;
+      try {
       const [goal] = await db.select().from(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id))).limit(1);
       if (!goal) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const goalCurrency = (goal as any).currency ?? "USD";
@@ -2276,15 +2432,27 @@ export const appRouter = router({
       // two independent writes — a goal-update failure lost the debit).
       const newAmount = Math.min(Number(goal.currentAmount) + input.amount, Number(goal.targetAmount));
       const status = newAmount >= Number(goal.targetAmount) ? "completed" : "active";
-      await db.transaction(async (tx: any) => {
-        const [updTop] = await tx.update(wallets)
-          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
-          .where(and(eq(wallets.id, topWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
-          .returning({ balance: wallets.balance });
-        if (!updTop) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
-        await tx.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id)).returning();
+      const topResult = await withPaymentIdempotency<{ success: true; newAmount: number }>({
+        db, userId: ctx.user.id, procedure: "savings.topup", key: savTopIdempKey,
+        requestHash: paymentRequestHash({ op: "SAVINGS_TOPUP", goalId: input.id, amount: input.amount }),
+        execute: async (tx: any) => {
+          const [updTop] = await tx.update(wallets)
+            .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
+            .where(and(eq(wallets.id, topWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+            .returning({ balance: wallets.balance });
+          if (!updTop) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+          await tx.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id)).returning();
+          return { success: true as const, newAmount };
+        },
       });
-      return { success: true, newAmount };
+      storeIdempotency(savTopIdempKey, topResult);
+      return topResult;
+      } catch (savTopErr) {
+        // Release the Redis claim on failure so an honest retry is not denied
+        // as "in flight" for the claim TTL (the PG claim rolled back with tx).
+        await releaseIdempotencyClaim(savTopIdempKey);
+        throw savTopErr;
+      }
     }),
     remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
@@ -2315,8 +2483,16 @@ export const appRouter = router({
       const [created2] = await db.insert(savingsGoals).values({ userId: ctx.user.id, ...input, targetAmount: input.targetAmount.toString(), currentAmount: "0.00", autoSaveAmount: input.autoSaveAmount?.toString(), targetDate: input.targetDate ? new Date(input.targetDate) : undefined, status: "active" }).returning();
       return { success: true, goalId: created2.id, name: input.name, targetAmount: input.targetAmount };
     }),
-    topup: protectedProcedure.input(z.object({ id: z.number(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
+    topup: protectedProcedure.input(z.object({ id: z.number(), amount: z.number().positive().max(10_000_000), idempotencyKey: z.string().max(200).optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // W20-A (DL-23): durable idempotency — server-derived key
+      // sha256(userId:SAVINGS_TOPUP:goalId:amount:hour-bucket) when the client
+      // omits one (see paymentHourBucket note; never Date.now()-only). Redis
+      // claim first; PG claim row + wallet debit in ONE db.transaction below.
+      const savTopIdempKey = input.idempotencyKey ?? generateIdempotencyKey(ctx.user.id, "SAVINGS_TOPUP", String(input.id), input.amount.toString(), paymentHourBucket());
+      const savTopCached = await claimIdempotency(savTopIdempKey);
+      if (savTopCached.cached) return savTopCached.result as any;
+      try {
       const [goal] = await db.select().from(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id))).limit(1);
       if (!goal) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const goalCurrency = (goal as any).currency ?? "USD";
@@ -2326,15 +2502,27 @@ export const appRouter = router({
       // two independent writes — a goal-update failure lost the debit).
       const newAmount = Math.min(Number(goal.currentAmount) + input.amount, Number(goal.targetAmount));
       const status = newAmount >= Number(goal.targetAmount) ? "completed" : "active";
-      await db.transaction(async (tx: any) => {
-        const [updTop] = await tx.update(wallets)
-          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
-          .where(and(eq(wallets.id, topWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
-          .returning({ balance: wallets.balance });
-        if (!updTop) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
-        await tx.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id)).returning();
+      const topResult = await withPaymentIdempotency<{ success: true; newAmount: number }>({
+        db, userId: ctx.user.id, procedure: "savings.topup", key: savTopIdempKey,
+        requestHash: paymentRequestHash({ op: "SAVINGS_TOPUP", goalId: input.id, amount: input.amount }),
+        execute: async (tx: any) => {
+          const [updTop] = await tx.update(wallets)
+            .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
+            .where(and(eq(wallets.id, topWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+            .returning({ balance: wallets.balance });
+          if (!updTop) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+          await tx.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id)).returning();
+          return { success: true as const, newAmount };
+        },
       });
-      return { success: true, newAmount };
+      storeIdempotency(savTopIdempKey, topResult);
+      return topResult;
+      } catch (savTopErr) {
+        // Release the Redis claim on failure so an honest retry is not denied
+        // as "in flight" for the claim TTL (the PG claim rolled back with tx).
+        await releaseIdempotencyClaim(savTopIdempKey);
+        throw savTopErr;
+      }
     }),
     remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
@@ -4067,41 +4255,67 @@ export const appRouter = router({
       { id: "safaricom", name: "Safaricom Kenya", logo: "📱", country: "KE", type: "airtime" },
       { id: "mtn-gh", name: "MTN Ghana", logo: "📱", country: "GH", type: "airtime" },
     ]),
-    topup: protectedProcedure.input(z.object({ provider: z.string(), phone: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN") })).mutation(async ({ ctx, input }) => {
-      const airtimeIdempKey = generateIdempotencyKey(ctx.user.id, "AIRTIME_TOPUP", input.provider, input.phone, input.amount.toString());
+    topup: protectedProcedure.input(z.object({ provider: z.string(), phone: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN"), idempotencyKey: z.string().max(200).optional() })).mutation(async ({ ctx, input }) => {
+      // W20-A (DL-23): durable idempotency. Server-derived default key
+      // sha256(userId:AIRTIME_TOPUP:provider:phone:amount) — fully
+      // deterministic, no time component (identical airtime purchases dedupe
+      // for the claim TTL); clients may pass their own idempotencyKey.
+      const airtimeIdempKey = input.idempotencyKey ?? generateIdempotencyKey(ctx.user.id, "AIRTIME_TOPUP", input.provider, input.phone, input.amount.toString());
       // W12: cross-instance Redis claim (see savings.deposit note).
       const airtimeCached = await claimIdempotency(airtimeIdempKey);
       if (airtimeCached.cached) return airtimeCached.result as any;
+      try {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!wallet || Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
       // W9-FIX2 (CRITICAL): debit + transaction record commit in ONE db.transaction
       // so any insert failure rolls the debit back. Also fixes the enum-invalid
       // tx_type "bill_payment" → "airtime" for this airtime path.
-      const ref = await db.transaction(async (tx: any) => {
-        const [updAirtime] = await tx.update(wallets)
-          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
-          .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
-          .returning({ balance: wallets.balance });
-        if (!updAirtime) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
-        const airtimeRef = `AIR-${ctx.user.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
-        // W18-A: debit honesty — no telco/biller integration exists, so the
-        // airtime has NOT been delivered. The transaction is recorded as
-        // "pending" (PENDING_DELIVERY), never "completed"; a fulfillment
-        // worker/provider must settle or reverse it. Debit + status row are
-        // committed atomically in this transaction.
-        await tx.insert(transactions).values({
-          userId: ctx.user.id, type: "airtime" as any, status: "pending" as any,
-          fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0",
-          reference: airtimeRef,
-          description: `Airtime: ${input.phone} (${input.provider})`,
-          metadata: { fulfillmentStatus: "PENDING_DELIVERY", provider: input.provider, phone: input.phone },
-        } as any);
-        return airtimeRef;
+      // W20-A: the PG idempotency claim row AND the pending_deliveries row
+      // join that same transaction (claim-or-replay / 409-in-progress; the
+      // delivery row is what pendingDeliveryWorker fulfills or refunds).
+      const airtimeResult = await withPaymentIdempotency<{ success: true; delivered: false; status: "PENDING_DELIVERY"; reference: string; phone: string; amount: number; message: string }>({
+        db, userId: ctx.user.id, procedure: "airtime.topup", key: airtimeIdempKey,
+        requestHash: paymentRequestHash({ op: "AIRTIME_TOPUP", provider: input.provider, phone: input.phone, amount: input.amount, currency: input.currency }),
+        execute: async (tx: any) => {
+          const [updAirtime] = await tx.update(wallets)
+            .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
+            .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+            .returning({ balance: wallets.balance });
+          if (!updAirtime) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+          const airtimeRef = `AIR-${ctx.user.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
+          // W18-A: debit honesty — no telco/biller integration exists, so the
+          // airtime has NOT been delivered. The transaction is recorded as
+          // "pending" (PENDING_DELIVERY), never "completed"; a fulfillment
+          // worker/provider must settle or reverse it. Debit + status row are
+          // committed atomically in this transaction.
+          await tx.insert(transactions).values({
+            userId: ctx.user.id, type: "airtime" as any, status: "pending" as any,
+            fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0",
+            reference: airtimeRef,
+            description: `Airtime: ${input.phone} (${input.provider})`,
+            metadata: { fulfillmentStatus: "PENDING_DELIVERY", provider: input.provider, phone: input.phone },
+            idempotencyKey: airtimeIdempKey,
+          } as any);
+          // DL-24: durable delivery-tracking row — the pendingDeliveryWorker
+          // fulfills via provider adapter (none configured) or auto-refunds.
+          await tx.insert(pendingDeliveries).values({
+            userId: ctx.user.id, kind: "airtime", reference: airtimeRef,
+            currency: input.currency, amount: input.amount.toString(),
+            provider: input.provider, destination: input.phone,
+            metadata: { procedure: "airtime.topup" },
+          });
+          return { success: true as const, delivered: false as const, status: "PENDING_DELIVERY" as const, reference: airtimeRef, phone: input.phone, amount: input.amount, message: "Payment accepted; airtime delivery is pending provider fulfillment." };
+        },
       });
-      const airtimeResult = { success: true, delivered: false, status: "PENDING_DELIVERY", reference: ref, phone: input.phone, amount: input.amount, message: "Payment accepted; airtime delivery is pending provider fulfillment." };
       storeIdempotency(airtimeIdempKey, airtimeResult);
       return airtimeResult;
+      } catch (airtimeErr) {
+        // Release the Redis claim on failure so an honest retry is not denied
+        // as "in flight" for the claim TTL (the PG claim rolled back with tx).
+        await releaseIdempotencyClaim(airtimeIdempKey);
+        throw airtimeErr;
+      }
     }),
   }),
 
@@ -4113,40 +4327,64 @@ export const appRouter = router({
       { id: "tv", name: "Cable TV", icon: "📺", providers: ["DSTV", "GOtv", "StarTimes"] },
       { id: "insurance", name: "Insurance", icon: "🛡️", providers: ["AXA Mansard", "Leadway", "AIICO"] },
     ]),
-    pay: protectedProcedure.input(z.object({ category: z.string(), provider: z.string(), accountNumber: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN") })).mutation(async ({ ctx, input }) => {
-      const billIdempKey = generateIdempotencyKey(ctx.user.id, "BILL_PAY", input.category, input.provider, input.accountNumber, input.amount.toString());
+    pay: protectedProcedure.input(z.object({ category: z.string(), provider: z.string(), accountNumber: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN"), idempotencyKey: z.string().max(200).optional() })).mutation(async ({ ctx, input }) => {
+      // W20-A (DL-23): durable idempotency. Server-derived default key
+      // sha256(userId:BILL_PAY:category:provider:accountNumber:amount) — fully
+      // deterministic, no time component; clients may pass their own key.
+      const billIdempKey = input.idempotencyKey ?? generateIdempotencyKey(ctx.user.id, "BILL_PAY", input.category, input.provider, input.accountNumber, input.amount.toString());
       // W12: cross-instance Redis claim (see savings.deposit note).
       const billCached = await claimIdempotency(billIdempKey);
       if (billCached.cached) return billCached.result as any;
+      try {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!wallet || Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
       // W9-FIX2 (CRITICAL): debit + transaction record commit in ONE db.transaction
       // so any insert failure rolls the debit back. Also fixes the enum-invalid
       // tx_type "bill_payment" → "bill" for this bills path.
-      const ref = await db.transaction(async (tx: any) => {
-        const [updBill] = await tx.update(wallets)
-          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
-          .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
-          .returning({ balance: wallets.balance });
-        if (!updBill) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
-        const billRef = `BILL-${ctx.user.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
-        // W18-A: debit honesty — no biller integration exists, so the bill has
-        // NOT been paid with the provider. Recorded as "pending"
-        // (PENDING_DELIVERY), never "completed"; no fabricated meter token.
-        // Debit + status row commit atomically in this transaction.
-        await tx.insert(transactions).values({
-          userId: ctx.user.id, type: "bill" as any, status: "pending" as any,
-          fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0",
-          reference: billRef,
-          description: `${input.category}: ${input.provider} (${input.accountNumber})`,
-          metadata: { fulfillmentStatus: "PENDING_DELIVERY", category: input.category, provider: input.provider, accountNumber: input.accountNumber },
-        } as any);
-        return billRef;
+      // W20-A: PG idempotency claim row + pending_deliveries row join that
+      // same transaction (DL-24: the worker fulfills or auto-refunds it).
+      const billResult = await withPaymentIdempotency<{ success: true; delivered: false; status: "PENDING_DELIVERY"; reference: string; token: null; message: string }>({
+        db, userId: ctx.user.id, procedure: "bills.pay", key: billIdempKey,
+        requestHash: paymentRequestHash({ op: "BILL_PAY", category: input.category, provider: input.provider, accountNumber: input.accountNumber, amount: input.amount, currency: input.currency }),
+        execute: async (tx: any) => {
+          const [updBill] = await tx.update(wallets)
+            .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
+            .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+            .returning({ balance: wallets.balance });
+          if (!updBill) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+          const billRef = `BILL-${ctx.user.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
+          // W18-A: debit honesty — no biller integration exists, so the bill has
+          // NOT been paid with the provider. Recorded as "pending"
+          // (PENDING_DELIVERY), never "completed"; no fabricated meter token.
+          // Debit + status row commit atomically in this transaction.
+          await tx.insert(transactions).values({
+            userId: ctx.user.id, type: "bill" as any, status: "pending" as any,
+            fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0",
+            reference: billRef,
+            description: `${input.category}: ${input.provider} (${input.accountNumber})`,
+            metadata: { fulfillmentStatus: "PENDING_DELIVERY", category: input.category, provider: input.provider, accountNumber: input.accountNumber },
+            idempotencyKey: billIdempKey,
+          } as any);
+          // DL-24: durable delivery-tracking row — the pendingDeliveryWorker
+          // fulfills via provider adapter (none configured) or auto-refunds.
+          await tx.insert(pendingDeliveries).values({
+            userId: ctx.user.id, kind: "bill", reference: billRef,
+            currency: input.currency, amount: input.amount.toString(),
+            provider: input.provider, destination: input.accountNumber,
+            metadata: { procedure: "bills.pay", category: input.category },
+          });
+          return { success: true as const, delivered: false as const, status: "PENDING_DELIVERY" as const, reference: billRef, token: null, message: "Payment accepted; bill settlement is pending biller confirmation. A token will be issued on delivery." };
+        },
       });
-      const billResult = { success: true, delivered: false, status: "PENDING_DELIVERY", reference: ref, token: null, message: "Payment accepted; bill settlement is pending biller confirmation. A token will be issued on delivery." };
       storeIdempotency(billIdempKey, billResult);
       return billResult;
+      } catch (billErr) {
+        // Release the Redis claim on failure so an honest retry is not denied
+        // as "in flight" for the claim TTL (the PG claim rolled back with tx).
+        await releaseIdempotencyClaim(billIdempKey);
+        throw billErr;
+      }
     }),
   }),
 
@@ -4161,7 +4399,7 @@ export const appRouter = router({
       const qrData = Buffer.from(payload).toString("base64");
       return { qrData, paymentLink: `https://pay.remitflow.app/qr/${qrData}`, expiresAt: new Date(Date.now() + 3600000) };
     }),
-    pay: strictRateLimitedProcedure.input(z.object({ qrData: z.string(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
+    pay: strictRateLimitedProcedure.input(z.object({ qrData: z.string(), amount: z.number().positive().max(10_000_000), idempotencyKey: z.string().max(200).optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // W12-FIX (CRIT — money creation): this handler previously credited the
       // PAYER'S OWN wallet (+amount, type 'receive') with no debit anywhere —
@@ -4181,11 +4419,19 @@ export const appRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot pay your own QR code" });
       }
       // Idempotency: cross-instance claim; a double-submit/rapid retry replays
-      // the recorded outcome instead of double-debiting.
-      const idempKey = generateIdempotencyKey(ctx.user.id, "QR_PAY", String(payeeId), currency, input.amount.toString());
+      // the recorded outcome instead of double-debiting. W20-A (DL-23): the
+      // client may supply its own key; the server-derived default
+      // sha256(userId:QR_PAY:payeeId:currency:amount) is fully deterministic
+      // (no time component). The durable PG claim row is inserted in the SAME
+      // db.transaction as the payer debit below (claim-or-replay / 409).
+      const idempKey = input.idempotencyKey ?? generateIdempotencyKey(ctx.user.id, "QR_PAY", String(payeeId), currency, input.amount.toString());
       const cached = await claimIdempotency(idempKey);
       if (cached.cached) return cached.result as any;
-      const result = await db.transaction(async (tx: any) => {
+      try {
+      const result = await withPaymentIdempotency<{ success: true; reference: string; amount: number; currency: string; paidToUserId: number }>({
+        db, userId: ctx.user.id, procedure: "qr.pay", key: idempKey,
+        requestHash: paymentRequestHash({ op: "QR_PAY", payeeId, currency, amount: input.amount }),
+        execute: async (tx: any) => {
         // ── Guarded payer debit (balance >= amount, row-count checked) ──────
         const [payerWallet] = await tx.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, currency))).limit(1);
         if (!payerWallet) throw new TRPCError({ code: "BAD_REQUEST", message: `No ${currency} wallet found` });
@@ -4223,11 +4469,18 @@ export const appRouter = router({
           fromCurrency: currency, fromAmount: input.amount.toString(), fee: "0",
           description: `QR payment from user ${ctx.user.id}`, reference: `${ref}-IN`,
         });
-        return { success: true, reference: ref, amount: input.amount, currency, paidToUserId: payeeId };
+        return { success: true as const, reference: ref, amount: input.amount, currency, paidToUserId: payeeId };
+        },
       });
       broadcastUserEvent(payeeId, { type: "transfer_received", payload: { title: "QR Payment Received", message: `You received ${input.amount.toLocaleString()} ${currency} via QR payment`, amount: input.amount, currency, reference: result.reference } });
       storeIdempotency(idempKey, result);
       return result;
+      } catch (qrErr) {
+        // Release the Redis claim on failure so an honest retry is not denied
+        // as "in flight" for the claim TTL (the PG claim rolled back with tx).
+        await releaseIdempotencyClaim(idempKey);
+        throw qrErr;
+      }
     }),
   }),
 

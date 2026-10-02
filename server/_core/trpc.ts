@@ -209,10 +209,12 @@ const auditMiddleware = t.middleware(async opts => {
             eventType: event.action,
             payload: JSON.stringify(event),
           });
-        } catch {
+        } catch (outboxErr) {
           // Outbox unavailable — degrade to the direct sidecar call.
-          // W19-B: audit emit is fail-open (never blocks the request) but
-          // never silent — log + count.
+          // W19-B/W20-F: audit emit is fail-open (never blocks the request)
+          // but never silent — the outbox failure AND any sidecar-fallback
+          // failure are both logged + counted.
+          reportWriteThroughFailure("trpc_audit_outbox", outboxErr);
           await sendAuditLog(event).catch((err) => reportWriteThroughFailure("trpc_audit_emit", err));
         }
       })();
@@ -274,6 +276,19 @@ export const auditedAdminProcedure = t.procedure
 // WARN-logged + counted via writeThroughTelemetry every time it engages).
 const _inProcessRateBuckets = new Map<string, number[]>();
 
+// W20-F (DL-15): money-moving procedure families. When BOTH the Go sidecar
+// and Redis are down in production, these procedures fail CLOSED (503-style
+// rejection) instead of degrading to the per-process limiter — an in-process
+// map cannot enforce a cluster-wide limit and silently opens the door to
+// TOTP brute force / double-submit abuse exactly during an outage.
+// Non-money procedures may still degrade (WARN-logged + counted).
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+const MONEY_MOVING_PATH_RE = /(^|\.)(wallet|withdraw|withdrawal|transfer|topup|top_up|pay|payment|payout|send|cashout|cash_out|deposit|airtime|bills|bill|invest|investment|redeem|remit|savings|vault|bnpl|settle|settlement|float)(\.|$)/i;
+
+function isMoneyMovingPath(path: string): boolean {
+  return MONEY_MOVING_PATH_RE.test(path);
+}
+
 function inProcessRateLimit(key: string, limit: number, windowSecs: number): boolean {
   const now = Date.now();
   const windowMs = windowSecs * 1000;
@@ -318,9 +333,27 @@ function makeRateLimitMiddleware(limit: number, windowSecs: number) {
           if (redisErr instanceof TRPCError && redisErr.code === "TOO_MANY_REQUESTS") throw redisErr;
           reportWriteThroughFailure("trpc_rate_limit_redis", redisErr, "error");
         }
-        // Redis also unavailable — fail closed into an in-process sliding
-        // window capped at 5 req/min for strict endpoints (configured limit
-        // otherwise). Engaging this path is WARN-logged + counted.
+        // Redis also unavailable. W20-F (DL-15): in production, money-moving
+        // procedures fail CLOSED — the per-process fallback cannot enforce a
+        // cluster-wide limit, so allowing money mutations through it is a
+        // data-loss/fraud vector during exactly the outage it masks.
+        if (IS_PRODUCTION && isMoneyMovingPath(path)) {
+          reportWriteThroughFailure(
+            "trpc_rate_limit_failclosed",
+            new Error(`sidecar+redis down in production; rejecting money-moving procedure ${path}`),
+            "error",
+          );
+          throw new TRPCError({
+            // tRPC has no 503 code — INTERNAL_SERVER_ERROR maps to HTTP 500;
+            // the message carries the 503 semantics for ops alerting.
+            code: "INTERNAL_SERVER_ERROR",
+            message: `Rate limiting unavailable (sidecar+Redis down) — ${path} rejected (fail-closed, 503-equivalent). Retry shortly.`,
+          });
+        }
+        // Non-money procedures (and all procedures in dev/test): fail closed
+        // into an in-process sliding window capped at 5 req/min for strict
+        // endpoints (configured limit otherwise). Engaging this path is
+        // WARN-logged + counted.
         reportWriteThroughFailure("trpc_rate_limit_inprocess", new Error(`sidecar+redis down; in-process limiter engaged for ${path}`), "error");
         const fallbackLimit = Math.min(limit, 5);
         if (!inProcessRateLimit(key, fallbackLimit, windowSecs)) {

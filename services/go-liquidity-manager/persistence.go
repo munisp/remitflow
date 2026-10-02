@@ -11,7 +11,10 @@ import (
 	"database/sql"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -22,18 +25,39 @@ var migrationSQL string
 
 var db *sql.DB
 
+// devEnv reports whether the process runs in a dev/test environment where
+// volatile in-memory mode is tolerated. Outside dev/test the service fails
+// closed (W20 DL-12/13/14) rather than silently losing durable state.
+func devEnv() bool {
+	for _, k := range []string{"APP_ENV", "ENV", "GO_ENV"} {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv(k))) {
+		case "dev", "development", "test":
+			return true
+		}
+	}
+	return false
+}
+
+// failClosed logs a FATAL boot error and exits when durable storage is
+// unavailable outside dev/test.
+func failClosed(format string, args ...interface{}) {
+	slog.Error("FATAL: " + fmt.Sprintf(format, args...))
+	os.Exit(1)
+}
+
 func initDB() {
 	dsn := getEnv("DATABASE_URL", "")
 	if dsn == "" {
+		if !devEnv() {
+			failClosed("DATABASE_URL is required outside dev/test — refusing to boot in volatile in-memory mode (fail closed)")
+		}
 		slog.Warn("[LiquidityManager] DATABASE_URL not set — positions/swaps are VOLATILE in-memory (dev mode only)")
 		return
 	}
 	var err error
 	db, err = sql.Open("postgres", dsn)
 	if err != nil {
-		slog.Warn("[LiquidityManager] db open failed — volatile in-memory mode", "err", err)
-		db = nil
-		return
+		failClosed("DATABASE_URL is set but the database is unreachable (open failed: %v) — failing closed", err)
 	}
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
@@ -41,10 +65,8 @@ func initDB() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
-		slog.Warn("[LiquidityManager] db ping failed — volatile in-memory mode", "err", err)
 		db.Close()
-		db = nil
-		return
+		failClosed("DATABASE_URL is set but the database is unreachable (ping failed: %v) — failing closed", err)
 	}
 	if getEnv("AUTO_MIGRATE", "") == "1" {
 		if _, err := db.ExecContext(ctx, migrationSQL); err != nil {

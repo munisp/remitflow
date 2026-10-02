@@ -28,6 +28,12 @@ import { logger } from "../_core/logger";
 import { sql, eq, and, inArray } from "drizzle-orm";
 import { stablecoinSettlementEvents, onrampTransactions, offrampTransactions } from "../../drizzle/schema";
 import { pessimisticStablecoinDebit, creditStablecoinWallet } from "./stablecoinAtomicity";
+import {
+  startFundFlowDlqConsumer,
+  startEventLogConsumers,
+  startKafkaOutboxRelay,
+  stopKafkaOutboxRelay,
+} from "../_core/fundFlowDlqConsumer";
 import type { Consumer, KafkaMessage } from "kafkajs";
 
 const CONSUMER_GROUP = process.env.KAFKA_CONSUMER_GROUP || "remitflow-main-consumer";
@@ -403,6 +409,8 @@ const handlers: ConsumerHandler[] = [
 let _consumerRunning = false;
 let _consumer: Consumer | null = null;
 let _dlqConsumer: Consumer | null = null;
+let _fundFlowDlqConsumer: Consumer | null = null;
+let _eventLogConsumer: Consumer | null = null;
 const _stats = {
   messagesProcessed: 0,
   messagesErrored: 0,
@@ -599,6 +607,11 @@ export async function reprocessDlqMessages(limit = 50): Promise<DlqReprocessResu
 export async function startKafkaConsumers(): Promise<void> {
   if (_consumerRunning) return;
 
+  // W20 DL-19: start the Kafka outbox relay unconditionally — it drains rows
+  // written transactionally by the transfer pipeline and tolerates the broker
+  // being briefly down (rows accumulate, publish retries with backoff).
+  startKafkaOutboxRelay();
+
   try {
     const { Kafka } = await import("kafkajs");
     const kafka = new Kafka({
@@ -677,14 +690,26 @@ export async function startKafkaConsumers(): Promise<void> {
     // Drain remitflow.dlq into Postgres for durability + reprocessing.
     await startDlqPersistenceConsumer(kafka);
 
+    // W20 DL-07/08/09: drain remitflow.fund-flow.dlq into fund_flow_dlq_events
+    // and persist account/fund-flow events to their log tables (insert before
+    // ack in all cases — fail closed).
+    try {
+      _fundFlowDlqConsumer = await startFundFlowDlqConsumer(kafka);
+      _eventLogConsumer = await startEventLogConsumers(kafka);
+    } catch (err) {
+      // Non-fatal for the main consumer: the fund-flow DLQ messages stay
+      // uncommitted on the broker and will be consumed on next boot. Loud log.
+      logger.error({ err: (err as Error).message }, "[Kafka] Fund-flow DLQ / event-log consumers failed to start — will retry on next boot");
+    }
+
     _consumerRunning = true;
     _stats.startedAt = new Date().toISOString();
-    logger.info(`Kafka consumers started for ${handlers.length} topics (+ DLQ persistence)`);
+    logger.info(`Kafka consumers started for ${handlers.length} topics (+ DLQ persistence, + fund-flow DLQ, + event logs)`);
   } catch (err) {
     logger.warn({ err: (err as Error).message }, "Kafka consumers not started (broker unavailable)");
     // If subscribe/run failed after connect(), disconnect the orphaned consumers
     // so they don't leak broker connections / consumer-group slots.
-    for (const c of [_dlqConsumer, _consumer]) {
+    for (const c of [_fundFlowDlqConsumer, _eventLogConsumer, _dlqConsumer, _consumer]) {
       if (c) {
         try {
           await c.disconnect();
@@ -693,6 +718,8 @@ export async function startKafkaConsumers(): Promise<void> {
         }
       }
     }
+    _fundFlowDlqConsumer = null;
+    _eventLogConsumer = null;
     _dlqConsumer = null;
     _consumer = null;
     _consumerRunning = false;
@@ -700,7 +727,8 @@ export async function startKafkaConsumers(): Promise<void> {
 }
 
 export async function stopKafkaConsumers(): Promise<void> {
-  for (const c of [_dlqConsumer, _consumer]) {
+  stopKafkaOutboxRelay();
+  for (const c of [_fundFlowDlqConsumer, _eventLogConsumer, _dlqConsumer, _consumer]) {
     if (!c) continue;
     try {
       await c.disconnect();
@@ -708,7 +736,9 @@ export async function stopKafkaConsumers(): Promise<void> {
       logger.warn({ err: (err as Error).message }, "Kafka consumer disconnect warning");
     }
   }
-  if (_consumer || _dlqConsumer) logger.info("Kafka consumers disconnected");
+  if (_consumer || _dlqConsumer || _fundFlowDlqConsumer || _eventLogConsumer) logger.info("Kafka consumers disconnected");
+  _fundFlowDlqConsumer = null;
+  _eventLogConsumer = null;
   _consumer = null;
   _dlqConsumer = null;
   _consumerRunning = false;

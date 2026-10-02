@@ -42,7 +42,9 @@
 
 import { TRPCError } from "@trpc/server";
 import { randomBytes } from "crypto";
+import { sql } from "drizzle-orm";
 import { logger } from "../_core/logger.js";
+import { getDb } from "../db";
 import {
   withAtomicFundFlow,
   type AtomicOperation,
@@ -52,6 +54,23 @@ import {
   recordDoubleEntry,
 } from "./fundFlowAtomicity";
 import { publishEvent, KAFKA_TOPICS } from "./kafka";
+
+// ── W20 telemetry counters (fail-open, never silent) ─────────────────────────
+
+export const fundFlowIntegrationMetrics = {
+  /** Orchestrator outages that forced a saga_pending_registrations row. */
+  sagaPendingRegistrations: 0,
+  /** Failures persisting the pending-registration row itself. */
+  sagaRegistrationPersistErrors: 0,
+  /** Python-reconciliation HTTP fallback failures (was: silently swallowed). */
+  dlqHttpFallbackFailures: 0,
+  /** Kafka FUND_FLOW_DLQ publish failures. */
+  dlqKafkaPublishFailures: 0,
+};
+
+export function getFundFlowIntegrationMetrics(): Readonly<typeof fundFlowIntegrationMetrics> {
+  return { ...fundFlowIntegrationMetrics };
+}
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
@@ -142,6 +161,47 @@ export async function executeAtomicFundFlow<T>(
   // Step 2: Start saga tracking via Go Orchestrator (best-effort)
   const sagaId = await startSaga(params, operationId);
 
+  // W20 DL-22: an orchestrator outage must NEVER leave sagaId silently null —
+  // without a saga id, later compensation is a no-op and funds can be left
+  // held. Persist a saga_pending_registrations row so a reconciler can attach
+  // compensation once the orchestrator recovers.
+  if (!sagaId) {
+    fundFlowIntegrationMetrics.sagaPendingRegistrations++;
+    logger.warn(
+      { operationId, flowType: params.flowType, userId: params.userId },
+      "[FundFlow] Orchestrator unavailable — recording saga_pending_registrations row for later compensation attach",
+    );
+    try {
+      const db = await getDb();
+      if (!db) throw new Error("database unavailable");
+      await (db as any).execute(sql`
+        INSERT INTO saga_pending_registrations (operation_id, flow_type, user_id, amount, currency, transfer_ref, status, created_at)
+        VALUES (${operationId}, ${params.flowType}, ${params.userId}, ${params.amount}, ${params.currency}, ${params.transferRef ?? null}, 'pending', NOW())
+        ON CONFLICT (operation_id) DO NOTHING
+      `);
+    } catch (err) {
+      // Fail-open for the operation itself (withAtomicFundFlow fails closed on
+      // its own DB writes), but NEVER silent: log + counter.
+      fundFlowIntegrationMetrics.sagaRegistrationPersistErrors++;
+      logger.error(
+        { operationId, err: err instanceof Error ? err.message : String(err) },
+        "[FundFlow] CRITICAL: could not persist saga_pending_registrations row — compensation unattached, MANUAL RECONCILIATION REQUIRED",
+      );
+    }
+  } else {
+    // W20 DL-10: produce FUND_FLOW_SAGAS lifecycle events (best-effort telemetry).
+    publishEvent(KAFKA_TOPICS.FUND_FLOW_SAGAS, operationId, {
+      sagaId,
+      operationId,
+      flowType: params.flowType,
+      userId: params.userId,
+      amount: params.amount,
+      currency: params.currency,
+      phase: "started",
+      timestamp: new Date().toISOString(),
+    }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[FundFlow] saga-started event publish failed"));
+  }
+
   // Step 3: Execute with full atomicity (lock + idempotency + ledger + events)
   const atomicOp: AtomicOperation = {
     operationId,
@@ -184,7 +244,14 @@ export async function executeAtomicFundFlow<T>(
     });
 
     // Step 5: Mark saga completed
-    if (sagaId) await completeSaga(sagaId);
+    if (sagaId) {
+      await completeSaga(sagaId);
+      publishEvent(KAFKA_TOPICS.FUND_FLOW_SAGAS, operationId, {
+        sagaId, operationId, flowType: params.flowType, userId: params.userId,
+        amount: params.amount, currency: params.currency, phase: "completed",
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[FundFlow] saga-completed event publish failed"));
+    }
 
     // Step 6: Report circuit breaker success
     await reportCircuitBreaker(params.flowType, true);
@@ -331,9 +398,11 @@ async function reportCircuitBreaker(service: string, success: boolean): Promise<
 }
 
 async function submitToDLQ(params: FundFlowParams, operationId: string, error: string): Promise<void> {
-  // Submit to Python reconciliation engine's DLQ
+  // Submit to Python reconciliation engine's DLQ (best-effort HTTP fallback).
+  // W20 DL-07: the engine may be an orphan — a failure here is logged and
+  // counted, NEVER swallowed, because the Kafka DLQ below is the durable path.
   try {
-    await fetch(`${PYTHON_RECONCILIATION_URL}/dlq/submit`, {
+    const res = await fetch(`${PYTHON_RECONCILIATION_URL}/dlq/submit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -344,24 +413,39 @@ async function submitToDLQ(params: FundFlowParams, operationId: string, error: s
       }),
       signal: AbortSignal.timeout(2000),
     });
-  } catch {
-    // Non-blocking — also publish to Kafka DLQ
+    if (!res.ok) {
+      fundFlowIntegrationMetrics.dlqHttpFallbackFailures++;
+      logger.warn({ operationId, status: res.status }, "[FundFlow] Python reconciliation DLQ fallback rejected submission — relying on Kafka DLQ");
+    }
+  } catch (err) {
+    fundFlowIntegrationMetrics.dlqHttpFallbackFailures++;
+    logger.warn({ operationId, err: err instanceof Error ? err.message : String(err) }, "[FundFlow] Python reconciliation DLQ fallback unreachable — relying on Kafka DLQ");
   }
 
-  // Also publish to Kafka fund flow DLQ
-  await publishEvent(
-    KAFKA_TOPICS.FUND_FLOW_DLQ,
-    operationId,
-    {
+  // Also publish to Kafka fund flow DLQ (durable — drained into
+  // fund_flow_dlq_events by server/_core/fundFlowDlqConsumer.ts).
+  try {
+    const published = await publishEvent(
+      KAFKA_TOPICS.FUND_FLOW_DLQ,
       operationId,
-      flowType: params.flowType,
-      userId: params.userId,
-      amount: params.amount,
-      currency: params.currency,
-      error,
-      failedAt: new Date().toISOString(),
+      {
+        operationId,
+        flowType: params.flowType,
+        userId: params.userId,
+        amount: params.amount,
+        currency: params.currency,
+        error,
+        failedAt: new Date().toISOString(),
+      }
+    );
+    if (!published) {
+      fundFlowIntegrationMetrics.dlqKafkaPublishFailures++;
+      logger.error({ operationId }, "[FundFlow] CRITICAL: Kafka fund-flow DLQ publish returned false — failure event may be lost, MANUAL RECONCILIATION REQUIRED");
     }
-  );
+  } catch (err) {
+    fundFlowIntegrationMetrics.dlqKafkaPublishFailures++;
+    logger.error({ operationId, err: err instanceof Error ? err.message : String(err) }, "[FundFlow] CRITICAL: Kafka fund-flow DLQ publish failed — failure event may be lost, MANUAL RECONCILIATION REQUIRED");
+  }
 }
 
 // ── Convenience Wrappers for Common Fund Flows ───────────────────────────────

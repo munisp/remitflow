@@ -141,7 +141,7 @@ services:
       KEYCLOAK_ADMIN_USER: "${KEYCLOAK_ADMIN_USER:?KEYCLOAK_ADMIN_USER is required}"
       KEYCLOAK_ADMIN_PASSWORD: "${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is required}"
       PERMIFY_URL: "${PERMIFY_URL:-http://permify:3476}"
-      DATABASE_URL: "${DATABASE_URL}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     depends_on:
       - keycloak
@@ -176,7 +176,7 @@ services:
       KYC_PIPELINE_URL: "http://go-kyc-orchestrator:8150"
       RUST_SCORER_URL: "http://rust-kyc-event-processor:8190"
       PYTHON_SCORER_URL: "http://python-kyc-trigger-scorer:8195"
-      DATABASE_URL: "${DATABASE_URL}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     depends_on:
       - go-middleware-bus
@@ -209,7 +209,7 @@ services:
       REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
       TIGERBEETLE_ADDRESSES: "${TIGERBEETLE_ADDRESSES:-tigerbeetle:3000}"
       KYC_TRIGGER_ENGINE_URL: "http://go-kyc-trigger-engine:8160"
-      DATABASE_URL: "${DATABASE_URL}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     depends_on:
       - redis
@@ -237,7 +237,7 @@ services:
       - "8195:8195"
     environment:
       PORT: "8195"
-      DATABASE_URL: "${DATABASE_URL}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required}"
       OPENSEARCH_URL: "${OPENSEARCH_URL:-http://opensearch:9200}"
       REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
       AML_SCORER_URL: "http://python-aml-scorer:8100"
@@ -268,7 +268,7 @@ services:
       - "8170:8170"
     environment:
       PORT: "8170"
-      DATABASE_URL: "${DATABASE_URL}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required}"
       REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
       MIDDLEWARE_BUS_URL: "http://go-middleware-bus:8200"
       PRICE_ORACLE_URL: "http://rust-price-oracle:8120"
@@ -299,7 +299,7 @@ services:
       - "8180:8180"
     environment:
       PORT: "8180"
-      DATABASE_URL: "${DATABASE_URL}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required}"
       KAFKA_BROKERS: "${KAFKA_BROKERS:-kafka:9092}"
       REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
       TWILIO_ACCOUNT_SID: "${TWILIO_ACCOUNT_SID:-}"

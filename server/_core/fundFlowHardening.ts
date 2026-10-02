@@ -16,7 +16,11 @@
  */
 
 import { randomUUID, createHash } from "crypto";
+import { sql } from "drizzle-orm";
 import { logger } from "./logger";
+// W20-C: Prometheus-style counters for fail-open telemetry paths — a
+// swallowed failure must still be visible (never silent).
+import { metrics } from "../middleware/businessMetrics";
 import { getRedisClient } from "../middleware/redis";
 // W19-F: startFundFlowWorkflow (previously zero callers — now wired here) is
 // the canonical producer for the fund-flow worker's real queue
@@ -63,6 +67,13 @@ export interface CoordinatedTransaction {
    * happens when the caller supplies this payload.
    */
   workflowInput?: Record<string, unknown>;
+  /** W20-C: optional tenant for saga_instances.tenant_id partitioning. */
+  tenantId?: string;
+  /**
+   * W20-C: set by the durable inline saga — links fail-open telemetry legs
+   * (TigerBeetle dual-write outbox fallback) back to the saga step rows.
+   */
+  sagaContext?: { sagaId: string };
 }
 
 /**
@@ -169,6 +180,142 @@ export function getCompensationOrder(steps: TransactionStep[]): TransactionStep[
     .reverse();
 }
 
+// ── W20-C: durable inline-saga state (DL-21) ────────────────────────────────
+// When Temporal is unavailable the inline saga below is the ONLY thing moving
+// money — and before W20 its entire step/compensation state lived in process
+// memory. A crash between debit_sender and compensation stranded the debit
+// with no durable record. State now lives in saga_instances / saga_steps
+// (drizzle/0102_saga_state.sql):
+//   * instance row created BEFORE any step runs;
+//   * step INTENT persisted before each step mutation (when a step performs a
+//     PG mutation the intent row MUST be written in the same db.transaction —
+//     current PG-mutating steps do so via their callers' transactions);
+//   * step row updated to completed/failed after each attempt;
+//   * instance marked completed/compensated/failed at the end.
+// resumeIncompleteSagas() (exported, wired at boot by the orchestrator)
+// re-runs in_progress sagas from current_step and compensates failed ones.
+// Every step is check-before-act against saga_steps so re-runs never
+// double-execute a completed step or double-compensate.
+//
+// FAIL CLOSED: if saga state cannot be persisted (DB down), the inline saga
+// REFUSES to move money — running it in-memory is exactly the DL-21 bug.
+
+/** Fail-open-but-never-silent telemetry: structured log + counter. */
+function telemetryFailure(metric: string, labels: Record<string, string>, logFields: Record<string, unknown>, message: string): void {
+  try {
+    metrics.increment(metric, labels);
+  } catch (metricErr) {
+    // Telemetry itself must never throw into a money path — but still log.
+    logger.warn({ err: metricErr instanceof Error ? metricErr.message : String(metricErr), metric }, "[Telemetry] counter increment failed");
+  }
+  logger.warn(logFields, message);
+}
+
+type SagaDb = { execute: (query: unknown) => Promise<unknown> };
+
+async function getSagaDb(): Promise<SagaDb | null> {
+  const db = await getDb();
+  return (db as unknown as SagaDb | null) ?? null;
+}
+
+/** Create the saga_instances row (or re-attach on idempotency-key replay).
+ *  Returns the saga UUID. THROWS when persistence is impossible. */
+async function persistSagaInstanceStart(tx: CoordinatedTransaction): Promise<string> {
+  const db = await getSagaDb();
+  if (!db) {
+    throw new Error("[Saga] DB unavailable — refusing to run inline saga without durable state (fail-closed, DL-21)");
+  }
+  const payload = {
+    transactionId: tx.transactionId,
+    userId: tx.userId,
+    type: tx.type,
+    amount: tx.amount,
+    currency: tx.currency,
+    createdAt: tx.createdAt,
+    steps: tx.steps.map(s => s.name),
+  };
+  const res = await db.execute(sql`
+    INSERT INTO saga_instances (tenant_id, idempotency_key, status, current_step, payload)
+    VALUES (${tx.tenantId ?? null}, ${tx.transactionId}, 'in_progress', NULL, ${JSON.stringify(payload)}::jsonb)
+    ON CONFLICT (idempotency_key) DO NOTHING
+    RETURNING id
+  `);
+  const rows = (res as { rows?: Array<{ id: string }> }).rows ?? (res as unknown as Array<{ id: string }>);
+  if (Array.isArray(rows) && rows.length > 0 && rows[0]?.id) return rows[0].id;
+  // Replay: instance already exists for this idempotency key — re-attach.
+  const existing = await db.execute(sql`
+    SELECT id FROM saga_instances WHERE idempotency_key = ${tx.transactionId} LIMIT 1
+  `);
+  const eRows = (existing as { rows?: Array<{ id: string }> }).rows ?? (existing as unknown as Array<{ id: string }>);
+  if (Array.isArray(eRows) && eRows.length > 0 && eRows[0]?.id) {
+    logger.warn({ txId: tx.transactionId, sagaId: eRows[0].id }, "[Saga] idempotency-key replay — re-attaching to existing saga instance");
+    return eRows[0].id;
+  }
+  throw new Error(`[Saga] failed to persist saga_instances row for ${tx.transactionId}`);
+}
+
+async function sagaInstanceUpdate(db: SagaDb, sagaId: string, status: string, currentStep: string | null): Promise<void> {
+  await db.execute(sql`
+    UPDATE saga_instances
+    SET status = ${status}, current_step = ${currentStep}, updated_at = NOW()
+    WHERE id = ${sagaId}::uuid
+  `);
+}
+
+/** Check-before-act: has this step already completed for this saga? */
+async function sagaStepCompleted(db: SagaDb, sagaId: string, stepName: string): Promise<boolean> {
+  const res = await db.execute(sql`
+    SELECT status FROM saga_steps WHERE saga_id = ${sagaId}::uuid AND step_name = ${stepName} LIMIT 1
+  `);
+  const rows = (res as { rows?: Array<{ status: string }> }).rows ?? (res as unknown as Array<{ status: string }>);
+  return Array.isArray(rows) && rows[0]?.status === "completed";
+}
+
+/** Persist step INTENT (executing) before the mutation, bumping attempts. */
+async function sagaStepMarkExecuting(db: SagaDb, sagaId: string, stepName: string): Promise<void> {
+  await db.execute(sql`
+    INSERT INTO saga_steps (saga_id, step_name, status, attempts, updated_at)
+    VALUES (${sagaId}::uuid, ${stepName}, 'executing', 1, NOW())
+    ON CONFLICT (saga_id, step_name)
+    DO UPDATE SET status = 'executing', attempts = saga_steps.attempts + 1, updated_at = NOW()
+  `);
+  await sagaInstanceUpdate(db, sagaId, "in_progress", stepName);
+}
+
+async function sagaStepMarkCompleted(db: SagaDb, sagaId: string, stepName: string, result?: unknown): Promise<void> {
+  await db.execute(sql`
+    UPDATE saga_steps
+    SET status = 'completed', result = ${result === undefined ? null : JSON.stringify(result)}::jsonb, updated_at = NOW()
+    WHERE saga_id = ${sagaId}::uuid AND step_name = ${stepName}
+  `);
+}
+
+async function sagaStepMarkFailed(db: SagaDb, sagaId: string, stepName: string, error: string): Promise<void> {
+  await db.execute(sql`
+    UPDATE saga_steps
+    SET status = 'failed', result = ${JSON.stringify({ error })}::jsonb, updated_at = NOW()
+    WHERE saga_id = ${sagaId}::uuid AND step_name = ${stepName}
+  `);
+}
+
+/** Record a successful compensation — idempotent (compensated flag is the
+ *  check-before-act guard so a resumed saga never double-compensates). */
+async function sagaStepMarkCompensated(db: SagaDb, sagaId: string, stepName: string): Promise<void> {
+  await db.execute(sql`
+    UPDATE saga_steps
+    SET compensated = TRUE, status = 'compensated', updated_at = NOW()
+    WHERE saga_id = ${sagaId}::uuid AND step_name = ${stepName}
+  `);
+}
+
+async function sagaStepIsCompensated(db: SagaDb, sagaId: string, stepName: string): Promise<boolean> {
+  const res = await db.execute(sql`
+    SELECT compensated FROM saga_steps WHERE saga_id = ${sagaId}::uuid AND step_name = ${stepName} LIMIT 1
+  `);
+  const rows = (res as { rows?: Array<{ compensated: boolean }> }).rows ?? (res as unknown as Array<{ compensated: boolean }>);
+  return Array.isArray(rows) && rows[0]?.compensated === true;
+}
+
 /**
  * Execute a coordinated transaction through Temporal workflow orchestration.
  * Each step is executed in order; on failure, completed steps are compensated
@@ -205,29 +352,57 @@ export async function executeCoordinatedTransaction(
     );
   }
 
-  // Inline execution when Temporal is unavailable
+  // Inline execution when Temporal is unavailable.
+  // W20-C (DL-21): FAIL CLOSED unless saga state is durable — persist the
+  // instance row BEFORE any money moves. THROWS if the DB is unavailable.
+  const sagaId = await persistSagaInstanceStart(tx);
+  const sagaDb = (await getSagaDb())!;
+  // Saga context links fail-open telemetry legs (e.g. the TigerBeetle
+  // dual-write PG outbox fallback) back to this saga's step rows.
+  tx.sagaContext = { sagaId };
+
   for (const step of tx.steps) {
+    // Check-before-act: a resumed/replayed saga never re-executes a
+    // completed step (the mutation already happened).
+    if (await sagaStepCompleted(sagaDb, sagaId, step.name)) {
+      step.status = "completed";
+      continue;
+    }
     step.status = "executing";
     step.startedAt = new Date().toISOString();
+    // Persist step INTENT before the mutation — a crash after this row and
+    // before completion leaves a resumable cursor, never a silent strand.
+    await sagaStepMarkExecuting(sagaDb, sagaId, step.name);
     try {
       await executeStep(tx, step);
       step.status = "completed";
       step.completedAt = new Date().toISOString();
+      await sagaStepMarkCompleted(sagaDb, sagaId, step.name);
     } catch (err) {
       step.status = "failed";
       step.error = (err as Error).message;
       logger.error({ txId: tx.transactionId, step: step.name, err: step.error }, "[Coordinator] Step failed");
+      await sagaStepMarkFailed(sagaDb, sagaId, step.name, step.error).catch(persistErr =>
+        logger.error({ txId: tx.transactionId, step: step.name, err: persistErr instanceof Error ? persistErr.message : String(persistErr) }, "[Saga] CRITICAL: failed to persist step failure state"));
 
       // Compensate in reverse order
       tx.status = "compensating";
+      await sagaInstanceUpdate(sagaDb, sagaId, "compensating", step.name);
       const toCompensate = getCompensationOrder(tx.steps);
       for (const compStep of toCompensate) {
+        // Idempotent compensation: skip steps already compensated (e.g. by a
+        // previous boot-resume pass).
+        if (await sagaStepIsCompensated(sagaDb, sagaId, compStep.name)) {
+          compStep.status = "compensated";
+          continue;
+        }
         try {
           await compensateStep(tx, compStep);
           compStep.status = "compensated";
           compStep.compensatedAt = new Date().toISOString();
+          await sagaStepMarkCompensated(sagaDb, sagaId, compStep.name);
         } catch (compErr) {
-          logger.error({ txId: tx.transactionId, step: compStep.name }, "[Coordinator] Compensation failed");
+          logger.error({ txId: tx.transactionId, step: compStep.name, err: compErr instanceof Error ? compErr.message : String(compErr) }, "[Coordinator] Compensation failed");
           const retry = createCompensationRetry(tx.transactionId, compStep.name, compStep.retryCount);
           if (retry.escalatedToPagerDuty) {
             await escalateToPagerDuty(tx.transactionId, compStep.name, compStep.retryCount);
@@ -235,7 +410,11 @@ export async function executeCoordinatedTransaction(
           compStep.retryCount++;
         }
       }
-      tx.status = "compensated";
+      // Any step still uncompensated → saga stays 'failed' (NOT 'compensated')
+      // so resumeIncompleteSagas() picks it up on boot. No stranded debits.
+      const uncompensated = toCompensate.filter(s => s.status !== "compensated");
+      tx.status = uncompensated.length === 0 ? "compensated" : "failed";
+      await sagaInstanceUpdate(sagaDb, sagaId, tx.status, step.name);
       break;
     }
   }
@@ -243,17 +422,153 @@ export async function executeCoordinatedTransaction(
   if (tx.steps.every(s => s.status === "completed")) {
     tx.status = "completed";
     tx.completedAt = new Date().toISOString();
+    await sagaInstanceUpdate(sagaDb, sagaId, "completed", null);
   }
 
+  // DL-18: was `.catch(() => {})` — a silently dropped audit event. Fail-open
+  // (audit emit must not fail a completed money path) but NEVER silent:
+  // structured log + telemetry counter.
   await publishEvent(KAFKA_TOPICS.AUDIT_LOGS, `coord-${tx.transactionId}`, {
     type: "transaction_coordinated",
     transactionId: tx.transactionId,
     status: tx.status,
     userId: tx.userId,
     timestamp: new Date().toISOString(),
-  }).catch(() => {});
+  }).catch(err =>
+    telemetryFailure(
+      "remitflow_saga_audit_emit_failures_total",
+      { topic: KAFKA_TOPICS.AUDIT_LOGS },
+      { txId: tx.transactionId, status: tx.status, errMsg: err instanceof Error ? err.message : String(err) },
+      "[Coordinator] Audit emit FAILED (fail-open; saga outcome is durable in saga_instances)",
+    ));
 
   return tx;
+}
+
+/**
+ * W20-C (DL-21): boot-time saga recovery. MUST be called once at startup
+ * (orchestrator wires this in server/_core/index.ts — Lane F):
+ *
+ *   const { resumeIncompleteSagas } = await import("./fundFlowHardening");
+ *   void resumeIncompleteSagas().catch(err => logger.error({ err }, "saga resume failed"));
+ *
+ * For every saga_instances row still 'in_progress' (crash mid-saga): rebuild
+ * the transaction from payload and resume from current_step — each step is
+ * check-before-act against saga_steps so completed steps are never re-run.
+ * For rows 'compensating'/'failed' (failed past the point of no return):
+ * execute any outstanding compensations — each compensation is recorded in
+ * saga_steps (compensated=true) and skipped if already done, so recovery
+ * itself is idempotent and can never double-refund.
+ * Fail-open at the aggregate level: one poisoned saga is logged loudly and
+ * does not block recovery of the others.
+ */
+export async function resumeIncompleteSagas(): Promise<{ resumed: number; compensated: number; failed: number }> {
+  const db = await getSagaDb();
+  if (!db) {
+    logger.error("[Saga] resumeIncompleteSagas: DB unavailable — cannot recover sagas (will retry on next boot)");
+    telemetryFailure("remitflow_saga_resume_failures_total", { reason: "db_unavailable" }, {}, "[Saga] boot resume skipped: DB unavailable");
+    return { resumed: 0, compensated: 0, failed: 1 };
+  }
+  const stats = { resumed: 0, compensated: 0, failed: 0 };
+
+  // ── 1) Compensate sagas that failed past the point of no return ──────────
+  const failedRes = await db.execute(sql`
+    SELECT id, payload FROM saga_instances WHERE status IN ('compensating', 'failed')
+  `);
+  const failedRows = ((failedRes as { rows?: Array<{ id: string; payload: string }> }).rows ?? []) as Array<{ id: string; payload: unknown }>;
+  for (const row of failedRows) {
+    try {
+      const payload = typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload as Record<string, unknown>;
+      const tx = rebuildTxFromPayload(payload);
+      tx.sagaContext = { sagaId: row.id };
+      const stepRows = await loadStepRows(db, row.id);
+      let outstanding = 0;
+      for (const stepRow of stepRows.filter(s => s.status === "completed" && !s.compensated).reverse()) {
+        try {
+          await compensateStep(tx, tx.steps.find(s => s.name === stepRow.step_name) ?? mkStep(stepRow.step_name));
+          await sagaStepMarkCompensated(db, row.id, stepRow.step_name);
+        } catch (compErr) {
+          outstanding++;
+          logger.error({ sagaId: row.id, step: stepRow.step_name, err: compErr instanceof Error ? compErr.message : String(compErr) }, "[Saga] Boot compensation failed — will retry on next boot");
+          const retry = createCompensationRetry(tx.transactionId, stepRow.step_name, stepRow.attempts);
+          if (retry.escalatedToPagerDuty) {
+            await escalateToPagerDuty(tx.transactionId, stepRow.step_name, stepRow.attempts);
+          }
+        }
+      }
+      if (outstanding === 0) {
+        await sagaInstanceUpdate(db, row.id, "compensated", null);
+        stats.compensated++;
+      } else {
+        stats.failed++;
+      }
+    } catch (err) {
+      stats.failed++;
+      logger.error({ sagaId: row.id, err: err instanceof Error ? err.message : String(err) }, "[Saga] Boot recovery of failed saga errored (poisoned row — manual review)");
+    }
+  }
+
+  // ── 2) Resume in-progress sagas from their persisted cursor ──────────────
+  const inProgressRes = await db.execute(sql`
+    SELECT id, payload, current_step FROM saga_instances WHERE status = 'in_progress'
+  `);
+  const inProgressRows = ((inProgressRes as { rows?: Array<{ id: string; payload: unknown; current_step: string | null }> }).rows ?? []) as Array<{ id: string; payload: unknown; current_step: string | null }>;
+  for (const row of inProgressRows) {
+    try {
+      const payload = typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload as Record<string, unknown>;
+      const tx = rebuildTxFromPayload(payload);
+      logger.warn({ sagaId: row.id, txId: tx.transactionId, resumeFrom: row.current_step }, "[Saga] Resuming incomplete saga from persisted cursor");
+      // executeCoordinatedTransaction re-attaches via the idempotency key and
+      // skips steps already completed in saga_steps (check-before-act).
+      const result = await executeCoordinatedTransaction(tx);
+      if (result.status === "completed" || result.status === "compensated") {
+        stats.resumed++;
+      } else {
+        stats.failed++;
+      }
+    } catch (err) {
+      stats.failed++;
+      logger.error({ sagaId: row.id, err: err instanceof Error ? err.message : String(err) }, "[Saga] Boot resume of in-progress saga errored — left for next boot / manual review");
+    }
+  }
+
+  logger.info({ ...stats }, "[Saga] resumeIncompleteSagas finished");
+  return stats;
+}
+
+interface SagaStepRow {
+  step_name: string;
+  status: string;
+  attempts: number;
+  compensated: boolean;
+}
+
+async function loadStepRows(db: SagaDb, sagaId: string): Promise<SagaStepRow[]> {
+  const res = await db.execute(sql`
+    SELECT step_name, status, attempts, compensated FROM saga_steps WHERE saga_id = ${sagaId}::uuid ORDER BY updated_at ASC
+  `);
+  return (((res as { rows?: SagaStepRow[] }).rows ?? []) as SagaStepRow[]);
+}
+
+function mkStep(name: string): TransactionStep {
+  return { stepId: `STEP-${randomUUID()}`, name, status: "completed", retryCount: 0 };
+}
+
+/** Rebuild a CoordinatedTransaction from the persisted saga payload. */
+function rebuildTxFromPayload(payload: Record<string, unknown>): CoordinatedTransaction {
+  const stepNames = Array.isArray(payload.steps) && payload.steps.length > 0
+    ? (payload.steps as string[])
+    : COORDINATOR_STEPS[String(payload.type)] || COORDINATOR_STEPS.cross_border_transfer;
+  return {
+    transactionId: String(payload.transactionId),
+    userId: Number(payload.userId),
+    type: String(payload.type),
+    amount: Number(payload.amount),
+    currency: String(payload.currency),
+    steps: stepNames.map(name => ({ stepId: `STEP-${randomUUID()}`, name, status: "pending" as const, retryCount: 0 })),
+    status: "in_progress",
+    createdAt: String(payload.createdAt ?? new Date().toISOString()),
+  };
 }
 
 // ─── Distributed tx-lock (W12-FIX, audit F1-3/F2-9) ─────────────────────────
@@ -327,7 +642,14 @@ async function releaseTxLock(tx: CoordinatedTransaction): Promise<void> {
   const redis = getRedisClient();
   if (!redis || !token) return; // nothing we can do — PX TTL is the backstop
   const script = `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end`;
-  await redis.eval(script, 1, lockKey, token).catch(() => { /* best-effort — TTL expires the lock */ });
+  await redis.eval(script, 1, lockKey, token).catch(err =>
+    // Best-effort — the 30s PX TTL is the backstop — but never silent.
+    telemetryFailure(
+      "remitflow_fundlock_release_failures_total",
+      {},
+      { lockKey, errMsg: err instanceof Error ? err.message : String(err) },
+      "[FundLock] compare-and-delete release failed (best-effort; PX TTL expires the lock)",
+    ));
 }
 
 // ── W18 wired saga steps (fail-open telemetry) ───────────────────────────────
@@ -453,8 +775,39 @@ async function executeStep(tx: CoordinatedTransaction, step: TransactionStep): P
       // DB recorded money the ledger never saw). FAIL-OPEN: a TB outage must
       // not fail or block the money path; the settlement reaper +
       // reconcileWithPostgres sweep surface and repair any missed write.
-      await recordTigerBeetleStep(tx).catch(err =>
-        logger.warn({ txId: tx.transactionId, errMsg: err?.message }, "[Coordinator] TigerBeetle record failed (fail-open; reconciliation will catch it)"));
+      // W20-C: on failure, keep the PG outbox fallback (see
+      // recordTigerBeetleDualWrite :366-423) and LINK it to this saga's step
+      // row so resumeIncompleteSagas()/reconciliation can attribute it.
+      await recordTigerBeetleStep(tx).catch(async err => {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        telemetryFailure(
+          "remitflow_saga_tigerbeetle_failures_total",
+          { step: step.name },
+          { txId: tx.transactionId, step: step.name, sagaId: tx.sagaContext?.sagaId, errMsg },
+          "[Coordinator] TigerBeetle record failed (fail-open; outbox + reconciliation will catch it)",
+        );
+        try {
+          const db = await getDb();
+          if (!db) throw new Error("DB unavailable for outbox fallback");
+          await insertOutboxEvent(db, {
+            aggregateId: tx.transactionId,
+            aggregateType: "tigerbeetle",
+            eventType: "dual_write_failed",
+            payload: {
+              reference: tx.transactionId,
+              amount: tx.amount,
+              currency: tx.currency,
+              direction: "user_to_settlement",
+              sagaId: tx.sagaContext?.sagaId ?? null,
+              sagaStep: step.name,
+              error: errMsg,
+              failedAt: new Date().toISOString(),
+            },
+          });
+        } catch (outboxErr) {
+          logger.error({ txId: tx.transactionId, sagaId: tx.sagaContext?.sagaId, err: outboxErr instanceof Error ? outboxErr.message : String(outboxErr) }, "[Coordinator] CRITICAL: TigerBeetle outbox fallback ALSO failed — manual reconciliation required");
+        }
+      });
       break;
     case "submit_to_rail":
       // Submit to payment rail (Mojaloop/SWIFT/stablecoin bridge)
@@ -476,7 +829,13 @@ async function executeStep(tx: CoordinatedTransaction, step: TransactionStep): P
         currency: tx.currency,
         userId: tx.userId,
         timestamp: new Date().toISOString(),
-      }).catch(() => {});
+      }).catch(err =>
+        telemetryFailure(
+          "remitflow_saga_kafka_publish_failures_total",
+          { step: step.name },
+          { txId: tx.transactionId, step: step.name, sagaId: tx.sagaContext?.sagaId, errMsg: err instanceof Error ? err.message : String(err) },
+          "[Coordinator] Kafka publish failed (fail-open telemetry — never silent)",
+        ));
       break;
     case "publish_fluvio":
       // W18: real Fluvio produce via the HTTP bridge (was log-only). FAIL-OPEN:
@@ -573,7 +932,13 @@ async function compensateStep(tx: CoordinatedTransaction, step: TransactionStep)
         currency: tx.currency,
         userId: tx.userId,
         timestamp: new Date().toISOString(),
-      }).catch(() => {});
+      }).catch(err =>
+        telemetryFailure(
+          "remitflow_saga_kafka_publish_failures_total",
+          { step: `${step.name}_compensation` },
+          { txId: tx.transactionId, step: step.name, sagaId: tx.sagaContext?.sagaId, errMsg: err instanceof Error ? err.message : String(err) },
+          "[Compensation] Kafka reversal publish failed (fail-open telemetry — never silent)",
+        ));
       break;
     default:
       // No compensation needed for read-only steps
@@ -847,7 +1212,15 @@ export async function createRateLock(
         "PX",
         RATE_LOCK_TTL_MS
       );
-    } catch { /* in-memory fallback handled by caller */ }
+    } catch (err) {
+      // In-memory fallback handled by caller — fail-open, but never silent.
+      telemetryFailure(
+        "remitflow_ratelock_redis_failures_total",
+        { op: "create" },
+        { lockId: lock.lockId, errMsg: err instanceof Error ? err.message : String(err) },
+        "[RateLock] Redis write failed — rate lock only held in memory (fail-open)",
+      );
+    }
   }
 
   return lock;
@@ -865,7 +1238,15 @@ export async function validateRateLock(lockId: string, currentRate: number): Pro
     try {
       const data = await redis.get(`ratelock:${lockId}`);
       if (data) lock = JSON.parse(data);
-    } catch { /* fallthrough */ }
+    } catch (err) {
+      // Fail-open fallthrough to "lock not found" — but never silent.
+      telemetryFailure(
+        "remitflow_ratelock_redis_failures_total",
+        { op: "validate" },
+        { lockId, errMsg: err instanceof Error ? err.message : String(err) },
+        "[RateLock] Redis read failed — treating lock as not found (fail-open)",
+      );
+    }
   }
 
   if (!lock) return { valid: false, lock: null, reason: "Rate lock expired or not found" };
@@ -924,7 +1305,15 @@ export async function trackVelocity(
         totalAmount,
         blocked: false,
       };
-    } catch { /* fallthrough */ }
+    } catch (err) {
+      // Fail-open fallthrough (velocity check unavailable) — never silent.
+      telemetryFailure(
+        "remitflow_velocity_redis_failures_total",
+        { action },
+        { userId, action, errMsg: err instanceof Error ? err.message : String(err) },
+        "[Velocity] Redis pipeline failed — returning zeroed window (fail-open)",
+      );
+    }
   }
 
   return { count: 0, totalAmount: 0, blocked: false };
@@ -1093,7 +1482,13 @@ export async function startBalanceReconciliationListener(
       publishEvent(KAFKA_TOPICS.AUDIT_LOGS, `recon-${event.userId}-${Date.now()}`, {
         type: "balance_reconciliation",
         ...event,
-      }).catch(() => {});
+      }).catch(err =>
+        telemetryFailure(
+          "remitflow_reconciliation_emit_failures_total",
+          { topic: KAFKA_TOPICS.AUDIT_LOGS },
+          { userId: event.userId, currency: event.currency, errMsg: err instanceof Error ? err.message : String(err) },
+          "[Reconciliation] Kafka emit failed (fail-open telemetry — never silent)",
+        ));
     } catch (err) {
       logger.error({ err }, "[Reconciliation] Failed to parse balance change event");
     }

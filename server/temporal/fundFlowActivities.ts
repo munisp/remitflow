@@ -198,10 +198,31 @@ export async function recordTigerBeetleEntry(params: {
     });
     if (res.ok) {
       const data = await res.json() as { entryId: string };
+      // W20 DL-10: produce FUND_FLOW_LEDGER — the topic was registered but
+      // never produced. Best-effort telemetry (fail-open, never silent).
+      try {
+        const { publishEvent, KAFKA_TOPICS } = await import("../middleware/kafka");
+        const published = await publishEvent(KAFKA_TOPICS.FUND_FLOW_LEDGER, params.operationId, {
+          entryId: data.entryId,
+          operationId: params.operationId,
+          debitAccount: params.debitAccount,
+          creditAccount: params.creditAccount,
+          amount: params.amount,
+          currency: params.currency,
+          flowType: params.flowType,
+          transferRef: params.transferRef,
+          pending: false,
+          timestamp: new Date().toISOString(),
+        });
+        if (!published) log.warn("FUND_FLOW_LEDGER publish returned false (producer unavailable)", { operationId: params.operationId });
+      } catch (err) {
+        log.warn("FUND_FLOW_LEDGER publish failed", { operationId: params.operationId, error: err instanceof Error ? err.message : String(err) });
+      }
       return data;
     }
   } catch {
     // Fallback: record locally
+    log.warn("Orchestrator ledger entry failed — using local fallback id", { operationId: params.operationId });
   }
   return { entryId: params.operationId };
 }

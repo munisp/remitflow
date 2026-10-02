@@ -168,11 +168,16 @@ export async function checkIdempotency(op: AtomicOperation): Promise<unknown | n
     const cached = await redis.get(key);
     if (cached) return JSON.parse(cached);
     return null;
-  } catch {
+  } catch (err) {
+    // W20-F (DL-16): non-strict idempotency fallback is allowed ONLY outside
+    // production (isFundFlowStrictMode() is always true when
+    // NODE_ENV==='production'); in production we throw — fail closed.
     if (isFundFlowStrictMode()) {
-      logger.error({ key }, "[Idempotency] Redis unavailable in strict mode — cannot verify idempotency");
+      logger.error({ err, key }, "[Idempotency] Redis unavailable in strict mode — cannot verify idempotency");
       throw new Error("[FUND_FLOW_BLOCKED] Redis unavailable — cannot verify operation idempotency");
     }
+    // Dev/test degrade — never silent.
+    logger.warn({ err, key }, "[Idempotency] Redis unavailable, using in-memory fallback (dev/test only)");
   }
 
   // In-memory fallback (development only)
@@ -191,9 +196,10 @@ export async function storeIdempotencyResult(op: AtomicOperation, result: unknow
     const redis = await getRedisConnection();
     await redis.set(key, JSON.stringify(result), "PX", IDEMPOTENCY_TTL_MS);
     return;
-  } catch {
-    // Best-effort — idempotency is defense-in-depth, not single point
-    logger.warn({ key }, "[Idempotency] Could not store result in Redis");
+  } catch (err) {
+    // Best-effort — idempotency is defense-in-depth, not single point.
+    // Never silent: error bound + logged.
+    logger.warn({ err, key }, "[Idempotency] Could not store result in Redis");
   }
 
   // In-memory fallback (development only)

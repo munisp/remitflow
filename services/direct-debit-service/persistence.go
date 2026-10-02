@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -23,18 +25,32 @@ var migrationSQL string
 
 var db *sql.DB
 
+// devEnv reports whether the process runs in a dev/test environment where
+// volatile in-memory mode is tolerated. Outside dev/test the service fails
+// closed (W20 DL-12/13/14) rather than silently losing durable state.
+func devEnv() bool {
+	for _, k := range []string{"APP_ENV", "ENV", "GO_ENV"} {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv(k))) {
+		case "dev", "development", "test":
+			return true
+		}
+	}
+	return false
+}
+
 func initDB() {
 	dsn := getEnv("DATABASE_URL", "")
 	if dsn == "" {
+		if !devEnv() {
+			log.Fatalf("DATABASE_URL is required outside dev/test — refusing to boot in volatile in-memory mode (fail closed)")
+		}
 		log.Printf("[direct-debit] WARN: DATABASE_URL not set — mandates/collections are VOLATILE in-memory (dev mode only)")
 		return
 	}
 	var err error
 	db, err = sql.Open("postgres", dsn)
 	if err != nil {
-		log.Printf("[direct-debit] WARN: db open failed: %v — volatile in-memory mode", err)
-		db = nil
-		return
+		log.Fatalf("DATABASE_URL is set but the database is unreachable (open failed: %v) — failing closed", err)
 	}
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
@@ -42,10 +58,8 @@ func initDB() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
-		log.Printf("[direct-debit] WARN: db ping failed: %v — volatile in-memory mode", err)
 		db.Close()
-		db = nil
-		return
+		log.Fatalf("DATABASE_URL is set but the database is unreachable (ping failed: %v) — failing closed", err)
 	}
 	if getEnv("AUTO_MIGRATE", "") == "1" {
 		if _, err := db.ExecContext(ctx, migrationSQL); err != nil {

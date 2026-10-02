@@ -261,6 +261,40 @@ async function enforceKycTierLimits(userId: number, amount: number): Promise<voi
   }
 }
 
+// ─── Kafka Outbox (W20 DL-19) ────────────────────────────────────────────────
+// The pipeline's Kafka emit was degraded-open: a broker outage silently dropped
+// transfer events, so downstream consumers never saw completed transfers. Now
+// the settlement path writes kafka_outbox rows in the SAME db.transaction as
+// the settlement journal (atomic with the PG debit), and the relay in
+// server/_core/fundFlowDlqConsumer.ts publishes pending rows with backoff.
+// Degraded (non-transactional) emits fall back to a best-effort outbox write.
+
+async function writeKafkaOutbox(topic: string, key: string, payload: unknown): Promise<boolean> {
+  try {
+    const db = await getDb();
+    if (!db) throw new Error("database unavailable");
+    await db.execute(sql`
+      INSERT INTO kafka_outbox (topic, key, payload, status, created_at)
+      VALUES (${topic}, ${key}, ${JSON.stringify(payload)}::jsonb, 'pending', NOW())
+    `);
+    return true;
+  } catch (err) {
+    logger.error(
+      { topic, key, err: err instanceof Error ? err.message : String(err) },
+      "[Pipeline] CRITICAL: kafka_outbox write failed — event may be lost, MANUAL RECONCILIATION REQUIRED",
+    );
+    return false;
+  }
+}
+
+/** Outbox insert bound to an existing transaction (settlement journal tx). */
+async function insertKafkaOutboxTx(tx: any, topic: string, key: string, payload: unknown): Promise<void> {
+  await tx.execute(sql`
+    INSERT INTO kafka_outbox (topic, key, payload, status, created_at)
+    VALUES (${topic}, ${key}, ${JSON.stringify(payload)}::jsonb, 'pending', NOW())
+  `);
+}
+
 // ─── Pipeline Execution ──────────────────────────────────────────────────────
 
 export async function executeTransferPipeline(input: TransferPipelineInput): Promise<TransferPipelineResult> {
@@ -472,7 +506,20 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
     });
     result.kafkaPublished = true;
   } catch (err) {
-    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Pipeline] Kafka publish degraded");
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Pipeline] Kafka publish degraded — falling back to kafka_outbox");
+    // W20 DL-19: do not lose the initiation events — park them in kafka_outbox
+    // for the relay (best-effort here; the settlement path is transactional).
+    const ts = new Date().toISOString();
+    await writeKafkaOutbox(KAFKA_TOPICS.TRANSACTIONS, input.transferId, {
+      eventType: "created", transactionId: input.transferId, userId: input.userId,
+      amount: input.amount, currency: input.fromCurrency, toCurrency: input.toCurrency,
+      status: "pending", destinationCountry: input.corridorCode, timestamp: ts,
+    });
+    await writeKafkaOutbox(KAFKA_TOPICS.PAYMENT_INITIATED, input.transferId, {
+      paymentId: input.transferId, userId: input.userId, amount: input.amount,
+      fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, rail: input.rail,
+      corridor: input.corridorCode, feature: input.featureLabel, timestamp: ts,
+    });
   }
 
   // 7. Audit logging
@@ -557,7 +604,16 @@ export async function publishTransferCompletion(input: {
     };
     await publishEvent(KAFKA_TOPICS.TRANSACTIONS, input.transferId, completedEvent);
   } catch (err) {
-    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Pipeline] Completion event publish failed");
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Pipeline] Completion event publish failed — falling back to kafka_outbox");
+    // W20 DL-19: downstream consumers must see completed transfers even if
+    // Kafka was briefly down — park both completion events for the relay.
+    const ts = new Date().toISOString();
+    await writeKafkaOutbox(KAFKA_TOPICS.PAYMENT_COMPLETED, input.transferId, { ...input, timestamp: ts });
+    await writeKafkaOutbox(KAFKA_TOPICS.TRANSACTIONS, input.transferId, {
+      eventType: "completed", transactionId: input.transferId, userId: input.userId,
+      amount: input.amount, currency: input.fromCurrency, toCurrency: input.toCurrency,
+      toAmount: input.toAmount, status: "completed", destinationCountry: input.corridor, timestamp: ts,
+    });
   }
 }
 
@@ -636,6 +692,35 @@ export async function settleTransferHold(input: {
         `);
         insufficientBalance = true;
       }
+    }
+
+    if (inserted.length > 0 && !insufficientBalance) {
+      // W20 DL-19: write the completion events to kafka_outbox in the SAME
+      // transaction as the journal + debit. The relay publishes them even if
+      // Kafka is down at settlement time — completed transfers are never
+      // invisible to downstream consumers.
+      const ts = new Date().toISOString();
+      await insertKafkaOutboxTx(tx, KAFKA_TOPICS.PAYMENT_COMPLETED, input.transferId, {
+        paymentId: input.transferId,
+        userId: input.userId,
+        amount: input.amount,
+        currency: input.currency,
+        status: "completed",
+        // Honest staging: the TB hold post happens after this transaction
+        // commits; a post_failed/refund is reconciled by the reaper.
+        settlementStage: "journal_debited",
+        settledAt: ts,
+        timestamp: ts,
+      });
+      await insertKafkaOutboxTx(tx, KAFKA_TOPICS.TRANSACTIONS, input.transferId, {
+        eventType: "completed",
+        transactionId: input.transferId,
+        userId: input.userId,
+        amount: input.amount,
+        currency: input.currency,
+        status: "completed",
+        timestamp: ts,
+      });
     }
     return inserted;
   });
@@ -761,6 +846,23 @@ export async function reconcileSettlementJournal(limit = 100): Promise<{ retried
       failed++;
       logger.error({ transferId: row.transfer_id, err: err instanceof Error ? err.message : String(err) },
         "[SettlementReaper] Reconciliation attempt failed — will retry next pass");
+    }
+  }
+  // W20 DL-10: produce TIGERBEETLE_RECONCILIATION — the topic was registered
+  // but never produced. Best-effort telemetry, never silent on failure.
+  if (retried > 0 || refunded > 0 || failed > 0) {
+    try {
+      const published = await publishEvent(KAFKA_TOPICS.TIGERBEETLE_RECONCILIATION, `recon-${Date.now()}`, {
+        eventType: "settlement_journal_reconciliation",
+        retried,
+        refunded,
+        failed,
+        manualReconciliationRequired: refunded > 0,
+        timestamp: new Date().toISOString(),
+      });
+      if (!published) logger.warn({ retried, refunded, failed }, "[SettlementReaper] TIGERBEETLE_RECONCILIATION publish returned false (producer unavailable)");
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[SettlementReaper] TIGERBEETLE_RECONCILIATION publish failed");
     }
   }
   return { retried, refunded, failed };

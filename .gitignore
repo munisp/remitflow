@@ -135,3 +135,10 @@ services/go-liquidity-manager/go-liquidity-manager
 services/go-notification-hub/go-notification-hub
 services/go-odl-orchestrator/go-odl-orchestrator
 services/go-stablecoin-settlement/go-stablecoin-settlement
+
+# W20: defensive guards — never commit service binaries
+services/*/main
+services/*/*.exe
+*.exe
+services/rust-*/rust-*
+microservices/rust-services/*/target/

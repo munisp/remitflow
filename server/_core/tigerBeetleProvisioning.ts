@@ -134,9 +134,13 @@ export async function provisionTigerBeetleAccounts(
 
     try {
       await publishEvent(KAFKA_TOPICS.ACCOUNT_EVENTS, String(userId), event);
-    } catch {
-      // Kafka publish is best-effort — don't fail provisioning on Kafka issues
-      logger.warn({ userId }, "[TigerBeetle] Kafka publish failed for provisioning event");
+      // W20 DL-10: also produce to the dedicated ACCOUNT_PROVISIONED topic —
+      // it was registered but never produced (a void consumers relied on).
+      await publishEvent(KAFKA_TOPICS.ACCOUNT_PROVISIONED, String(userId), event);
+    } catch (err) {
+      // Kafka publish is best-effort — don't fail provisioning on Kafka issues,
+      // but never swallow silently: log + rely on account_events_log consumer.
+      logger.warn({ userId, err: err instanceof Error ? err.message : String(err) }, "[TigerBeetle] Kafka publish failed for provisioning event");
     }
 
     logger.info(

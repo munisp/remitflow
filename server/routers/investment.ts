@@ -549,14 +549,55 @@ export const ngxStockRouter = router({
     .mutation(async ({ input }) => {
       const envKey = input.brokerName.toUpperCase().replace(/[^A-Z0-9]/g, "_");
       if (!process.env[`BROKER_${envKey}_API_KEY`]) {
+        // W20-F (DL-04): fail closed, but never silently — emit a structured
+        // audit record of the rejected fill intent before throwing.
+        logger.warn(
+          {
+            auditEvent: "broker_fill_intent_rejected",
+            reason: "broker_not_configured",
+            brokerName: input.brokerName,
+            user: undefined as number | undefined, // webhook is unauthenticated; no user context
+            symbol: (input.payload as any)?.symbol ?? undefined,
+            qty: (input.payload as any)?.qty ?? (input.payload as any)?.quantity ?? undefined,
+            price: (input.payload as any)?.price ?? undefined,
+            brokerReference: input.payload.brokerReference ?? input.payload.reference ?? undefined,
+            status: input.payload.status ?? undefined,
+            timestamp: new Date().toISOString(),
+          },
+          `[Investment] Broker fill intent REJECTED (${input.brokerName}) — broker not configured`,
+        );
         throw new TRPCError({ code: "NOT_IMPLEMENTED", message: `Broker ${input.brokerName} is not configured — webhook ingestion unavailable` });
       }
       const ok = verifyBrokerWebhookSignature(input.brokerName, JSON.stringify(input.payload), input.signature);
       if (!ok) {
         throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid broker webhook signature" });
       }
-      // Signature verified, but fill processing is intentionally not
-      // implemented yet — fail closed with 501 instead of pretending.
+      // W20-F (DL-04): signature verified, but fill processing is intentionally
+      // not implemented yet — fail closed with 501 instead of pretending.
+      // The structured record below is the durable trace of every verified
+      // fill we refused to ingest (intent fields included where the broker
+      // supplied them; symbol/qty/price are not in the current webhook schema
+      // and are logged as undefined until W21).
+      // TODO(W21): persist broker fill intents to a dedicated
+      // `broker_fill_intents` table (tenant_id, broker, reference, symbol,
+      // qty, price, status, received_at) with UNIQUE(broker, reference) for
+      // idempotent replay, then reconcile into ngx_orders. Tracked for W21.
+      logger.warn(
+        {
+          auditEvent: "broker_fill_intent_rejected",
+          reason: "fill_ingestion_not_implemented",
+          brokerName: input.brokerName,
+          user: undefined as number | undefined,
+          symbol: (input.payload as any)?.symbol ?? undefined,
+          qty: (input.payload as any)?.qty ?? (input.payload as any)?.quantity ?? undefined,
+          price: (input.payload as any)?.price ?? undefined,
+          brokerReference: input.payload.brokerReference ?? input.payload.reference ?? undefined,
+          status: input.payload.status ?? undefined,
+          executedAt: input.payload.executedAt ?? undefined,
+          timestamp: new Date().toISOString(),
+        },
+        `[Investment] VERIFIED broker fill REJECTED (${input.brokerName} ref=${input.payload.brokerReference ?? input.payload.reference ?? "?"}) — ingestion not implemented; manual reconciliation required`,
+      );
       throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "Broker fill ingestion not yet implemented — executions are reconciled manually by operations" });
     }),
 

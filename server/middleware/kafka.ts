@@ -70,8 +70,12 @@ export const KAFKA_TOPICS = {
   RISK_SCORES: "remitflow.risk.scores",
   NOTIFICATIONS: "remitflow.notifications.stream",
   AUDIT_LOGS: "remitflow.audit.stream",
-  MOJALOOP_TRANSFERS: "remitflow.mojaloop.transfers",
-  INVESTMENT_PRICES: "remitflow.investment.prices",
+  // W20 DL-10: MOJALOOP_TRANSFERS ("remitflow.mojaloop.transfers") and
+  // INVESTMENT_PRICES ("remitflow.investment.prices") removed from the registry.
+  // Neither topic has ever had a producer anywhere in the tree (the natural
+  // producers live outside the TS app: services/mojaloop-connector (Go) and the
+  // broker/investment stack), and nothing consumes them — a registered-but-never-
+  // produced topic is a silent data-loss void. Re-add alongside a real producer.
   PAYMENT_INITIATED: "remitflow.payment.initiated",
   PAYMENT_COMPLETED: "remitflow.payment.completed",
   PAYMENT_FAILED: "remitflow.payment.failed",

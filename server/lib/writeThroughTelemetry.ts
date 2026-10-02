@@ -19,7 +19,40 @@
  */
 import { logger } from "../_core/logger";
 
+// W20-F (DL-17): counters are Redis-primary (INCR + TTL) so they survive
+// process restarts and are correct across replicas. The in-memory Map is the
+// dev/test fallback only. In production a lost Redis increment is NEVER
+// silent: it increments the in-memory meta-counter
+// `__telemetry_counter_loss__` and is ERROR-logged (telemetry stays
+// fail-open — it never throws, never blocks the caller).
+const REDIS_COUNTER_TTL_SECS = 7 * 24 * 60 * 60; // 7 days
+const META_COUNTER_LOSS_KEY = "__telemetry_counter_loss__";
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
 const counters = new Map<string, number>();
+
+async function incrementRedisCounter(store: string): Promise<boolean> {
+  try {
+    // Dynamic import avoids a module-load cycle risk (redisHardened pulls in
+    // ioredis; keeping this lazy also keeps unit tests Redis-free).
+    const { getRedisConnection } = await import("../middleware/redisHardened");
+    const redis = await getRedisConnection();
+    const key = `wtt:failures:${store.replace(/[^a-zA-Z0-9_.-]/g, "_")}`;
+    await redis.incr(key);
+    await redis.expire(key, REDIS_COUNTER_TTL_SECS);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function bumpMetaCounterLoss(err?: unknown): void {
+  counters.set(META_COUNTER_LOSS_KEY, (counters.get(META_COUNTER_LOSS_KEY) ?? 0) + 1);
+  logger.error(
+    { errMsg: err instanceof Error ? err.message : err ? String(err) : undefined, total: counters.get(META_COUNTER_LOSS_KEY) },
+    "[WriteThrough] Redis counter increment LOST in production — in-memory counters only (meta-counter bumped)",
+  );
+}
 
 /**
  * Report a failed durable write-through / dual-write. Replaces
@@ -36,6 +69,13 @@ export function reportWriteThroughFailure(
   err?: unknown,
   severity: "warn" | "error" = "warn",
 ): void {
+  // Redis-primary counter (durable, cluster-wide). Fire-and-forget: telemetry
+  // is fail-open and must never block/throw into the caller's path.
+  void incrementRedisCounter(store).then((ok) => {
+    if (!ok && IS_PRODUCTION) bumpMetaCounterLoss();
+  });
+  // In-memory fallback — retained for dev/test and as the /metrics source
+  // when Redis is down; in production a Redis loss is meta-counted above.
   counters.set(store, (counters.get(store) ?? 0) + 1);
   const meta = {
     store,

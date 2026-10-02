@@ -46,7 +46,7 @@ services:
       - "8142:8142"
     environment:
       PORT: "8142"
-      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL}
     networks: [remitflow-net]
     healthcheck:
@@ -73,7 +73,7 @@ services:
       - "8143:8143"
     environment:
       PORT: "8143"
-      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
     networks: [remitflow-net]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8143/livez')"]
@@ -152,7 +152,7 @@ services:
       - "8130:8130"
     environment:
       PORT: "8130"
-      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
     networks: [remitflow-net]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8130/livez"]
