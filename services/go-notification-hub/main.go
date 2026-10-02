@@ -316,8 +316,7 @@ func startWorkers(n int) {
 			defer workerWG.Done()
 			for req := range hub.queue {
 				processNotification(req)
-			}
-		}()
+			}()
 	}
 }
 
@@ -343,6 +342,7 @@ func processNotification(req *NotificationRequest) {
 		hub.mu.Lock()
 		hub.records = append(hub.records, record)
 		hub.mu.Unlock()
+		persistDeliveryRecord(&record)
 		return
 	}
 
@@ -363,6 +363,7 @@ func processNotification(req *NotificationRequest) {
 		hub.mu.Lock()
 		hub.records = append(hub.records, record)
 		hub.mu.Unlock()
+		persistDeliveryRecord(&record)
 		return
 	}
 
@@ -405,6 +406,7 @@ func processNotification(req *NotificationRequest) {
 	} // ring buffer
 	hub.records = append(hub.records, record)
 	hub.mu.Unlock()
+	persistDeliveryRecord(&record)
 }
 
 // ── HTTP Handlers ─────────────────────────────────────────────────────────────
@@ -480,6 +482,7 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	slog.Info("[NotifHub] Starting", "port", port)
+	initDB()
 	startWorkers(10) // 10 concurrent dispatch workers
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
