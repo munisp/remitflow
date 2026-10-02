@@ -41,6 +41,9 @@ import {
 } from "../../drizzle/schema.js";
 import { getKafkaProducer, publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
 import { executeTransferPipeline } from "../_core/transferPipeline.js";
+// W19-F: TigerBeetle write-through for the dispute refund credit.
+import { recordTigerBeetleDualWrite } from "../_core/fundFlowHardening";
+import { TB_ACCOUNT_CODES } from "../_core/tigerBeetle";
 import { assertFeatureEligible } from "../_core/featureGuard.js";
 import { broadcastUserEvent } from "../sse.service.js";
 import {
@@ -889,7 +892,7 @@ const milestoneRouter = router({
       const db = await getDbConn();
       const [plan] = await db.select().from(propertyEscrowPlans).where(eq(propertyEscrowPlans.planId, input.planId)).limit(1);
       if (!plan) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
-      const milestones = await db.select().from(propertyMilestones).where(eq(propertyMilestones.escrowPlanId, plan.id)).orderBy(propertyMilestones.sequenceNumber);
+      const milestones = await db.select().from(propertyMilestones).where(eq(propertyEscrowPlans.escrowPlanId, plan.id)).orderBy(propertyMilestones.sequenceNumber);
 
       const timeline = await Promise.all(milestones.map(async (m: typeof milestones[number]) => {
         const evidence = await db.select().from(milestoneEvidence).where(eq(milestoneEvidence.milestoneId, m.id)).orderBy(desc(milestoneEvidence.createdAt));
@@ -1168,6 +1171,10 @@ const propertyDisputeRouter = router({
           } as any).returning();
 
           await db.update(propertyEscrowPlans).set({ status: "refunded", updatedAt: new Date() }).where(eq(propertyEscrowPlans.id, plan.id)).returning();
+          // W19-F: TB dual-write of the refund credit (platform escrow account
+          // → buyer wallet). Fail-open; PG above is authoritative; outbox
+          // fallback inside the helper. Deterministic id from the dispute ref.
+          await recordTigerBeetleDualWrite({ reference: `ESCROW-REFUND-${input.disputeId}`, fromCode: TB_ACCOUNT_CODES.ESCROW, toUserId: plan.buyerId, toCode: TB_ACCOUNT_CODES.USER_WALLET, amount: input.refundAmountUsd, currency: "USD" });
           updates.refundCompletedAt = new Date();
           updates.status = "refund_completed";
         }

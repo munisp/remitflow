@@ -22,9 +22,13 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
+
+const MIGRATION_SQL: &str = include_str!("../migrations/0001_init.sql");
 
 // ============================================================================
 // Domain Types
@@ -122,6 +126,9 @@ pub struct AppState {
     pub total_failed: Arc<AtomicU64>,
     pub total_processing_time_us: Arc<AtomicU64>,
     pub start_time: u64,
+    /// PostgreSQL write-through pool. `None` = degraded in-memory mode
+    /// (DATABASE_URL unset; dev only — a WARN is emitted at boot).
+    pub db: Option<PgPool>,
 }
 
 impl AppState {
@@ -134,8 +141,107 @@ impl AppState {
             total_failed: Arc::new(AtomicU64::new(0)),
             total_processing_time_us: Arc::new(AtomicU64::new(0)),
             start_time: now_unix(),
+            db: None,
         }
     }
+}
+
+// ============================================================================
+// PostgreSQL persistence (boot-load + write-through)
+// ============================================================================
+
+/// Connect to PostgreSQL, apply migrations, and return the pool.
+/// Returns None when DATABASE_URL is unset (degraded in-memory mode).
+async fn init_db() -> Option<PgPool> {
+    let db_url = match std::env::var("DATABASE_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!("[rust-transaction-processor] WARN: DATABASE_URL unset — running in DEGRADED in-memory mode; transactions will NOT survive restart");
+            return None;
+        }
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .connect(&db_url)
+        .await
+        .expect("DATABASE_URL is set but PostgreSQL connection failed — refusing to start money-path service without durable storage");
+    sqlx::raw_sql(MIGRATION_SQL)
+        .execute(&pool)
+        .await
+        .expect("failed to apply tx_processor migrations");
+    println!("[rust-transaction-processor] PostgreSQL connected, migrations applied");
+    Some(pool)
+}
+
+/// Boot-load persisted transactions + idempotency keys into the memory caches.
+async fn load_from_db(pool: &PgPool, state: &AppState) {
+    let rows: Vec<(String, String, serde_json::Value)> = match sqlx::query_as(
+        "SELECT id, idempotency_key, data FROM tx_processor_transactions",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[rust-transaction-processor] ERROR: boot-load failed: {}", e);
+            return;
+        }
+    };
+    let mut txns = state.transactions.write().await;
+    let mut cache = state.idempotency_cache.write().await;
+    let mut loaded = 0usize;
+    for (id, key, data) in rows {
+        match serde_json::from_value::<Transaction>(data) {
+            Ok(tx) => {
+                txns.insert(id.clone(), tx);
+                cache.insert(key, id);
+                loaded += 1;
+            }
+            Err(e) => eprintln!("[rust-transaction-processor] WARN: skipping corrupt row: {}", e),
+        }
+    }
+    println!("[rust-transaction-processor] boot-loaded {} transactions from PostgreSQL", loaded);
+}
+
+/// Write-through insert. Returns Err on DB failure (caller fails closed).
+async fn persist_transaction(pool: &PgPool, tx: &Transaction) -> Result<bool, sqlx::Error> {
+    let data = serde_json::to_value(tx).unwrap_or_default();
+    let res = sqlx::query(
+        "INSERT INTO tx_processor_transactions
+            (id, idempotency_key, user_id, from_account_id, to_account_id, amount, fee, net_amount,
+             currency, transaction_type, status, data, created_at_unix, updated_at_unix)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         ON CONFLICT (idempotency_key) DO NOTHING",
+    )
+    .bind(&tx.id)
+    .bind(&tx.idempotency_key)
+    .bind(&tx.user_id)
+    .bind(&tx.from_account_id)
+    .bind(&tx.to_account_id)
+    .bind(tx.amount)
+    .bind(tx.fee)
+    .bind(tx.net_amount)
+    .bind(&tx.currency)
+    .bind(serde_json::to_value(&tx.transaction_type).unwrap_or_default().as_str().unwrap_or("UNKNOWN").to_string())
+    .bind(serde_json::to_value(&tx.status).unwrap_or_default().as_str().unwrap_or("UNKNOWN").to_string())
+    .bind(&data)
+    .bind(tx.created_at as i64)
+    .bind(tx.updated_at as i64)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Fetch an existing transaction by idempotency key (conflict path).
+async fn fetch_by_idempotency_key(pool: &PgPool, key: &str) -> Option<Transaction> {
+    let row: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT data FROM tx_processor_transactions WHERE idempotency_key = $1",
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .ok()?;
+    row.and_then(|(v,)| serde_json::from_value::<Transaction>(v).ok())
 }
 
 // ============================================================================
@@ -288,6 +394,35 @@ async fn create_transaction(
         processing_time_us,
     };
 
+    // Durable write-through FIRST (fail-closed on money path): if PostgreSQL is
+    // configured and the insert fails, the request fails — no silent divergence.
+    if let Some(ref pool) = state.db {
+        match persist_transaction(pool, &transaction).await {
+            Ok(true) => {}
+            Ok(false) => {
+                // Idempotency key claimed concurrently/by a prior boot — replay stored record.
+                if let Some(existing) = fetch_by_idempotency_key(pool, &req.idempotency_key).await {
+                    let mut txns = state.transactions.write().await;
+                    txns.insert(existing.id.clone(), existing.clone());
+                    let mut cache = state.idempotency_cache.write().await;
+                    cache.insert(req.idempotency_key.clone(), existing.id.clone());
+                    return Ok(Json(existing));
+                }
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({"error": "idempotency key conflict"})),
+                ));
+            }
+            Err(e) => {
+                eprintln!("[rust-transaction-processor] ERROR: transaction persist failed (fail-closed): {}", e);
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({"error": "durable store unavailable"})),
+                ));
+            }
+        }
+    }
+
     // Store transaction
     {
         let mut txns = state.transactions.write().await;
@@ -381,7 +516,11 @@ async fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8020".to_string());
     let addr = format!("0.0.0.0:{}", port);
 
-    let state = AppState::new();
+    let mut state = AppState::new();
+    state.db = init_db().await;
+    if let Some(ref pool) = state.db {
+        load_from_db(pool, &state).await;
+    }
 
     let app = Router::new()
         .route("/health", get(health))
