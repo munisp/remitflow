@@ -97,7 +97,6 @@ func TestDailyLimitEnforcement(t *testing.T) {
 	t.Log("TestDailyLimitEnforcement passed")
 }
 
-
 // ─── Benchmarks ───────────────────────────────────────────────────────────────
 
 func BenchmarkHealthCheck(b *testing.B) {
