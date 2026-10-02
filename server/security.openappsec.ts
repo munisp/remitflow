@@ -32,6 +32,8 @@
 import type { Request, Response, NextFunction } from "express";
 import { logger } from './_core/logger';
 import { getSharedBodyString } from "./security.middleware";
+import { getRedisClient } from "./middleware/redis";
+import { reportWriteThroughFailure } from "./lib/writeThroughTelemetry";
 
 const OPENAPPSEC_SIDECAR_URL =
   process.env.OPENAPPSEC_SIDECAR_URL?.trim() ||
@@ -73,19 +75,72 @@ interface WafDecision {
 
 /**
  * IP Blocklist — managed dynamically via admin API or loaded from env.
- * In production: synced from OpenAppSec management portal.
+ *
+ * W19-B: the blocklist is now AUTHORITATIVELY stored in Redis
+ * (`openappsec:ip_blocklist` SET — replica-consistent, survives restarts;
+ * no TTL: entries persist until explicitly removed). The local `ipBlocklist`
+ * Set is only a read mirror so the synchronous WAF middleware can check
+ * membership without an await; it is refreshed on boot, on every mutation,
+ * and periodically. The WAF is documented fail-open (see middleware below),
+ * so a stale mirror degrades to pre-W19 behavior — never a hard outage.
+ * Mutation failures are logged + counted via writeThroughTelemetry.
  */
+const BLOCKLIST_REDIS_KEY = "openappsec:ip_blocklist";
 const ipBlocklist = new Set<string>(
   (process.env.OPENAPPSEC_IP_BLOCKLIST || "").split(",").filter(Boolean)
 );
 
-export function addToBlocklist(ip: string): void {
-  ipBlocklist.add(ip);
-  logger.info(`[OpenAppSec] Added ${ip} to blocklist (total: ${ipBlocklist.size})`);
+async function refreshBlocklistMirror(): Promise<void> {
+  const redis = getRedisClient();
+  if (!redis) return;
+  try {
+    const members = await redis.smembers(BLOCKLIST_REDIS_KEY);
+    ipBlocklist.clear();
+    for (const m of members) ipBlocklist.add(m);
+    // Re-apply env-seeded entries so they are never lost
+    for (const ip of (process.env.OPENAPPSEC_IP_BLOCKLIST || "").split(",").filter(Boolean)) {
+      ipBlocklist.add(ip);
+    }
+  } catch (err) {
+    reportWriteThroughFailure("openappsec_ip_blocklist", err, "error");
+  }
 }
 
-export function removeFromBlocklist(ip: string): void {
+// Boot-load the mirror from Redis; retry periodically to pick up mutations
+// made by other replicas.
+refreshBlocklistMirror().catch((err) => reportWriteThroughFailure("openappsec_ip_blocklist", err, "error"));
+const _blocklistRefresh = setInterval(() => {
+  refreshBlocklistMirror().catch((err) => reportWriteThroughFailure("openappsec_ip_blocklist", err, "error"));
+}, 60_000);
+_blocklistRefresh.unref?.();
+
+export async function addToBlocklist(ip: string): Promise<void> {
+  ipBlocklist.add(ip);
+  const redis = getRedisClient();
+  if (redis) {
+    try {
+      await redis.sadd(BLOCKLIST_REDIS_KEY, ip);
+    } catch (err) {
+      reportWriteThroughFailure("openappsec_ip_blocklist", err, "error");
+    }
+  } else {
+    reportWriteThroughFailure("openappsec_ip_blocklist", new Error("Redis client unavailable — blocklist entry is process-local only"), "error");
+  }
+  logger.info(`[OpenAppSec] Added ${ip} to blocklist (local total: ${ipBlocklist.size})`);
+}
+
+export async function removeFromBlocklist(ip: string): Promise<void> {
   ipBlocklist.delete(ip);
+  const redis = getRedisClient();
+  if (redis) {
+    try {
+      await redis.srem(BLOCKLIST_REDIS_KEY, ip);
+    } catch (err) {
+      reportWriteThroughFailure("openappsec_ip_blocklist", err, "error");
+    }
+  } else {
+    reportWriteThroughFailure("openappsec_ip_blocklist", new Error("Redis client unavailable — blocklist removal is process-local only"), "error");
+  }
 }
 
 export function getBlocklistSize(): number {

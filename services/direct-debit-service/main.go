@@ -52,40 +52,40 @@ const (
 )
 
 type DirectDebitMandate struct {
-	ID              string        `json:"id"`
-	UserID          string        `json:"user_id" binding:"required"`
-	AccountName     string        `json:"account_name" binding:"required"`
-	AccountNumber   string        `json:"account_number" binding:"required"`
-	SortCode        string        `json:"sort_code,omitempty"` // UK BACS
-	IBAN            string        `json:"iban,omitempty"`      // SEPA
-	BIC             string        `json:"bic,omitempty"`       // SEPA
-	RoutingNumber   string        `json:"routing_number,omitempty"` // ACH
-	Scheme          DDScheme      `json:"scheme" binding:"required"`
-	Reference       string        `json:"reference"`
-	Status          MandateStatus `json:"status"`
-	MaxAmount       float64       `json:"max_amount,omitempty"`
-	Currency        string        `json:"currency"`
-	CreatedAt       time.Time     `json:"created_at"`
-	UpdatedAt       time.Time     `json:"updated_at"`
-	ActivatedAt     *time.Time    `json:"activated_at,omitempty"`
-	CancelledAt     *time.Time    `json:"cancelled_at,omitempty"`
-	CancellationReason string     `json:"cancellation_reason,omitempty"`
+	ID                 string        `json:"id"`
+	UserID             string        `json:"user_id" binding:"required"`
+	AccountName        string        `json:"account_name" binding:"required"`
+	AccountNumber      string        `json:"account_number" binding:"required"`
+	SortCode           string        `json:"sort_code,omitempty"`      // UK BACS
+	IBAN               string        `json:"iban,omitempty"`           // SEPA
+	BIC                string        `json:"bic,omitempty"`            // SEPA
+	RoutingNumber      string        `json:"routing_number,omitempty"` // ACH
+	Scheme             DDScheme      `json:"scheme" binding:"required"`
+	Reference          string        `json:"reference"`
+	Status             MandateStatus `json:"status"`
+	MaxAmount          float64       `json:"max_amount,omitempty"`
+	Currency           string        `json:"currency"`
+	CreatedAt          time.Time     `json:"created_at"`
+	UpdatedAt          time.Time     `json:"updated_at"`
+	ActivatedAt        *time.Time    `json:"activated_at,omitempty"`
+	CancelledAt        *time.Time    `json:"cancelled_at,omitempty"`
+	CancellationReason string        `json:"cancellation_reason,omitempty"`
 }
 
 type DDCollection struct {
-	ID          string           `json:"id"`
-	MandateID   string           `json:"mandate_id" binding:"required"`
-	Amount      float64          `json:"amount" binding:"required"`
-	Currency    string           `json:"currency" binding:"required"`
-	Description string           `json:"description"`
-	Status      CollectionStatus `json:"status"`
-	SubmittedAt *time.Time       `json:"submitted_at,omitempty"`
-	SettledAt   *time.Time       `json:"settled_at,omitempty"`
-	FailedAt    *time.Time       `json:"failed_at,omitempty"`
-	FailureCode string           `json:"failure_code,omitempty"`
-	FailureReason string         `json:"failure_reason,omitempty"`
-	ReturnCode  string           `json:"return_code,omitempty"`
-	CreatedAt   time.Time        `json:"created_at"`
+	ID            string           `json:"id"`
+	MandateID     string           `json:"mandate_id" binding:"required"`
+	Amount        float64          `json:"amount" binding:"required"`
+	Currency      string           `json:"currency" binding:"required"`
+	Description   string           `json:"description"`
+	Status        CollectionStatus `json:"status"`
+	SubmittedAt   *time.Time       `json:"submitted_at,omitempty"`
+	SettledAt     *time.Time       `json:"settled_at,omitempty"`
+	FailedAt      *time.Time       `json:"failed_at,omitempty"`
+	FailureCode   string           `json:"failure_code,omitempty"`
+	FailureReason string           `json:"failure_reason,omitempty"`
+	ReturnCode    string           `json:"return_code,omitempty"`
+	CreatedAt     time.Time        `json:"created_at"`
 }
 
 // BACS failure codes
@@ -178,11 +178,11 @@ func getEnv(key, fallback string) string {
 
 func healthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"service":  "direct-debit-service",
-		"status":   "healthy",
-		"version":  "1.0.0",
-		"schemes":  []string{string(BACS), string(SEPA), string(ACH)},
-		"kafka_published": kafkaPublished.Load(),
+		"service":              "direct-debit-service",
+		"status":               "healthy",
+		"version":              "1.0.0",
+		"schemes":              []string{string(BACS), string(SEPA), string(ACH)},
+		"kafka_published":      kafkaPublished.Load(),
 		"kafka_publish_errors": kafkaPublishErrors.Load(),
 	})
 }
@@ -223,6 +223,12 @@ func createMandate(c *gin.Context) {
 	mandate.CreatedAt = time.Now()
 	mandate.UpdatedAt = time.Now()
 
+	// Fail closed: persist first; PG is the source of truth for mandates.
+	if err := dbUpsert("dd_mandates", mandate.ID, &mandate); err != nil {
+		log.Printf("[direct-debit] ERROR: mandate persist failed (refusing creation): %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist mandate"})
+		return
+	}
 	mu.Lock()
 	mandates[mandate.ID] = &mandate
 	mu.Unlock()
@@ -241,6 +247,9 @@ func createMandate(c *gin.Context) {
 			m.Status = MandateActive
 			m.ActivatedAt = &now
 			m.UpdatedAt = now
+			if err := dbUpsert("dd_mandates", m.ID, m); err != nil {
+				log.Printf("[direct-debit] ERROR: mandate activation persist failed id=%s: %v", m.ID, err)
+			}
 		}
 		mu.Unlock()
 		bus.Publish("direct-debit.mandate.activated", map[string]interface{}{
@@ -298,6 +307,12 @@ func cancelMandate(c *gin.Context) {
 	mandate.CancelledAt = &now
 	mandate.CancellationReason = req.Reason
 	mandate.UpdatedAt = now
+	if err := dbUpsert("dd_mandates", mandate.ID, mandate); err != nil {
+		mu.Unlock()
+		log.Printf("[direct-debit] ERROR: mandate cancellation persist failed id=%s: %v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist cancellation"})
+		return
+	}
 	mu.Unlock()
 
 	bus.Publish("direct-debit.mandate.cancelled", map[string]interface{}{
@@ -340,6 +355,12 @@ func initiateCollection(c *gin.Context) {
 	req.Status = CollectionPending
 	req.CreatedAt = time.Now()
 
+	// Fail closed: persist before admitting the collection in-memory.
+	if err := dbUpsert("dd_collections", req.ID, &req); err != nil {
+		log.Printf("[direct-debit] ERROR: collection persist failed (refusing creation): %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist collection"})
+		return
+	}
 	mu.Lock()
 	collections[req.ID] = &req
 	mu.Unlock()
@@ -373,6 +394,9 @@ func processCollection(collectionID string, scheme DDScheme) {
 		col.SettledAt = &now
 		submitted := now.Add(-delay)
 		col.SubmittedAt = &submitted
+		if err := dbUpsert("dd_collections", col.ID, col); err != nil {
+			log.Printf("[direct-debit] ERROR: collection settlement persist failed id=%s: %v", col.ID, err)
+		}
 	}
 	mu.Unlock()
 
@@ -471,7 +495,22 @@ func seedDemoData() {
 // Main
 // ─────────────────────────────────────────────────────────────────────────────
 func main() {
-	seedDemoData()
+	initDB()
+	mu.RLock()
+	empty := len(mandates) == 0
+	mu.RUnlock()
+	if empty {
+		seedDemoData()
+		if db != nil {
+			mu.RLock()
+			for _, m := range mandates {
+				if err := dbUpsert("dd_mandates", m.ID, m); err != nil {
+					log.Printf("[direct-debit] ERROR: seed persist failed mandate=%s: %v", m.ID, err)
+				}
+			}
+			mu.RUnlock()
+		}
+	}
 
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
