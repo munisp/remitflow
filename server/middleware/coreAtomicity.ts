@@ -16,6 +16,7 @@ import { createHash, randomUUID, randomBytes } from "crypto";
 import { logger } from "../_core/logger";
 import { getRedisClient, REDIS_KEYS } from "./redis";
 import { isRedisAvailable } from "./redisHardened";
+import { reportWriteThroughFailure } from "../lib/writeThroughTelemetry";
 import { publishEvent, KAFKA_TOPICS, type TransactionEvent } from "./kafka";
 import { tigerBeetle } from "./middlewareIntegration";
 import { createAuditLog } from "../db";
@@ -71,7 +72,10 @@ async function _writeThrough(table: string, key: string, value: unknown): Promis
       VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
       ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
     `);
-  } catch { /* silent — hot cache still works */ }
+  } catch (err) {
+    // W19-B: was silent — durable divergence is now logged + counted.
+    reportWriteThroughFailure(String(table), err, "error");
+  }
 }
 
 async function _loadFromDb(table: string): Promise<Map<string, any>> {
@@ -84,7 +88,9 @@ async function _loadFromDb(table: string): Promise<Map<string, any>> {
     for (const row of rows) {
       result.set(row.key, row.data);
     }
-  } catch { /* silent */ }
+  } catch (err) {
+    reportWriteThroughFailure(String(table), err);
+  }
   return result;
 }
 
@@ -94,7 +100,9 @@ async function _deleteFromDb(table: string, key: string): Promise<void> {
   try {
     const { sql } = await import("drizzle-orm");
     await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
-  } catch { /* silent */ }
+  } catch (err) {
+    reportWriteThroughFailure(String(table), err);
+  }
 }
 
 async function _ensureWriteThroughTables(): Promise<void> {
@@ -116,11 +124,15 @@ async function _ensureWriteThroughTables(): Promise<void> {
         updated_at TIMESTAMPTZ DEFAULT NOW()
       )
     `);
-  } catch { /* silent */ }
+  } catch (err) {
+    // W19-B: was `catch { /* silent */ }` — table-create failure means every
+    // later write-through will also fail; never silent.
+    reportWriteThroughFailure("core_wt_tables_init", err, "error");
+  }
 }
 
 // Initialize tables on module load
-_ensureWriteThroughTables().catch(() => {});
+_ensureWriteThroughTables().catch((err) => reportWriteThroughFailure("core_wt_tables_init", err, "error"));
 
 const inMemoryIdempotency = new Map<string, { result: unknown; expiresAt: number }>(); // Persisted to PostgreSQL table "core_idempotency_cache"
 const inMemoryLocks = new Map<string, number>(); // Persisted to PostgreSQL table "core_distributed_locks"
@@ -214,7 +226,7 @@ export function checkIdempotency(key: string, opts?: { allowDegradedFallback?: b
   if (Date.now() > entry.expiresAt) {
     inMemoryIdempotency.delete(key);
 
-    _deleteFromDb("core_idempotency_cache", key).catch(() => {});
+    _deleteFromDb("core_idempotency_cache", key).catch((err) => reportWriteThroughFailure("core_idempotency_cache", err, "error"));
     return { cached: false };
   }
   return { cached: true, result: entry.result };
@@ -340,7 +352,7 @@ export async function claimIdempotency(
  */
 export async function releaseIdempotencyClaim(key: string): Promise<void> {
   inMemoryIdempotency.delete(key);
-  _deleteFromDb("core_idempotency_cache", key).catch(() => {});
+  _deleteFromDb("core_idempotency_cache", key).catch((err) => reportWriteThroughFailure("core_idempotency_cache", err, "error"));
   const redis = getRedisClient();
   if (!redis) return;
   try {
@@ -409,7 +421,7 @@ export async function releaseLock(lockKey: string, lockId: string): Promise<void
   }
   inMemoryLocks.delete(lockKey);
 
-  _deleteFromDb("core_distributed_locks", lockKey).catch(() => {});
+  _deleteFromDb("core_distributed_locks", lockKey).catch((err) => reportWriteThroughFailure("core_distributed_locks", err, "error"));
 }
 
 // ── Redis-backed Idempotency (async) ────────────────────────────────────────

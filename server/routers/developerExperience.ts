@@ -13,8 +13,11 @@
 import { z } from "zod";
 import { assertPublicWebhookUrl } from "../lib/http-client";
 import { createTRPCRouter, protectedProcedure, publicProcedure } from "../trpc";
-import { db } from "../db-shim";
-import { eq, desc, and, gte, sql } from "drizzle-orm";
+import { requireDb } from "../db";
+import { developerWebhooks, developerWebhookDeliveries } from "../../drizzle/schema";
+import { encryptField, decryptField } from "../_core/secretBox";
+import { logger } from "../_core/logger";
+import { eq, desc, and } from "drizzle-orm";
 import crypto from "crypto";
 
 // ── Webhook management ────────────────────────────────────────────────────────
@@ -41,13 +44,61 @@ interface WebhookDeliveryLog {
   error: string | null;
 }
 
-// In-memory store (production: use DB tables)
-const webhookStore = new Map<string, {
+// W19-A: webhook registrations and delivery logs are persisted in the
+// developer_webhooks / developer_webhook_deliveries tables (migration 0098).
+// Signing secrets are encrypted at rest (AES-256-GCM, server/_core/secretBox).
+
+interface DeveloperWebhookRecord {
   id: string; userId: number; url: string; events: string[];
   secret: string; active: boolean; createdAt: string; description: string;
-}>();
+}
 
-const deliveryLogs: WebhookDeliveryLog[] = [];
+function _rowToWebhook(row: typeof developerWebhooks.$inferSelect): DeveloperWebhookRecord {
+  return {
+    id: row.id,
+    userId: row.userId,
+    url: row.url,
+    events: (row.events as string[]) ?? [],
+    secret: decryptField(row.secretEnc),
+    active: row.active,
+    createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt),
+    description: row.description,
+  };
+}
+
+/** Fetch a webhook owned by nobody-in-particular (delivery path). */
+async function _getWebhookById(webhookId: string): Promise<DeveloperWebhookRecord | null> {
+  const db = await requireDb();
+  const rows = await db.select().from(developerWebhooks).where(eq(developerWebhooks.id, webhookId)).limit(1);
+  return rows[0] ? _rowToWebhook(rows[0]) : null;
+}
+
+async function _insertDeliveryLog(log: WebhookDeliveryLog): Promise<void> {
+  try {
+    const db = await requireDb();
+    await db.insert(developerWebhookDeliveries).values({
+      id: log.id,
+      webhookId: log.webhookId,
+      event: log.event,
+      payload: log.payload,
+      statusCode: log.statusCode,
+      latencyMs: log.latencyMs,
+      success: log.success,
+      attempt: log.attempt,
+      error: log.error,
+      deliveredAt: new Date(log.deliveredAt),
+    });
+  } catch (err) {
+    // Delivery audit must not fail the caller's webhook test, but the failure
+    // is logged + metriced — never silently swallowed.
+    logger.error({ err: err instanceof Error ? err.message : String(err), webhookId: log.webhookId },
+      "[DeveloperExperience] webhook delivery log persist failed");
+    try {
+      const { trackError } = await import("../middleware/businessMetrics.js");
+      trackError("persistence", "developer_webhook_deliveries_insert");
+    } catch { /* metrics must never break the hot path */ }
+  }
+}
 
 function generateWebhookSecret(): string {
   return "whsec_" + crypto.randomBytes(32).toString("hex");
@@ -64,7 +115,7 @@ async function deliverWebhook(
   event: string,
   payload: Record<string, unknown>
 ): Promise<WebhookDeliveryLog> {
-  const webhook = webhookStore.get(webhookId);
+  const webhook = await _getWebhookById(webhookId);
   if (!webhook || !webhook.active) {
     return { id: crypto.randomUUID(), webhookId, event, payload, statusCode: null, latencyMs: null, success: false, attempt: 1, deliveredAt: new Date().toISOString(), error: "Webhook not found or inactive" };
   }
@@ -86,7 +137,7 @@ async function deliverWebhook(
       statusCode: null, latencyMs: null, success: false, attempt: 1,
       deliveredAt: new Date().toISOString(), error: "Webhook URL rejected by SSRF policy",
     };
-    deliveryLogs.unshift(log);
+    await _insertDeliveryLog(log);
     return log;
   }
 
@@ -121,8 +172,7 @@ async function deliverWebhook(
     statusCode, latencyMs: Date.now() - start, success, attempt: 1,
     deliveredAt: new Date().toISOString(), error,
   };
-  deliveryLogs.unshift(log);
-  if (deliveryLogs.length > 1000) deliveryLogs.splice(1000);
+  await _insertDeliveryLog(log);
   return log;
 }
 
@@ -189,20 +239,33 @@ export const developerExperienceRouter = createTRPCRouter({
       // SEC-09: reject URLs targeting internal networks before storing
       await assertPublicWebhookUrl(input.url);
       const id = crypto.randomUUID();
-      const webhook = {
+      const secret = generateWebhookSecret();
+      const db = await requireDb();
+      await db.insert(developerWebhooks).values({
+        id,
+        userId: ctx.user.id,
+        url: input.url,
+        events: [...input.events],
+        secretEnc: encryptField(secret), // encrypted at rest (AES-256-GCM)
+        active: true,
+        description: input.description,
+      });
+      const webhook: DeveloperWebhookRecord = {
         id, userId: ctx.user.id, url: input.url,
-        events: input.events, secret: generateWebhookSecret(),
+        events: [...input.events], secret,
         active: true, createdAt: new Date().toISOString(),
         description: input.description,
       };
-      webhookStore.set(id, webhook);
       return { ...webhook };
     }),
 
   listWebhooks: protectedProcedure
     .query(async ({ ctx }) => {
-      const userWebhooks = Array.from(webhookStore.values())
-        .filter(w => w.userId === ctx.user.id)
+      const db = await requireDb();
+      const rows = await db.select().from(developerWebhooks)
+        .where(eq(developerWebhooks.userId, ctx.user.id))
+        .orderBy(desc(developerWebhooks.createdAt));
+      const userWebhooks = rows.map(_rowToWebhook)
         .map(w => ({ ...w, secret: w.secret.slice(0, 12) + "..." })); // mask secret
       return { webhooks: userWebhooks, total: userWebhooks.length };
     }),
@@ -210,9 +273,11 @@ export const developerExperienceRouter = createTRPCRouter({
   deleteWebhook: protectedProcedure
     .input(z.object({ webhookId: z.string().uuid() }))
     .mutation(async ({ input, ctx }) => {
-      const webhook = webhookStore.get(input.webhookId);
-      if (!webhook || webhook.userId !== ctx.user.id) throw new Error("Webhook not found");
-      webhookStore.delete(input.webhookId);
+      const db = await requireDb();
+      const deleted = await db.delete(developerWebhooks)
+        .where(and(eq(developerWebhooks.id, input.webhookId), eq(developerWebhooks.userId, ctx.user.id)))
+        .returning({ id: developerWebhooks.id });
+      if (deleted.length === 0) throw new Error("Webhook not found");
       return { deleted: true };
     }),
 
@@ -222,7 +287,7 @@ export const developerExperienceRouter = createTRPCRouter({
       event:     z.enum(webhookEvents).optional().default("transfer.completed"),
     }))
     .mutation(async ({ input, ctx }) => {
-      const webhook = webhookStore.get(input.webhookId);
+      const webhook = await _getWebhookById(input.webhookId);
       if (!webhook || webhook.userId !== ctx.user.id) throw new Error("Webhook not found");
 
       const testPayload = {
@@ -242,23 +307,32 @@ export const developerExperienceRouter = createTRPCRouter({
       limit:     z.number().min(1).max(100).default(20),
     }))
     .query(async ({ input, ctx }) => {
-      const webhook = webhookStore.get(input.webhookId);
+      const webhook = await _getWebhookById(input.webhookId);
       if (!webhook || webhook.userId !== ctx.user.id) throw new Error("Webhook not found");
-      const logs = deliveryLogs
-        .filter(l => l.webhookId === input.webhookId)
-        .slice(0, input.limit)
+      const db = await requireDb();
+      const rows = await db.select().from(developerWebhookDeliveries)
+        .where(eq(developerWebhookDeliveries.webhookId, input.webhookId))
+        .orderBy(desc(developerWebhookDeliveries.deliveredAt))
+        .limit(input.limit);
+      const logs = rows
         // SEC-09: strip statusCode/latencyMs/error (SSRF oracle) from caller-visible logs
-        .map(l => ({ id: l.id, event: l.event, success: l.success, attempt: l.attempt, deliveredAt: l.deliveredAt }));
+        .map(l => ({
+          id: l.id, event: l.event, success: l.success, attempt: l.attempt,
+          deliveredAt: l.deliveredAt instanceof Date ? l.deliveredAt.toISOString() : String(l.deliveredAt),
+        }));
       return { logs, total: logs.length };
     }),
 
   rotateWebhookSecret: protectedProcedure
     .input(z.object({ webhookId: z.string().uuid() }))
     .mutation(async ({ input, ctx }) => {
-      const webhook = webhookStore.get(input.webhookId);
+      const webhook = await _getWebhookById(input.webhookId);
       if (!webhook || webhook.userId !== ctx.user.id) throw new Error("Webhook not found");
       const newSecret = generateWebhookSecret();
-      webhook.secret = newSecret;
+      const db = await requireDb();
+      await db.update(developerWebhooks)
+        .set({ secretEnc: encryptField(newSecret), updatedAt: new Date() })
+        .where(eq(developerWebhooks.id, input.webhookId));
       return { webhookId: input.webhookId, newSecret, rotatedAt: new Date().toISOString() };
     }),
 
