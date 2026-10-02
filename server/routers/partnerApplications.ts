@@ -20,6 +20,8 @@ import { validateFile, type FileValidationResult } from "../_core/serviceRegistr
 import { requireTotpStepUp } from "../_core/totpStepUp";
 import { sendPartnerApproval } from "../email";
 import { encryptField } from "../_core/secretBox";
+import { checkRateLimit as hardenedCheckRateLimit } from "../middleware/redisHardened";
+import { reportWriteThroughFailure } from "../lib/writeThroughTelemetry";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function generateApiKey(env: "sandbox" | "production"): { fullKey: string; prefix: string; hash: string } {
@@ -43,11 +45,13 @@ function slugify(name: string): string {
     .substring(0, 63);
 }
 
-// W13 (SPEC §5.1): best-effort in-memory rate limiter for the PUBLIC submit
-// endpoint (no new deps; rateLimitedProcedure is protected-only). Keyed by
-// client IP; 5 submissions per 10 minutes. Fail-closed on excess.
+// W13 (SPEC §5.1): rate limiter for the PUBLIC submit endpoint. W19-B:
+// PRIMARY is Redis (atomic sliding window via redisHardened) so the limit
+// holds across replicas; the in-process map is a degraded-mode fallback
+// only (WARN-logged + counted). Keyed by client IP; 5 submissions per
+// 10 minutes. Fail-closed on excess.
 const _submitHits = new Map<string, number[]>();
-function submitRateLimit(ip: string): boolean {
+function inProcessSubmitRateLimit(ip: string): boolean {
   const now = Date.now();
   const windowMs = 10 * 60 * 1000;
   const hits = (_submitHits.get(ip) ?? []).filter((t) => now - t < windowMs);
@@ -63,6 +67,17 @@ function submitRateLimit(ip: string): boolean {
     }
   }
   return true;
+}
+
+async function submitRateLimit(ip: string): Promise<boolean> {
+  try {
+    const result = await hardenedCheckRateLimit(`partner:submit:${ip}`, 5, 5, 10 * 60 * 1000);
+    return result.allowed;
+  } catch (err) {
+    reportWriteThroughFailure("partner_submit_rate_limit", err, "error");
+    logger.warn({ ip }, "[Partner] Redis unavailable — in-process submit rate limit fallback (per-replica, degraded)");
+    return inProcessSubmitRateLimit(ip);
+  }
 }
 
 // W13 (SPEC §5.1 F-T2): tenant membership oracle for partner self-service
@@ -116,9 +131,9 @@ export const partnerApplicationsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-      // W13: best-effort in-memory rate limit (public endpoint; see helper).
+      // W19-B: Redis-primary rate limit (public endpoint; see helper).
       const ip = (ctx as any).req?.ip ?? (ctx as any).req?.socket?.remoteAddress ?? "unknown";
-      if (!submitRateLimit(String(ip))) {
+      if (!(await submitRateLimit(String(ip)))) {
         throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Too many submissions — please retry later" });
       }
 
@@ -500,7 +515,7 @@ export const partnerApplicationsRouter = router({
         await db.execute(sql`
           INSERT INTO partner_application_comments (application_id, author_id, comment, is_internal, created_at)
           VALUES (${input.id}, ${ctx.user.id}, ${`WARNING: approval email to ${app.contact_email} was NOT sent (${emailError ?? "transport unavailable"}). Invite code must be delivered manually.`}, true, NOW())
-        `).catch(() => {});
+        `).catch((err) => reportWriteThroughFailure("partner_application_comments", err));
       }
 
       return { success: true, tenantId, inviteCode, emailSent, ...(emailError ? { emailError } : {}) };
