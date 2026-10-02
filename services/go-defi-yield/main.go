@@ -287,6 +287,12 @@ func depositHandler(w http.ResponseWriter, r *http.Request) {
 		pos.APY = selectedYield.APY
 	}
 
+	// Fail closed: persist before admitting the position in-memory.
+	if err := persistPosition(pos); err != nil {
+		slog.Error("[Yield] deposit persist failed (refusing deposit)", "position", pos.ID, "err", err)
+		http.Error(w, "failed to persist position", 500)
+		return
+	}
 	mu.Lock()
 	positions[pos.ID] = pos
 	mu.Unlock()
@@ -338,6 +344,12 @@ func withdrawHandler(w http.ResponseWriter, r *http.Request) {
 		pos.CurrentValue -= withdrawAmount
 	}
 	pos.Status = "withdrawn"
+	if err := persistPosition(pos); err != nil {
+		mu.Unlock()
+		slog.Error("[Yield] withdrawal persist failed (fail closed)", "position", req.PositionID, "err", err)
+		http.Error(w, "failed to persist withdrawal", 500)
+		return
+	}
 	mu.Unlock()
 
 	withdrawalsTotal.Add(1)
@@ -386,6 +398,9 @@ func compoundPositions() {
 		pos.CurrentValue = newValue
 		pos.AccruedYield += yieldEarned
 		pos.LastCompoundAt = now
+		if err := persistPosition(pos); err != nil {
+			slog.Error("[Yield] compound persist failed", "position", pos.ID, "err", err)
+		}
 		compoundsTotal.Add(1)
 		slog.Info("[Yield] Auto-compounded", "position", pos.ID, "yield_earned", yieldEarned, "new_value", newValue)
 	}
@@ -476,6 +491,7 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	slog.Info("[DeFiYield] Starting", "port", port)
+	initDB()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

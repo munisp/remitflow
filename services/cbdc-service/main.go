@@ -27,35 +27,35 @@ import (
 type CBDCCurrency string
 
 const (
-	ENaira       CBDCCurrency = "eNGN"
+	eNaira       CBDCCurrency = "eNGN"
 	DigitalEuro  CBDCCurrency = "eDEUR"
 	DigitalPound CBDCCurrency = "eGBP"
 )
 
 type CBDCWallet struct {
-	ID           string       `json:"id"`
-	UserID       string       `json:"user_id"`
-	Currency     CBDCCurrency `json:"currency"`
-	Balance      float64      `json:"balance"`
-	WalletAddress string      `json:"wallet_address"`
-	Tier         string       `json:"tier"` // "retail", "wholesale"
-	Status       string       `json:"status"` // "active", "frozen", "suspended"
-	DailyLimit   float64      `json:"daily_limit"`
-	CreatedAt    time.Time    `json:"created_at"`
-	UpdatedAt    time.Time    `json:"updated_at"`
+	ID            string       `json:"id"`
+	UserID        string       `json:"user_id"`
+	Currency      CBDCCurrency `json:"currency"`
+	Balance       float64      `json:"balance"`
+	WalletAddress string       `json:"wallet_address"`
+	Tier          string       `json:"tier"`   // "retail", "wholesale"
+	Status        string       `json:"status"` // "active", "frozen", "suspended"
+	DailyLimit    float64      `json:"daily_limit"`
+	CreatedAt     time.Time    `json:"created_at"`
+	UpdatedAt     time.Time    `json:"updated_at"`
 }
 
 type CBDCTransfer struct {
-	ID              string       `json:"id"`
-	FromWalletID    string       `json:"from_wallet_id" binding:"required"`
-	ToWalletID      string       `json:"to_wallet_id" binding:"required"`
-	Amount          float64      `json:"amount" binding:"required"`
-	Currency        CBDCCurrency `json:"currency" binding:"required"`
-	Reference       string       `json:"reference"`
-	Status          string       `json:"status"` // pending, processing, settled, failed
-	SettledAt       *time.Time   `json:"settled_at,omitempty"`
-	FailureReason   string       `json:"failure_reason,omitempty"`
-	CreatedAt       time.Time    `json:"created_at"`
+	ID            string       `json:"id"`
+	FromWalletID  string       `json:"from_wallet_id" binding:"required"`
+	ToWalletID    string       `json:"to_wallet_id" binding:"required"`
+	Amount        float64      `json:"amount" binding:"required"`
+	Currency      CBDCCurrency `json:"currency" binding:"required"`
+	Reference     string       `json:"reference"`
+	Status        string       `json:"status"` // pending, processing, settled, failed
+	SettledAt     *time.Time   `json:"settled_at,omitempty"`
+	FailureReason string       `json:"failure_reason,omitempty"`
+	CreatedAt     time.Time    `json:"created_at"`
 }
 
 type CBDCExchangeRate struct {
@@ -162,12 +162,12 @@ func getEnv(key, fallback string) string {
 
 func healthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"service":    "cbdc-service",
-		"status":     "healthy",
-		"version":    "1.0.0",
-		"currencies": []string{string(ENaira), string(DigitalEuro), string(DigitalPound)},
-		"sources":    []string{"CBN eNaira", "ECB Digital Euro", "BoE Digital Pound"},
-		"kafka_published": kafkaPublished.Load(),
+		"service":              "cbdc-service",
+		"status":               "healthy",
+		"version":              "1.0.0",
+		"currencies":           []string{string(ENaira), string(DigitalEuro), string(DigitalPound)},
+		"sources":              []string{"CBN eNaira", "ECB Digital Euro", "BoE Digital Pound"},
+		"kafka_published":      kafkaPublished.Load(),
 		"kafka_publish_errors": kafkaPublishErrors.Load(),
 	})
 }
@@ -214,6 +214,12 @@ func createWallet(c *gin.Context) {
 		UpdatedAt:     time.Now(),
 	}
 
+	// Fail closed: persist first; PG is the source of truth for CBDC balances.
+	if err := dbUpsert("cbdc_wallets", wallet.ID, wallet); err != nil {
+		log.Printf("[cbdc-service] ERROR: wallet persist failed (refusing creation): %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist wallet"})
+		return
+	}
 	mu.Lock()
 	wallets[wallet.ID] = wallet
 	mu.Unlock()
@@ -250,9 +256,9 @@ func getWalletBalance(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"wallet_id":  id,
-		"currency":   wallet.Currency,
-		"balance":    wallet.Balance,
+		"wallet_id":   id,
+		"currency":    wallet.Currency,
+		"balance":     wallet.Balance,
 		"last_synced": time.Now(),
 	})
 }
@@ -302,22 +308,28 @@ func initiateTransfer(c *gin.Context) {
 	}
 
 	req.ID = uuid.New().String()
-	req.Status = "processing"
+	req.Status = "settled" // CBDC settlement is atomic
 	req.CreatedAt = time.Now()
+	now := time.Now()
+	req.SettledAt = &now
 
+	// Fail closed: stage the state change, persist atomically (transfer + both
+	// wallet balances in one tx), and only then commit to the in-memory maps.
 	mu.Lock()
 	fromWallet.Balance -= req.Amount
-	fromWallet.UpdatedAt = time.Now()
+	fromWallet.UpdatedAt = now
 	toWallet.Balance += req.Amount
-	toWallet.UpdatedAt = time.Now()
+	toWallet.UpdatedAt = now
+	if err := persistTransferTx(&req, fromWallet, toWallet); err != nil {
+		// Roll back the staged mutation — PG is the source of truth.
+		fromWallet.Balance += req.Amount
+		toWallet.Balance -= req.Amount
+		mu.Unlock()
+		log.Printf("[cbdc-service] ERROR: transfer persist failed id=%s (rolled back): %v", req.ID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist transfer"})
+		return
+	}
 	transfers[req.ID] = &req
-	mu.Unlock()
-
-	// Settle immediately (CBDC is atomic)
-	now := time.Now()
-	mu.Lock()
-	transfers[req.ID].Status = "settled"
-	transfers[req.ID].SettledAt = &now
 	mu.Unlock()
 
 	bus.Publish("cbdc.transfer.settled", map[string]interface{}{
@@ -411,6 +423,13 @@ func topupWallet(c *gin.Context) {
 	}
 	wallet.Balance += req.Amount
 	wallet.UpdatedAt = time.Now()
+	if err := dbUpsert("cbdc_wallets", wallet.ID, wallet); err != nil {
+		wallet.Balance -= req.Amount // roll back staged mutation (fail closed)
+		mu.Unlock()
+		log.Printf("[cbdc-service] ERROR: topup persist failed wallet=%s: %v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist topup"})
+		return
+	}
 	mu.Unlock()
 
 	bus.Publish("cbdc.wallet.topped_up", map[string]interface{}{
@@ -419,10 +438,10 @@ func topupWallet(c *gin.Context) {
 	})
 
 	c.JSON(http.StatusOK, gin.H{
-		"wallet_id":   id,
+		"wallet_id":    id,
 		"amount_added": req.Amount,
-		"new_balance": wallet.Balance,
-		"currency":    wallet.Currency,
+		"new_balance":  wallet.Balance,
+		"currency":     wallet.Currency,
 	})
 }
 
@@ -483,7 +502,22 @@ func seedDemoData() {
 // Main
 // ─────────────────────────────────────────────────────────────────────────────
 func main() {
-	seedDemoData()
+	initDB()
+	mu.RLock()
+	empty := len(wallets) == 0
+	mu.RUnlock()
+	if empty {
+		seedDemoData()
+		if db != nil {
+			mu.RLock()
+			for _, w := range wallets {
+				if err := dbUpsert("cbdc_wallets", w.ID, w); err != nil {
+					log.Printf("[cbdc-service] ERROR: seed persist failed wallet=%s: %v", w.ID, err)
+				}
+			}
+			mu.RUnlock()
+		}
+	}
 
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
