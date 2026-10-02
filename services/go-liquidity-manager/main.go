@@ -390,6 +390,7 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	slog.Info("[LiquidityManager] Starting", "port", port)
+	initDB()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -410,6 +411,9 @@ func main() {
 					}
 					pos.LastRebalAt = time.Now().Unix()
 					pos.InRange = true
+					if err := persistPosition(pos); err != nil {
+						slog.Error("[Liquidity] rebalance persist failed", "id", pos.ID, "err", err)
+					}
 					rebalancesTotal.Add(1)
 					slog.Info("[Liquidity] Rebalanced position", "id", pos.ID)
 				}

@@ -28,6 +28,8 @@ import { transactions } from "../drizzle/schema.js";
 import { and, eq, sql } from "drizzle-orm";
 import { logger } from "./_core/logger";
 import { verifyWebhookSignature, isWebhookDuplicate } from "./lib/webhookHmac.js";
+import { checkRateLimit as hardenedCheckRateLimit } from "./middleware/redisHardened";
+import { reportWriteThroughFailure } from "./lib/writeThroughTelemetry";
 import { PLATFORM_SYSTEM_USER_ID } from "./_core/tigerBeetle";
 import { bdcReversals, bdcTransactions } from "../drizzle/schema";
 import { executeApprovedReversal } from "./routers/bdc/reversals";
@@ -37,28 +39,42 @@ import { publishEvent } from "./middleware/kafka";
 const BDC_REVERSALS_TOPIC = "remitflow.bdc.reversals";
 
 // ─── Webhook Rate Limiter (same pattern as payment-rail-webhooks.ts) ─────────
+// W19-B: PRIMARY limiter is Redis (atomic sliding window via redisHardened) —
+// replica-consistent. The in-process map is a degraded-mode fallback only;
+// its use is WARN-logged + counted (writeThroughTelemetry).
 const railReturnRateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const WEBHOOK_RATE_LIMIT = 100;
 const WEBHOOK_RATE_WINDOW_MS = 60_000;
 
-function webhookRateLimiter(req: Request, res: Response, next: NextFunction): void {
-  const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
+function inProcessRailReturnRateLimit(ip: string): boolean {
   const now = Date.now();
   const entry = railReturnRateLimitMap.get(ip);
-
   if (!entry || now > entry.resetAt) {
     railReturnRateLimitMap.set(ip, { count: 1, resetAt: now + WEBHOOK_RATE_WINDOW_MS });
-    next();
-    return;
+    return true;
+  }
+  entry.count++;
+  return entry.count <= WEBHOOK_RATE_LIMIT;
+}
+
+async function webhookRateLimiter(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
+
+  let allowed: boolean;
+  try {
+    const result = await hardenedCheckRateLimit(`webhook:rail-return:${ip}`, WEBHOOK_RATE_LIMIT, WEBHOOK_RATE_LIMIT, WEBHOOK_RATE_WINDOW_MS);
+    allowed = result.allowed;
+  } catch (err) {
+    reportWriteThroughFailure("rail_return_rate_limit", err, "error");
+    logger.warn({ ip }, "[RailReturn Webhook] Redis unavailable — in-process rate limit fallback (per-replica, degraded)");
+    allowed = inProcessRailReturnRateLimit(ip);
   }
 
-  entry.count++;
-  if (entry.count > WEBHOOK_RATE_LIMIT) {
-    logger.warn({ ip, count: entry.count }, "[RailReturn Webhook] Rate limit exceeded");
+  if (!allowed) {
+    logger.warn({ ip }, "[RailReturn Webhook] Rate limit exceeded");
     res.status(429).json({ error: "Too many webhook requests" });
     return;
   }
-
   next();
 }
 
@@ -328,7 +344,7 @@ function handleRailReturn(provider: "nip" | "mobilemoney") {
 
     // Deduplication (24h window) — rail retries are acked without reprocessing.
     const dedupeId = payload.railTxnId ?? payload.reference;
-    if (isWebhookDuplicate(provider, dedupeId)) {
+    if (await isWebhookDuplicate(provider, dedupeId)) {
       res.status(200).json({ received: true, duplicate: true });
       return;
     }
