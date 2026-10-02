@@ -18,7 +18,10 @@
 import { randomUUID, createHash } from "crypto";
 import { logger } from "./logger";
 import { getRedisClient } from "../middleware/redis";
-import { getTemporalClient } from "./temporal";
+// W19-F: startFundFlowWorkflow (previously zero callers — now wired here) is
+// the canonical producer for the fund-flow worker's real queue
+// (fund-flow-tasks) with strict-mode fail-closed semantics.
+import { startFundFlowWorkflow } from "../temporal/temporalClient";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 // W18: real clients for the previously log-only saga steps (record_tigerbeetle /
 // update_opensearch / publish_fluvio). All are invoked FAIL-OPEN in executeStep —
@@ -26,6 +29,8 @@ import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 import { atomicTransfer, toMinorUnits, compositeAccountId, TB_ACCOUNT_CODES, TB_LEDGERS, PLATFORM_SYSTEM_USER_ID } from "./tigerBeetle";
 import { indexTransaction } from "../middleware/opensearch";
 import { fluvioProduce, FLUVIO_TOPICS } from "../integrations/fluvio/streaming";
+// W19-F: PG outbox fallback for the dual-write helper below.
+import { getDb, insertOutboxEvent } from "../db";
 
 // ── Transaction Coordinator ─────────────────────────────────────────────────
 
@@ -50,7 +55,30 @@ export interface CoordinatedTransaction {
   status: "in_progress" | "completed" | "compensating" | "compensated" | "failed";
   createdAt: string;
   completedAt?: string;
+  /**
+   * W19-F: full typed input for the registered Temporal workflow (e.g.
+   * CrossBorderTransferInput) when delegating. The coordinator's own summary
+   * fields are NOT sufficient (recipient account/bank/rail/fx data live
+   * outside this structure) and are never fabricated — delegation only
+   * happens when the caller supplies this payload.
+   */
+  workflowInput?: Record<string, unknown>;
 }
+
+/**
+ * W19-F: map coordinator transaction types to workflows ACTUALLY registered
+ * on the fund-flow worker (server/temporal/fundFlowWorkflow.ts, polled on
+ * queue fund-flow-tasks by server/temporal/worker.ts:206). The previous
+ * producer started "coordinatedTransactionWorkflow" on queue
+ * "remitflow-fund-flow" — a workflow defined NOWHERE in the tree on a queue
+ * NO worker polls, so every Temporal-delegated transaction silently never
+ * executed. Types without a registered workflow run the inline saga below.
+ */
+const COORDINATOR_WORKFLOWS: Record<string, string> = {
+  cross_border_transfer: "CrossBorderTransferWorkflow",
+  agent_cashout: "AgentCashOutWorkflow",
+  batch_payment: "BatchPayrollWorkflow",
+};
 
 const COORDINATOR_STEPS: Record<string, string[]> = {
   cross_border_transfer: [
@@ -149,21 +177,32 @@ export function getCompensationOrder(steps: TransactionStep[]): TransactionStep[
 export async function executeCoordinatedTransaction(
   tx: CoordinatedTransaction
 ): Promise<CoordinatedTransaction> {
-  const temporal = await getTemporalClient();
-
-  if (temporal) {
-    try {
-      const handle = await temporal.workflow.start("coordinatedTransactionWorkflow", {
-        taskQueue: "remitflow-fund-flow",
-        workflowId: tx.transactionId,
-        args: [tx],
-      });
-      logger.info({ txId: tx.transactionId, workflowId: handle.workflowId }, "[Coordinator] Temporal workflow started");
+  // W19-F: delegate to Temporal ONLY when (a) the tx type maps to a workflow
+  // registered on the fund-flow worker AND (b) the caller supplied that
+  // workflow's real input payload (tx.workflowInput) — never a fabricated
+  // mapping. startFundFlowWorkflow targets the worker's real queue
+  // (fund-flow-tasks, temporalClient.ts TEMPORAL_TASK_QUEUE default), and
+  // THROWS in TEMPORAL_STRICT_MODE (fail-closed); in non-strict mode it
+  // returns without a handle when Temporal is unavailable.
+  const workflowName = COORDINATOR_WORKFLOWS[tx.type];
+  if (workflowName && tx.workflowInput) {
+    const { handle } = await startFundFlowWorkflow(workflowName, tx.transactionId, tx.workflowInput);
+    if (handle) {
+      logger.info({ txId: tx.transactionId, workflowName, workflowId: handle.workflowId }, "[Coordinator] Temporal workflow started");
       tx.status = "in_progress";
       return tx;
-    } catch (err) {
-      logger.warn({ err, txId: tx.transactionId }, "[Coordinator] Temporal unavailable, executing inline");
     }
+    // LOUD fallback (was a silent warn that masked the phantom-workflow bug):
+    // the saga below runs WITHOUT Temporal's durability/replay guarantees.
+    logger.error(
+      { txId: tx.transactionId, workflowName },
+      "[Coordinator] TEMPORAL UNAVAILABLE — falling back to INLINE saga execution (no workflow durability; reconciliation sweep is the compensating control)",
+    );
+  } else {
+    logger.warn(
+      { txId: tx.transactionId, type: tx.type, hasWorkflowMapping: Boolean(workflowName), hasWorkflowInput: Boolean(tx.workflowInput) },
+      "[Coordinator] No Temporal delegation for this transaction (unmapped type or no workflowInput) — executing inline saga",
+    );
   }
 
   // Inline execution when Temporal is unavailable
@@ -315,6 +354,75 @@ async function recordTigerBeetleStep(tx: CoordinatedTransaction): Promise<void> 
     currency: tx.currency,
     code: TB_ACCOUNT_CODES.USER_WALLET,
   });
+}
+
+// ── W19-F: shared TigerBeetle dual-write for PG money paths ─────────────────
+// Used by routers whose wallet debits/credits previously never reached the
+// ledger (batch.process payroll, p2pInstant sends/compensations, escrow
+// refunds). Follows the record_tigerbeetle saga pattern above:
+//   - deterministic 128-bit transfer id derived from `reference` (retry-safe:
+//     a replay posts the SAME id and TigerBeetle dedupes it);
+//   - PG stays the source of truth — this NEVER throws (fail-open emit);
+//   - on failure it logs loudly AND appends a PG outbox event
+//     (aggregate_type "tigerbeetle", event_type "dual_write_failed") so the
+//     reconciliation sweep / outbox worker can repair the missed ledger write.
+export async function recordTigerBeetleDualWrite(params: {
+  /** Unique PG-side reference for this money movement (dedupes replays). */
+  reference: string;
+  /** Amount in MAJOR units (converted via toMinorUnits). */
+  amount: number;
+  currency: string;
+  /** Debit side. Defaults: platform settlement account. */
+  fromUserId?: number;
+  fromCode?: number;
+  /** Credit side. Defaults: platform settlement account. */
+  toUserId?: number;
+  toCode?: number;
+}): Promise<void> {
+  const { reference, amount, currency } = params;
+  try {
+    const ledger = TB_LEDGERS[currency];
+    if (!ledger) throw new Error(`unknown TB ledger for currency ${currency}`);
+    const fromUserId = params.fromUserId ?? PLATFORM_SYSTEM_USER_ID;
+    const fromCode = params.fromCode ?? TB_ACCOUNT_CODES.SETTLEMENT;
+    const toUserId = params.toUserId ?? PLATFORM_SYSTEM_USER_ID;
+    const toCode = params.toCode ?? TB_ACCOUNT_CODES.SETTLEMENT;
+    await atomicTransfer({
+      id: tbTransferId(reference),
+      fromAccountId: BigInt(compositeAccountId(fromUserId, fromCode, ledger)),
+      toAccountId: BigInt(compositeAccountId(toUserId, toCode, ledger)),
+      amount: toMinorUnits(amount),
+      currency,
+      code: fromCode,
+    });
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    // LOUD, never silent (fail-open for the money path — PG already committed
+    // and remains authoritative; the ledger write must be repaired).
+    logger.error({ reference, amount, currency, errMsg }, "[TigerBeetle] Dual-write FAILED — PG committed, ledger missed; queued for reconciliation");
+    try {
+      const db = await getDb();
+      if (!db) throw new Error("DB unavailable for outbox fallback");
+      await insertOutboxEvent(db, {
+        aggregateId: reference,
+        aggregateType: "tigerbeetle",
+        eventType: "dual_write_failed",
+        payload: {
+          reference,
+          amount,
+          currency,
+          fromUserId: params.fromUserId ?? PLATFORM_SYSTEM_USER_ID,
+          fromCode: params.fromCode ?? TB_ACCOUNT_CODES.SETTLEMENT,
+          toUserId: params.toUserId ?? PLATFORM_SYSTEM_USER_ID,
+          toCode: params.toCode ?? TB_ACCOUNT_CODES.SETTLEMENT,
+          error: errMsg,
+          failedAt: new Date().toISOString(),
+        },
+      });
+    } catch (outboxErr) {
+      logger.error({ reference, err: outboxErr instanceof Error ? outboxErr.message : String(outboxErr) }, "[TigerBeetle] CRITICAL: dual-write outbox fallback ALSO failed — manual reconciliation required");
+    }
+  }
 }
 
 async function executeStep(tx: CoordinatedTransaction, step: TransactionStep): Promise<void> {

@@ -36,10 +36,11 @@ import { Request, Response, NextFunction, Express } from "express";
 import slowDown from "express-slow-down";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import crypto from "crypto";
-import { getDb } from "./db";
+import { getDb, recordLoginFailure, checkDbUserLockout, clearDbUserLockout } from "./db";
 import { auditLogs } from "../drizzle/schema";
 import { logger } from './_core/logger';
 import { cacheGet, cacheSet, getRedisClient, cacheIncr } from './middleware/redis';
+import { reportWriteThroughFailure } from './lib/writeThroughTelemetry';
 
 // ─── 1. Progressive Slow-Down (Tarpitting) ────────────────────────────────────
 // After 50 req/min, each additional request is delayed by 500ms (max 20s).
@@ -147,7 +148,7 @@ async function _ensureWriteThroughTables(): Promise<void> {
 }
 
 // Initialize tables on module load
-_ensureWriteThroughTables().catch(() => {});
+_ensureWriteThroughTables().catch((err) => reportWriteThroughFailure("security_wt_tables_init", err));
 
 const concurrencyMap = new Map<string, number>(); // Persisted to PostgreSQL table "security_concurrency"
 export function concurrencyLimiter(req: Request, res: Response, next: NextFunction) {
@@ -159,15 +160,15 @@ export function concurrencyLimiter(req: Request, res: Response, next: NextFuncti
   }
   concurrencyMap.set(key, current + 1);
 
-  _writeThrough("security_concurrency", key, current + 1).catch(() => {});
+  _writeThrough("security_concurrency", key, current + 1).catch((err) => reportWriteThroughFailure("security_concurrency", err));
   res.on("finish", () => {
     const c = concurrencyMap.get(key) ?? 1;
     if (c <= 1) {
       concurrencyMap.delete(key);
-      _deleteFromDb("security_concurrency", key).catch(() => {});
+      _deleteFromDb("security_concurrency", key).catch((err) => reportWriteThroughFailure("security_concurrency", err));
     } else {
       concurrencyMap.set(key, c - 1);
-      _writeThrough("security_concurrency", key, c - 1).catch(() => {});
+      _writeThrough("security_concurrency", key, c - 1).catch((err) => reportWriteThroughFailure("security_concurrency", err));
     }
   });
   next();
@@ -301,7 +302,7 @@ export async function checkIdempotencyKey(key: string): Promise<{ duplicate: boo
   const entry = _idempotencyFallback.get(key);
   if (entry && Date.now() <= entry.expiresAt) return { duplicate: true, result: entry.result };
   if (entry) _idempotencyFallback.delete(key);
- _deleteFromDb("security_idempotency_fallback", key).catch(() => {});
+ _deleteFromDb("security_idempotency_fallback", key).catch((err) => reportWriteThroughFailure("security_idempotency_fallback", err, "error"));
   return { duplicate: false };
 }
 export async function storeIdempotencyResult(key: string, result: unknown): Promise<void> {
@@ -311,7 +312,7 @@ export async function storeIdempotencyResult(key: string, result: unknown): Prom
     const now = Date.now();
     for (const [k, v] of Array.from(_idempotencyFallback.entries())) {
       if (now > v.expiresAt) _idempotencyFallback.delete(k);
- _deleteFromDb("security_idempotency_fallback", k).catch(() => {});
+ _deleteFromDb("security_idempotency_fallback", k).catch((err) => reportWriteThroughFailure("security_idempotency_fallback", err, "error"));
     }
   }
 }
@@ -347,7 +348,7 @@ export async function detectATO(
   await cacheSet(redisKey, history, 7200);
   _loginFallback.set(userId, history);
 
-  _writeThrough("security_login_fallback", String(userId), history).catch(() => {});
+  _writeThrough("security_login_fallback", String(userId), history).catch((err) => reportWriteThroughFailure("security_login_fallback", err));
   return { suspicious: false };
 }
 
@@ -496,7 +497,7 @@ export function emitSecurityEvent(event: Omit<SecurityEvent, "ts">): void {
   }
   // Flush to DB every 50 events or on critical
   if (siemBuffer.length >= 50 || event.severity === "critical") {
-    flushSIEMBuffer().catch(() => {});
+    flushSIEMBuffer().catch((err) => reportWriteThroughFailure("siem_audit_flush", err));
   }
 }
 
@@ -514,7 +515,7 @@ async function flushSIEMBuffer(): Promise<void> {
         severity: ev.severity === "critical" ? "critical" : ev.severity === "high" ? "warning" : "info",
         success: ev.severity === "info" || ev.severity === "low",
         details: { siem: true, detail: ev.detail, path: ev.path },
-      }).catch(() => {});
+      }).catch((err) => reportWriteThroughFailure("siem_audit_insert", err));
     }
   } catch {
     // Never throw from SIEM flush
@@ -653,7 +654,92 @@ export function financialAmountGuard(req: Request, res: Response, next: NextFunc
 const STRUCTURING_WINDOW_MS = 60 * 60 * 1000;
 const STRUCTURING_THRESHOLD_USD = 9_000;
 const STRUCTURING_COUNT_LIMIT = 5;
+// W19-A: hot in-memory cache — write-through persisted to PostgreSQL table
+// "aml_structuring_counters" (migration 0098) and warmed on module load, so AML
+// structuring counters survive restarts and converge across replicas.
+// Write-through failures are logged + metriced, never silently swallowed.
 const structuringMap = new Map<number, { total: number; count: number; windowStart: number }>();
+
+/** Observed write-through for the AML stores: log + metric on failure. */
+async function _amlWriteFailure(store: string, err: unknown): Promise<void> {
+  logger.error({ store, err: err instanceof Error ? err.message : String(err) },
+    `[security.attacks] AML write-through to ${store} failed — PostgreSQL record diverges from in-memory cache`);
+  try {
+    const { trackError } = await import("./middleware/businessMetrics.js");
+    trackError("persistence", `aml_write_through:${store}`);
+  } catch { /* metrics must never break the hot path */ }
+}
+
+function _persistStructuring(userId: number, entry: { total: number; count: number; windowStart: number }): void {
+  (async () => {
+    const db = await _getWtDb();
+    if (!db) throw new Error("database unavailable");
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO aml_structuring_counters (user_id, total_usd, transfer_count, window_start, updated_at)
+      VALUES (${userId}, ${entry.total.toFixed(2)}, ${entry.count}, ${new Date(entry.windowStart)}, NOW())
+      ON CONFLICT (user_id) DO UPDATE SET
+        total_usd = EXCLUDED.total_usd,
+        transfer_count = EXCLUDED.transfer_count,
+        window_start = EXCLUDED.window_start,
+        updated_at = NOW()
+    `);
+  })().catch((err: unknown) => _amlWriteFailure("aml_structuring_counters", err));
+}
+
+function _persistBeneficiaryAddition(userId: number, beneficiaryId: number, ts: number): void {
+  (async () => {
+    const db = await _getWtDb();
+    if (!db) throw new Error("database unavailable");
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO aml_beneficiary_additions (user_id, beneficiary_id, added_at)
+      VALUES (${userId}, ${beneficiaryId}, ${new Date(ts)})
+      ON CONFLICT (user_id, beneficiary_id) DO UPDATE SET added_at = EXCLUDED.added_at
+    `);
+    // Opportunistic cleanup of rows past the ghost-beneficiary window.
+    await (db as any).execute(sql`
+      DELETE FROM aml_beneficiary_additions WHERE added_at < NOW() - INTERVAL '5 minutes'
+    `);
+  })().catch((err: unknown) => _amlWriteFailure("aml_beneficiary_additions", err));
+}
+
+/** Boot-load the AML stores from PostgreSQL (fail-open warm: caches still fill live). */
+async function _warmAmlStores(): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) {
+    logger.warn("[security.attacks] AML stores not warmed — database unavailable at boot");
+    return;
+  }
+  try {
+    const { sql } = await import("drizzle-orm");
+    const rows = await (db as any).execute(sql`
+      SELECT user_id, total_usd, transfer_count, window_start FROM aml_structuring_counters
+    `) as unknown as Array<{ user_id: number; total_usd: string; transfer_count: number; window_start: string | Date }>;
+    for (const r of rows) {
+      structuringMap.set(r.user_id, {
+        total: Number(r.total_usd),
+        count: r.transfer_count,
+        windowStart: new Date(r.window_start).getTime(),
+      });
+    }
+    const beneficiaryRows = await (db as any).execute(sql`
+      SELECT user_id, beneficiary_id, added_at FROM aml_beneficiary_additions
+      WHERE added_at >= NOW() - INTERVAL '5 minutes'
+    `) as unknown as Array<{ user_id: number; beneficiary_id: number; added_at: string | Date }>;
+    for (const r of beneficiaryRows) {
+      recentBeneficiaryAdditions.set(`${r.user_id}:${r.beneficiary_id}`, new Date(r.added_at).getTime());
+    }
+    logger.info({ structuring: rows.length, beneficiaryAdditions: beneficiaryRows.length },
+      "[security.attacks] AML stores warmed from PostgreSQL");
+  } catch (err) {
+    logger.error({ err: err instanceof Error ? err.message : String(err) },
+      "[security.attacks] AML store warm-up failed — starting with empty caches");
+    _amlWriteFailure("aml_boot_warm", err);
+  }
+}
+// Warm on module load (observed — never a silent swallow).
+_warmAmlStores().catch((err: unknown) => _amlWriteFailure("aml_boot_warm", err));
 
 export function detectStructuring(userId: number, amountUSD: number): { flagged: boolean; reason?: string } {
   const now = Date.now();
@@ -666,6 +752,7 @@ export function detectStructuring(userId: number, amountUSD: number): { flagged:
   entry.total += amountUSD;
   entry.count++;
   structuringMap.set(userId, entry);
+  _persistStructuring(userId, entry);
   if (amountUSD < STRUCTURING_THRESHOLD_USD && entry.count >= STRUCTURING_COUNT_LIMIT) {
     emitSecurityEvent({ type: "aml.structuring_detected", severity: "critical", userId, detail: `${entry.count} transfers totaling $${entry.total.toFixed(2)} in 1h` });
     return { flagged: true, reason: `Potential structuring: ${entry.count} transfers totaling $${entry.total.toFixed(2)} in 1 hour` };
@@ -675,10 +762,14 @@ export function detectStructuring(userId: number, amountUSD: number): { flagged:
 
 // ─── 27. Ghost Beneficiary Detection (v143) ───────────────────────────────────
 const GHOST_BENEFICIARY_WINDOW_MS = 5 * 60 * 1000;
+// W19-A: hot in-memory cache — write-through persisted to PostgreSQL table
+// "aml_beneficiary_additions" (migration 0098) and warmed on module load.
 const recentBeneficiaryAdditions = new Map<string, number>();
 
 export function recordBeneficiaryAddition(userId: number, beneficiaryId: number): void {
-  recentBeneficiaryAdditions.set(`${userId}:${beneficiaryId}`, Date.now());
+  const ts = Date.now();
+  recentBeneficiaryAdditions.set(`${userId}:${beneficiaryId}`, ts);
+  _persistBeneficiaryAddition(userId, beneficiaryId, ts);
 }
 
 export function isGhostBeneficiary(userId: number, beneficiaryId: number): boolean {
@@ -742,30 +833,92 @@ export function geoBlockMiddleware(req: Request, res: Response, next: NextFuncti
 }
 
 // ─── 29. User-ID-Based Account Lockout (v146) ─────────────────────────────────
-const userLockouts = new Map<number, { count: number; lockedUntil?: number }>();
+// W19-B: the per-process `userLockouts` Map has been REMOVED. Login lockout
+// state is security/auth state that must survive restarts and be consistent
+// across replicas:
+//   PRIMARY  — Redis (existing hardened client) with TTL:
+//              `lockout:fail:<userId>`  INCR counter, PX = lockout window
+//              `lockout:until:<userId>` lock expiry timestamp, PX = 30 min
+//   FALLBACK — the durable PG `user_lockouts` table helpers in db.ts
+//              (recordLoginFailure / checkDbUserLockout / clearDbUserLockout).
+//              A Redis outage NEVER silently disables lockouts: failures are
+//              logged + counted (writeThroughTelemetry) and the request is
+//              served from the durable store instead.
 const USER_LOCKOUT_THRESHOLD = 5;
 const USER_LOCKOUT_DURATION_MS = 30 * 60 * 1000;
-export function recordUserLoginFailure(userId: number): { locked: boolean; retryAfter?: number } {
-  const entry = userLockouts.get(userId) ?? { count: 0 };
-  entry.count++;
-  if (entry.count >= USER_LOCKOUT_THRESHOLD) {
-    entry.lockedUntil = Date.now() + USER_LOCKOUT_DURATION_MS;
-    entry.count = 0;
-    userLockouts.set(userId, entry);
-    emitSecurityEvent({ type: "auth.user_locked", severity: "high", userId, detail: `User ${userId} locked after ${USER_LOCKOUT_THRESHOLD} failed attempts` });
-    return { locked: true, retryAfter: USER_LOCKOUT_DURATION_MS / 1000 };
+const lockoutFailKey = (userId: number) => `lockout:fail:${userId}`;
+const lockoutUntilKey = (userId: number) => `lockout:until:${userId}`;
+
+export async function recordUserLoginFailure(userId: number): Promise<{ locked: boolean; retryAfter?: number }> {
+  const redis = getRedisClient();
+  if (redis) {
+    try {
+      const count = await redis.incr(lockoutFailKey(userId));
+      if (count === 1) await redis.pexpire(lockoutFailKey(userId), USER_LOCKOUT_DURATION_MS);
+      if (count >= USER_LOCKOUT_THRESHOLD) {
+        const lockedUntil = Date.now() + USER_LOCKOUT_DURATION_MS;
+        await redis.set(lockoutUntilKey(userId), String(lockedUntil), "PX", USER_LOCKOUT_DURATION_MS);
+        await redis.del(lockoutFailKey(userId));
+        emitSecurityEvent({ type: "auth.user_locked", severity: "high", userId, detail: `User ${userId} locked after ${USER_LOCKOUT_THRESHOLD} failed attempts` });
+        return { locked: true, retryAfter: USER_LOCKOUT_DURATION_MS / 1000 };
+      }
+      return { locked: false };
+    } catch (err) {
+      reportWriteThroughFailure("user_lockouts_redis", err, "error");
+      // fall through to durable PG path below
+    }
+  } else {
+    reportWriteThroughFailure("user_lockouts_redis", new Error("Redis client unavailable"), "error");
   }
-  userLockouts.set(userId, entry);
-  return { locked: false };
+  // Durable fallback (PG `user_lockouts` table) — lockouts must never be
+  // silently dropped, so on Redis loss we degrade to the persistent store.
+  const res = await recordLoginFailure(userId);
+  if (res.locked) {
+    emitSecurityEvent({ type: "auth.user_locked", severity: "high", userId, detail: `User ${userId} locked after ${USER_LOCKOUT_THRESHOLD} failed attempts (PG fallback path)` });
+  }
+  return { locked: res.locked, retryAfter: res.retryAfterSec || undefined };
 }
-export function checkUserLockout(userId: number): { locked: boolean; retryAfter?: number } {
-  const entry = userLockouts.get(userId);
-  if (!entry?.lockedUntil) return { locked: false };
-  const now = Date.now();
-  if (now >= entry.lockedUntil) { userLockouts.delete(userId); return { locked: false }; }
-  return { locked: true, retryAfter: Math.ceil((entry.lockedUntil - now) / 1000) };
+
+export async function checkUserLockout(userId: number): Promise<{ locked: boolean; retryAfter?: number }> {
+  const redis = getRedisClient();
+  if (redis) {
+    try {
+      const until = await redis.get(lockoutUntilKey(userId));
+      if (!until) return { locked: false };
+      const remainingMs = parseInt(until, 10) - Date.now();
+      if (remainingMs <= 0) {
+        await redis.del(lockoutUntilKey(userId)).catch((err) => reportWriteThroughFailure("user_lockouts_redis", err));
+        return { locked: false };
+      }
+      return { locked: true, retryAfter: Math.ceil(remainingMs / 1000) };
+    } catch (err) {
+      reportWriteThroughFailure("user_lockouts_redis", err, "error");
+      // fall through to durable PG check
+    }
+  } else {
+    reportWriteThroughFailure("user_lockouts_redis", new Error("Redis client unavailable"), "error");
+  }
+  const res = await checkDbUserLockout(userId);
+  return { locked: res.locked, retryAfter: res.retryAfterSec || undefined };
 }
-export function clearUserLockout(userId: number): void { userLockouts.delete(userId); }
+
+export async function clearUserLockout(userId: number): Promise<void> {
+  const redis = getRedisClient();
+  if (redis) {
+    try {
+      await redis.del(lockoutFailKey(userId), lockoutUntilKey(userId));
+    } catch (err) {
+      reportWriteThroughFailure("user_lockouts_redis", err, "error");
+    }
+  }
+  // Also clear any durable PG record so a lockout cannot resurrect via the
+  // fallback path after an admin clears it.
+  try {
+    await clearDbUserLockout(userId);
+  } catch (err) {
+    reportWriteThroughFailure("user_lockouts_pg", err, "error");
+  }
+}
 
 // ─── 30. HMAC Request Signing for Service-to-Service Calls (v146) ─────────────
 // W9/Q11 (F10-3): no repo-known static fallback. Production: missing env =>
