@@ -40,6 +40,10 @@ import { lookupParty, requestQuote, initiateTransfer, getTransferStatus, generat
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 import { amlCheck, fraudScore } from "../_core/serviceRegistry";
 import { screenSanctions } from "../_core/polyglotClient";
+// W19-F: TigerBeetle write-through for the sender debit / compensation
+// (fail-open emit; PG stays source of truth; outbox fallback inside helper).
+import { recordTigerBeetleDualWrite } from "../_core/fundFlowHardening";
+import { TB_ACCOUNT_CODES } from "../_core/tigerBeetle";
 import crypto from "crypto";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -756,6 +760,26 @@ export const p2pInstantRouter = router({
         throw err;
       }
 
+      // ── W19-F: TigerBeetle dual-write of the committed PG debit ──────────
+      // The sender debit (and, for internal rail, the receiver credit) are
+      // committed in PG above but previously NEVER reached the ledger. Write
+      // through now — deterministic ids per transfer+leg make replays
+      // idempotent; fail-open (PG stays source of truth) with PG outbox
+      // fallback inside the helper for the reconciliation sweep.
+      if (receiverId && receiverFspId === REMITFLOW_FSP_ID) {
+        // Internal: sender wallet → receiver wallet (principal) + fee to the
+        // platform fee-collection account.
+        await recordTigerBeetleDualWrite({ reference: `P2P_${transfer.id}_SEND`, fromUserId: ctx.user.id, fromCode: TB_ACCOUNT_CODES.USER_WALLET, toUserId: receiverId, toCode: TB_ACCOUNT_CODES.USER_WALLET, amount: receiveAmount, currency: input.currency });
+        if (fee > 0) {
+          await recordTigerBeetleDualWrite({ reference: `P2P_${transfer.id}_FEE`, fromUserId: ctx.user.id, fromCode: TB_ACCOUNT_CODES.USER_WALLET, toCode: TB_ACCOUNT_CODES.FEE_COLLECTION, amount: fee, currency: input.currency });
+        }
+      } else {
+        // Cross-border: sender wallet → platform settlement (parked until the
+        // rail outcome resolves; the ABORTED compensation below writes the
+        // reversal).
+        await recordTigerBeetleDualWrite({ reference: `P2P_${transfer.id}_SEND`, fromUserId: ctx.user.id, fromCode: TB_ACCOUNT_CODES.USER_WALLET, toCode: TB_ACCOUNT_CODES.SETTLEMENT, amount: totalDebit, currency: input.currency });
+      }
+
       let externalOutcome: "completed" | "failed" | "uncertain" | null = null;
       if (receiverId && receiverFspId === REMITFLOW_FSP_ID) {
         // Internal transfer fully settled inside the transaction above.
@@ -871,6 +895,9 @@ export const p2pInstantRouter = router({
               description: `P2P cross-border to ${normalized} via ${rail} — FAILED (sender compensated)`,
               metadata: { p2pTransferId: transfer.id, rail, mojaloopTransferId: resolvedResult.transferId, leg: "sender_debit", compensated: true, sendAmount: input.amount.toFixed(2), sendCurrency: input.currency },
             } as any);
+            // W19-F: reverse the ledger debit written above (settlement →
+            // sender). Deterministic id per transfer; fail-open w/ outbox.
+            await recordTigerBeetleDualWrite({ reference: `P2P_${transfer.id}_COMP`, fromCode: TB_ACCOUNT_CODES.SETTLEMENT, toUserId: ctx.user.id, toCode: TB_ACCOUNT_CODES.USER_WALLET, amount: totalDebit, currency: input.currency });
           }
           externalOutcome = "failed";
         } else {
@@ -1485,14 +1512,17 @@ export const p2pInstantRouter = router({
       // must never exceed what the sender actually paid.
       const maxRefundable = parseFloat(transfer.sendAmount) + parseFloat(transfer.fee ?? "0");
       const refundAmt = Math.min(input.refundAmount ?? maxRefundable, maxRefundable);
+      // Hoisted (pure functions of `transfer`) so the TB dual-write below can
+      // mirror exactly what the PG transaction did.
+      const isInternalCompleted = transfer.status === "completed" && !!transfer.receiverId && transfer.receiverFspId === REMITFLOW_FSP_ID;
 
       await db.transaction(async (tx: any) => {
         if (input.resolution === "refund" || input.resolution === "partial_refund") {
           // Refunding a COMPLETED internal transfer while the receiver keeps
           // the credit creates money — only allow refund when the receiver
           // credit can be clawed back (internal + completed) or funds are
-          // still with us (debited/settling).
-          const isInternalCompleted = transfer.status === "completed" && !!transfer.receiverId && transfer.receiverFspId === REMITFLOW_FSP_ID;
+          // still with us (debited/settling). (isInternalCompleted hoisted
+          // above the transaction — W19-F.)
           // FF-FIX: never refund an in-flight EXTERNAL transfer — the rail may
           // still complete the payout, which would leave both sides holding
           // the money. Require rail recall/abort confirmation first.
@@ -1546,6 +1576,19 @@ export const p2pInstantRouter = router({
           }
         }
       });
+      // W19-F: TB dual-writes mirroring the refund movements committed above.
+      if (input.resolution === "refund" || input.resolution === "partial_refund") {
+        if (isInternalCompleted && transfer.receiverId) {
+          // Receiver clawback → sender.
+          await recordTigerBeetleDualWrite({ reference: `P2P_${transfer.id}_CLAWBACK`, fromUserId: transfer.receiverId, fromCode: TB_ACCOUNT_CODES.USER_WALLET, toUserId: transfer.senderId, toCode: TB_ACCOUNT_CODES.USER_WALLET, amount: parseFloat(transfer.receiveAmount), currency: transfer.receiveCurrency });
+        }
+        // Any remainder (fees, or refunds where no clawback occurred) is
+        // platform-funded: settlement → sender.
+        const platformFunded = refundAmt - (isInternalCompleted ? parseFloat(transfer.receiveAmount) : 0);
+        if (platformFunded > 0) {
+          await recordTigerBeetleDualWrite({ reference: `P2P_${transfer.id}_REFUND`, fromCode: TB_ACCOUNT_CODES.SETTLEMENT, toUserId: transfer.senderId, toCode: TB_ACCOUNT_CODES.USER_WALLET, amount: platformFunded, currency: transfer.sendCurrency });
+        }
+      }
       return { resolved: true, resolution: input.resolution, transferId: input.transferId };
     }),
 
@@ -1895,6 +1938,8 @@ export const p2pInstantRouter = router({
         }).returning();
         return t;
       });
+      // W19-F: TB dual-write — buyer wallet → platform escrow account.
+      await recordTigerBeetleDualWrite({ reference: `P2P_ESCROW_${transfer.id}_FUND`, fromUserId: ctx.user.id, fromCode: TB_ACCOUNT_CODES.USER_WALLET, toCode: TB_ACCOUNT_CODES.ESCROW, amount: input.amount, currency: input.currency });
       logger.info({ escrowId, buyerId: ctx.user.id, amount: input.amount }, "[P2P] Escrow created");
       return { escrowId, transferId: transfer.id, amount: input.amount, currency: input.currency, conditions: input.conditions, status: "funded" };
     }),
@@ -1999,11 +2044,17 @@ export const p2pInstantRouter = router({
             return true;
           });
           if (refunded) {
+            // W19-F: TB dual-write — escrow account → buyer wallet (refund).
+            await recordTigerBeetleDualWrite({ reference: `P2P_ESCROW_${escrow.id}_REFUND`, fromCode: TB_ACCOUNT_CODES.ESCROW, toUserId: ctx.user.id, toCode: TB_ACCOUNT_CODES.USER_WALLET, amount, currency: escrow.sendCurrency });
             logger.warn({ escrowId: input.escrowId, buyerId: ctx.user.id, amount }, "[P2P] Escrow refunded — seller wallet unavailable");
             return { released: false, refunded: true, escrowId: input.escrowId, amount: escrow.sendAmount };
           }
         }
         throw err;
+      }
+      // W19-F: TB dual-write — escrow account → seller wallet (release).
+      if (sellerAliasRow) {
+        await recordTigerBeetleDualWrite({ reference: `P2P_ESCROW_${escrow.id}_RELEASE`, fromCode: TB_ACCOUNT_CODES.ESCROW, toUserId: sellerAliasRow.userId, toCode: TB_ACCOUNT_CODES.USER_WALLET, amount, currency: sellerCurrency });
       }
       logger.info({ escrowId: input.escrowId, buyerId: ctx.user.id, sellerId: sellerAliasRow?.userId, amount }, "[P2P] Escrow released — seller credited");
       return { released: true, escrowId: input.escrowId, amount: escrow.sendAmount };
