@@ -18,7 +18,7 @@ anyhow = "1"
 thiserror = "1"
 fluvio = "=0.23.0"
 dotenvy = "0.15"
-prometheus = { version = "0.13", features = ["process"] }
+prometheus = { version = "0.14", features = ["process"] }
 tokio-postgres = "0.7"
 deadpool-postgres = "0.14"
 futures = "0.3"
