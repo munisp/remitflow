@@ -19,7 +19,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # release tracing-opentelemetry 0.28 bridges to (it requires opentelemetry
 # ^0.27). Mixing 0.28+ otel crates with tracing-opentelemetry 0.28 does NOT
 # compile, so keep these versions in lockstep (see OTEL.md).
-opentelemetry = { version = "0.27.1", default-features = false, features = ["trace"] }
+opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.27.1", default-features = false, features = ["trace", "rt-tokio"] }
 # OTLP/HTTP+protobuf exporter (no tonic — the service has no gRPC stack, and
 # http-proto keeps the dependency graph small). reqwest-client selects the
