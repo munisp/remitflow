@@ -13,9 +13,21 @@
  * Environment variables:
  *   CUSTODY_PROVIDER=fireblocks|bitgo|mock (default: mock)
  *   FIREBLOCKS_API_KEY — Fireblocks API key
- *   FIREBLOCKS_API_SECRET — Fireblocks RSA private key (PEM)
+ *   FIREBLOCKS_API_SECRET — Fireblocks RSA private key (PEM). DEV/TEST ONLY —
+ *     in production an inline env PEM with no FIREBLOCKS_API_SECRET_FILE fails
+ *     closed at provider init.
+ *   FIREBLOCKS_API_SECRET_FILE — path to a mounted secret file (e.g. a k8s
+ *     secret volume) containing the PEM. Takes precedence over the env PEM.
+ *   FIREBLOCKS_API_SECRET_CIPHERTEXT_B64 — KMS-envelope ciphertext of the PEM,
+ *     decrypted via the decryptor selected by CUSTODY_KEY_KMS_PROVIDER (see
+ *     "Key material resolution" below). No KMS client exists in the dependency
+ *     tree, so any CUSTODY_KEY_KMS_PROVIDER value currently fails closed.
  *   FIREBLOCKS_VAULT_ACCOUNT_ID — default vault account ID
- *   BITGO_ACCESS_TOKEN — BitGo OAuth access token
+ *   BITGO_ACCESS_TOKEN — BitGo OAuth access token (dev/test only in env; same
+ *     production rule as the Fireblocks PEM)
+ *   BITGO_TOKEN_FILE — mounted secret file containing the BitGo token;
+ *     takes precedence over BITGO_ACCESS_TOKEN.
+ *   BITGO_TOKEN_CIPHERTEXT_B64 — KMS-envelope ciphertext of the BitGo token.
  *   BITGO_WALLET_ID — BitGo wallet ID
  *   BITGO_PASSPHRASE — BitGo wallet passphrase (server-side, never client)
  *
@@ -30,6 +42,7 @@ import { z } from "zod";
 import { protectedProcedure, publicProcedure, adminProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import crypto from "crypto";
+import fs from "fs";
 import { logger } from '../_core/logger';
 import { safeParseAmount } from "../lib/safeDecimal";
 import { executeTransferPipeline } from "../_core/transferPipeline";
@@ -39,6 +52,148 @@ const logCustodyAction = (userId: number, action: string, details: object) => {
   // createAuditLog-compatible audit trail for all custody mutations
   logger.info(JSON.stringify({ level: "AUDIT", userId, action, details, ts: new Date().toISOString() }));
 };
+
+// ─── Key material resolution (W21 Lane K) ───────────────────────────────────
+//
+// Precedence for custody secrets (Fireblocks RS256 PEM, BitGo token):
+//   1. Mounted secret file  — FIREBLOCKS_API_SECRET_FILE / BITGO_TOKEN_FILE
+//      (e.g. a Kubernetes secret volume). Highest precedence.
+//   2. KMS envelope         — ciphertext in FIREBLOCKS_API_SECRET_CIPHERTEXT_B64 /
+//      BITGO_TOKEN_CIPHERTEXT_B64, decrypted by the CustodyKeyDecryptor selected
+//      via CUSTODY_KEY_KMS_PROVIDER. The decryptor registry below is
+//      INTENTIONALLY EMPTY: no KMS client exists in this repo's dependencies
+//      (verified against package.json), so setting CUSTODY_KEY_KMS_PROVIDER to
+//      any value fails closed at provider init rather than silently falling
+//      back to a less-secure source. Register a real implementation here only
+//      after adding a vetted KMS client dependency.
+//   3. Inline environment variable — FIREBLOCKS_API_SECRET / BITGO_ACCESS_TOKEN.
+//      Allowed OUTSIDE production only. In production, an env-only secret with
+//      no file/KMS source is a hard startup failure (fail closed).
+
+/** Decryptor interface for KMS-enveloped custody key material. */
+export interface CustodyKeyDecryptor {
+  /** Decrypt a base64-encoded ciphertext envelope and return plaintext key material (PEM or token). */
+  decryptKeyMaterial(ciphertextB64: string): Promise<string>;
+}
+
+/** Registry of available KMS decryptors by provider name. Empty until a real KMS client dependency exists. */
+const CUSTODY_KEY_DECRYPTORS: Record<string, () => CustodyKeyDecryptor> = {};
+
+/** In-memory cache of KMS-decrypted key material, populated by preloadCustodyKeyMaterial(). */
+const kmsDecryptedKeys: Record<string, string> = {};
+
+/**
+ * Decrypt any configured KMS-enveloped custody secrets into memory. Call once
+ * at process bootstrap before the custody provider is constructed. Fails
+ * closed: an unregistered CUSTODY_KEY_KMS_PROVIDER is a hard error.
+ */
+export async function preloadCustodyKeyMaterial(): Promise<void> {
+  const kmsProvider = process.env.CUSTODY_KEY_KMS_PROVIDER?.trim();
+  if (!kmsProvider) return;
+  const factory = CUSTODY_KEY_DECRYPTORS[kmsProvider];
+  if (!factory) {
+    throw new Error(
+      `[Custody] CUSTODY_KEY_KMS_PROVIDER=${kmsProvider} has no registered decryptor implementation — refusing to load custody keys (fail closed)`,
+    );
+  }
+  const decryptor = factory();
+  const envelopes: Array<[ciphertextEnv: string, cacheSlot: string]> = [
+    ["FIREBLOCKS_API_SECRET_CIPHERTEXT_B64", "fireblocksPem"],
+    ["BITGO_TOKEN_CIPHERTEXT_B64", "bitgoToken"],
+  ];
+  for (const [ciphertextEnv, slot] of envelopes) {
+    const ciphertext = process.env[ciphertextEnv]?.trim();
+    if (!ciphertext) continue;
+    const plaintext = (await decryptor.decryptKeyMaterial(ciphertext)).trim();
+    if (!plaintext) {
+      throw new Error(`[Custody] KMS decryptor returned empty key material for ${ciphertextEnv} (fail closed)`);
+    }
+    kmsDecryptedKeys[slot] = plaintext;
+  }
+}
+
+/** True when a KMS provider is configured (used to fail closed at provider init if unregistered). */
+function kmsProviderConfigured(): boolean {
+  return !!process.env.CUSTODY_KEY_KMS_PROVIDER?.trim();
+}
+
+function assertKmsProviderRegistered(): void {
+  const kmsProvider = process.env.CUSTODY_KEY_KMS_PROVIDER?.trim();
+  if (kmsProvider && !CUSTODY_KEY_DECRYPTORS[kmsProvider]) {
+    throw new Error(
+      `[Custody] CUSTODY_KEY_KMS_PROVIDER=${kmsProvider} has no registered decryptor implementation — refusing to initialize custody provider (fail closed)`,
+    );
+  }
+}
+
+/**
+ * Resolve one custody secret with the precedence documented above.
+ * Returns "" when no source is configured (the provider factory fails closed
+ * on empty credentials for real providers).
+ */
+function resolveCustodySecret(opts: {
+  fileEnv: string;
+  envName: string;
+  kmsSlot: string;
+  label: string;
+}): string {
+  assertKmsProviderRegistered();
+  const filePath = process.env[opts.fileEnv]?.trim();
+  if (filePath) {
+    let secret: string;
+    try {
+      secret = fs.readFileSync(filePath, "utf8").trim();
+    } catch (err) {
+      throw new Error(
+        `[Custody] ${opts.label}: failed to read secret file from ${opts.fileEnv}=${filePath}: ${err instanceof Error ? err.message : String(err)} (fail closed)`,
+      );
+    }
+    if (!secret) {
+      throw new Error(`[Custody] ${opts.label}: secret file ${opts.fileEnv}=${filePath} is empty (fail closed)`);
+    }
+    return secret;
+  }
+  const kmsValue = kmsDecryptedKeys[opts.kmsSlot]?.trim();
+  if (kmsValue) return kmsValue;
+  const envValue = process.env[opts.envName]?.trim();
+  if (envValue) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        `[Custody] ${opts.label}: inline env secret ${opts.envName} is not allowed in production — ` +
+        `mount the key via ${opts.fileEnv} or configure CUSTODY_KEY_KMS_PROVIDER envelope decryption (fail closed)`,
+      );
+    }
+    return envValue;
+  }
+  return "";
+}
+
+/** Non-throwing presence check for capability/status reporting (config read only, no file I/O). */
+export function hasFireblocksKeyMaterial(): boolean {
+  try {
+    assertKmsProviderRegistered();
+  } catch {
+    return false;
+  }
+  return !!(
+    process.env.FIREBLOCKS_API_SECRET_FILE?.trim() ||
+    kmsDecryptedKeys.fireblocksPem?.trim() ||
+    (process.env.NODE_ENV !== "production" && process.env.FIREBLOCKS_API_SECRET?.trim())
+  );
+}
+
+export function hasBitGoKeyMaterial(): boolean {
+  try {
+    assertKmsProviderRegistered();
+  } catch {
+    return false;
+  }
+  return !!(
+    process.env.BITGO_TOKEN_FILE?.trim() ||
+    kmsDecryptedKeys.bitgoToken?.trim() ||
+    (process.env.NODE_ENV !== "production" && process.env.BITGO_ACCESS_TOKEN?.trim())
+  );
+}
 
 // ─── Provider interface ────────────────────────────────────────────────────────
 interface CustodyBalance {
@@ -149,8 +304,18 @@ class FireblocksCustody implements CustodyProvider {
 
   constructor() {
     this.apiKey = process.env.FIREBLOCKS_API_KEY ?? "";
-    this.privateKey = process.env.FIREBLOCKS_API_SECRET ?? "";
+    this.privateKey = resolveCustodySecret({
+      fileEnv: "FIREBLOCKS_API_SECRET_FILE",
+      envName: "FIREBLOCKS_API_SECRET",
+      kmsSlot: "fireblocksPem",
+      label: "Fireblocks RS256 private key",
+    });
     this.vaultAccountId = process.env.FIREBLOCKS_VAULT_ACCOUNT_ID ?? "0";
+  }
+
+  /** True when both the API key and signing key material resolved to non-empty values. */
+  hasCredentials(): boolean {
+    return !!(this.apiKey && this.privateKey);
   }
 
   private signJwt(path: string, body: string): string {
@@ -243,7 +408,8 @@ class FireblocksCustody implements CustodyProvider {
     try {
       await this.request("GET", "/supported_assets");
       return true;
-    } catch {
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Custody] Fireblocks health check failed");
       return false;
     }
   }
@@ -258,9 +424,19 @@ class BitGoCustody implements CustodyProvider {
   private baseUrl = "https://app.bitgo.com/api/v2";
 
   constructor() {
-    this.accessToken = process.env.BITGO_ACCESS_TOKEN ?? "";
+    this.accessToken = resolveCustodySecret({
+      fileEnv: "BITGO_TOKEN_FILE",
+      envName: "BITGO_ACCESS_TOKEN",
+      kmsSlot: "bitgoToken",
+      label: "BitGo access token",
+    });
     this.walletId = process.env.BITGO_WALLET_ID ?? "";
     this.passphrase = process.env.BITGO_PASSPHRASE ?? "";
+  }
+
+  /** True when the token and wallet id resolved to non-empty values. */
+  hasCredentials(): boolean {
+    return !!(this.accessToken && this.walletId);
   }
 
   private async request(method: string, path: string, body?: object): Promise<any> {
@@ -328,7 +504,8 @@ class BitGoCustody implements CustodyProvider {
     try {
       await this.request("GET", "/ping");
       return true;
-    } catch {
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Custody] BitGo health check failed");
       return false;
     }
   }
@@ -345,8 +522,22 @@ function getCustodyProvider(): CustodyProvider {
     throw new Error(`cryptoCustody refuses to run with mock provider in production (CUSTODY_PROVIDER=${provider})`);
   }
   switch (provider) {
-    case "fireblocks": return new FireblocksCustody();
-    case "bitgo": return new BitGoCustody();
+    case "fireblocks": {
+      const fb = new FireblocksCustody();
+      // Fail closed: a real provider with no key material would sign JWTs with
+      // an empty key and produce confusing 401s — refuse at init instead.
+      if (!fb.hasCredentials()) {
+        throw new Error("cryptoCustody: CUSTODY_PROVIDER=fireblocks but no API key / key material configured (FIREBLOCKS_API_KEY + FIREBLOCKS_API_SECRET_FILE or KMS envelope) — refusing to initialize (fail closed)");
+      }
+      return fb;
+    }
+    case "bitgo": {
+      const bg = new BitGoCustody();
+      if (!bg.hasCredentials()) {
+        throw new Error("cryptoCustody: CUSTODY_PROVIDER=bitgo but no token/wallet configured (BITGO_TOKEN_FILE or KMS envelope + BITGO_WALLET_ID) — refusing to initialize (fail closed)");
+      }
+      return bg;
+    }
     default: return new SandboxCustody();
   }
 }
@@ -443,7 +634,10 @@ async function _dedupeCustodyClaim<T>(userId: number, idempotencyKey: string, fn
       try {
         const { trackError } = await import("../middleware/businessMetrics.js");
         trackError("persistence", "custody_idempotency_release");
-      } catch { /* metrics must never break the hot path */ }
+      } catch (metricsErr) {
+        // Telemetry fail-open but never silent.
+        logger.warn({ err: metricsErr instanceof Error ? metricsErr.message : String(metricsErr) }, "[Custody] failed to record custody_idempotency_release metric");
+      }
     }
     throw err;
   }
@@ -743,12 +937,8 @@ export const cryptoCustodyRouter = {
       provider,
       healthy,
       isProduction: provider !== "mock",
-      fireblocksConfigured: !!(
-        process.env.FIREBLOCKS_API_KEY && process.env.FIREBLOCKS_API_SECRET
-      ),
-      bitgoConfigured: !!(
-        process.env.BITGO_ACCESS_TOKEN && process.env.BITGO_WALLET_ID
-      ),
+      fireblocksConfigured: !!process.env.FIREBLOCKS_API_KEY && hasFireblocksKeyMaterial(),
+      bitgoConfigured: hasBitGoKeyMaterial() && !!process.env.BITGO_WALLET_ID,
     };
   }),
 };

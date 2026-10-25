@@ -22,6 +22,7 @@ import {
   getSavingsGoalsByUserId, getTransactionsByUserId, getUnreadNotificationCount,
   getUserByOpenId, getVirtualAccountsByUserId, getWalletsByUserId, saveFxRates,
   invalidateUserByOpenIdCache,
+  insertOutboxEvent,
   upsertUser,
 } from "./db";
 import { storagePut } from "./storage";
@@ -1817,6 +1818,41 @@ export const appRouter = router({
           metadata: input.deliveryMethod ? JSON.stringify({ deliveryMethod: input.deliveryMethod }) : undefined,
           reference: txRef, idempotencyKey: transferIdempKey,
         } as any);
+        // W21-I: TigerBeetle ledger write joins the SAME transaction boundary
+        // as the debit. Production = FAIL CLOSED: a ledger-write failure throws
+        // here, rolling back the wallet debit, the transaction record AND the
+        // durable idempotency claim together — no committed money movement
+        // without its ledger entry. The deterministic transferIdempKey lets an
+        // honest client retry dedupe the ledger side. Non-production degrades
+        // with a LOUD error plus a durable outbox row written IN-TX
+        // (aggregate_type "tigerbeetle", event_type "transfer_send_ledger_failed")
+        // so the outbox worker relays it and the reconciliation sweep can repair
+        // the missed ledger write (mirrors recordTigerBeetleDualWrite).
+        const ledgerParams = {
+          idempotencyKey: transferIdempKey,
+          sourceAccountId: `user-${ctx.user!.id}-${input.fromCurrency}`,
+          destinationAccountId: `recipient-${input.recipientAccount ?? txRef}-${input.toCurrency}`,
+          amount: input.amount.toFixed(2),
+          currency: input.fromCurrency,
+          reference: txRef,
+          description: input.description ?? `Transfer to ${input.recipientName}`,
+        };
+        if (process.env.NODE_ENV === "production") {
+          await grpcLedgerTransfer(ledgerParams);
+        } else {
+          try {
+            await grpcLedgerTransfer(ledgerParams);
+          } catch (ledgerErr) {
+            const ledgerErrMsg = ledgerErr instanceof Error ? ledgerErr.message : String(ledgerErr);
+            logger.error({ err: ledgerErrMsg, ref: txRef, userId: ctx.user!.id }, "[gRPC] TigerBeetle ledger write FAILED (non-production degrade) — durable outbox row queued in-tx for relay/reconciliation");
+            await insertOutboxEvent(tx, {
+              aggregateId: txRef,
+              aggregateType: "tigerbeetle",
+              eventType: "transfer_send_ledger_failed",
+              payload: { ...ledgerParams, error: ledgerErrMsg, failedAt: new Date().toISOString() },
+            });
+          }
+        }
         return { ref: txRef, newBalance: updTransfer.balance };
         },
       });
@@ -1846,21 +1882,10 @@ export const appRouter = router({
           logger.warn({ err: pipelineErr }, "[Transfer] State machine pipeline error (non-blocking):");
         }
       })();
-      // gRPC Ledger: record double-entry in TigerBeetle (mandatory for reconciliation)
-      try {
-        await grpcLedgerTransfer({
-          idempotencyKey,
-          sourceAccountId: `user-${ctx.user!.id}-${input.fromCurrency}`,
-          destinationAccountId: `recipient-${input.recipientAccount ?? ref}-${input.toCurrency}`,
-          amount: input.amount.toFixed(2),
-          currency: input.fromCurrency,
-          reference: ref,
-          description: input.description ?? `Transfer to ${input.recipientName}`,
-        });
-      } catch (ledgerErr) {
-        logger.error({ err: ledgerErr, ref }, "[gRPC] TigerBeetle ledger write failed — creating reconciliation alert");
-        createAuditLog({ userId: ctx.user!.id, action: "LEDGER_SYNC_FAILED", description: `TigerBeetle write failed for ${ref}: ${ledgerErr instanceof Error ? ledgerErr.message : String(ledgerErr)}. Manual reconciliation required.`, severity: "critical" as any }).catch(() => {});
-      }
+      // W21-I: the gRPC TigerBeetle ledger write now happens INSIDE the
+      // withPaymentIdempotency transaction above (fail-closed in production;
+      // durable in-tx outbox row for relay/repair in non-production). No
+      // fail-open post-commit ledger attempt remains here.
       sendNotification({ userId: ctx.user!.id, title: "Transfer Sent", message: `Your transfer of ${input.amount.toLocaleString()} ${input.fromCurrency} to ${input.recipientName} has been initiated.`, type: "transfer" }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
       // Send transfer confirmation email to sender (non-blocking)
       if (ctx.user!.email) {

@@ -44,6 +44,7 @@ import { reportWriteThroughFailure } from "../lib/writeThroughTelemetry";
 // modules delivered by Lanes A (pendingDeliveryWorker) and C
 // (fundFlowHardening). Imported exactly as named; calls are guarded below.
 import { startPendingDeliveryWorker } from "./pendingDeliveryWorker";
+import { startP2PReconWorker } from "./p2pReconWorker";
 import { resumeIncompleteSagas } from "./fundFlowHardening";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -1410,6 +1411,14 @@ function requireScheduledTaskAuth(req: express.Request, res: express.Response): 
     } catch (err: unknown) {
       logger.error({ errMsg: err instanceof Error ? err.message : String(err) }, "[W20/SagaResume] resumeIncompleteSagas FAILED — in-progress sagas require manual reconciliation:");
       reportWriteThroughFailure("boot_saga_resume", err, "error");
+    }
+    // ── W21 boot registration: P2P cross-border UNCERTAIN reaper (Lane G) ────
+    try {
+      startP2PReconWorker();
+      logger.info("[W21/P2PRecon] Worker started at boot — parked Mojaloop transfers will be reconciled automatically");
+    } catch (err: unknown) {
+      logger.error({ errMsg: err instanceof Error ? err.message : String(err) }, "[W21/P2PRecon] Worker start FAILED — settling p2p_transfers require manual reconciliation:");
+      reportWriteThroughFailure("boot_p2p_recon_worker", err, "error");
     }
     // ── W10 boot registrations (SPEC-wave10) — all guarded, non-blocking ─────
     // C2: daily AR aging schedule (Temporal cron `0 6 * * *`, queue ar-aging).

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -98,6 +99,16 @@ func TestODL_AllRoutesHavePositiveLiquidity(t *testing.T) {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	for key, route := range store.routes {
+		if route.Provider == ProviderRipple {
+			// XRP corridors intentionally carry NO static liquidity figure —
+			// real depth/cost comes from configured partner endpoints at quote
+			// time, or the corridor reports UNAVAILABLE.
+			if route.Liquidity != 0 || route.EstimatedCost != 0 {
+				t.Errorf("route %s (XRP) must not carry fabricated cost/liquidity, got cost=%f liquidity=%f",
+					key, route.EstimatedCost, route.Liquidity)
+			}
+			continue
+		}
 		if route.Liquidity <= 0 {
 			t.Errorf("route %s has non-positive liquidity: %f", key, route.Liquidity)
 		}
@@ -401,5 +412,415 @@ func BenchmarkODL_GenerateID(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		generateID("ODL")
+	}
+}
+
+// ── XRPL Rail Adapter (fake rippled via httptest; no live network) ───────────
+
+// fakeRippled is an httptest server emulating the rippled JSON-RPC surface the
+// adapter uses. It records the request shapes for assertions.
+type fakeRippled struct {
+	srv *httptest.Server
+	mu  sync.Mutex
+	// requests records every (method, params) the adapter sent.
+	requests []struct {
+		Method string
+		Params map[string]interface{}
+	}
+	// behavior knobs
+	engineResult string // engine_result for submit
+	txValidated  bool   // validated flag for tx lookups
+	txHash       string // hash rippled "returns" — adapter must echo it
+}
+
+func newFakeRippled(t *testing.T, engineResult string, txValidated bool) *fakeRippled {
+	t.Helper()
+	f := &fakeRippled{
+		engineResult: engineResult,
+		txValidated:  txValidated,
+		txHash:       "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789",
+	}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string                   `json:"method"`
+			Params []map[string]interface{} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		p := map[string]interface{}{}
+		if len(req.Params) > 0 {
+			p = req.Params[0]
+		}
+		f.mu.Lock()
+		f.requests = append(f.requests, struct {
+			Method string
+			Params map[string]interface{}
+		}{req.Method, p})
+		f.mu.Unlock()
+
+		var result interface{}
+		switch req.Method {
+		case "account_info":
+			result = map[string]interface{}{
+				"status": "success",
+				"account_data": map[string]interface{}{
+					"Account":  "rODLSourceAccount111111111111111111",
+					"Balance":  "1000000000",
+					"Sequence": 42,
+				},
+				"ledger_current_index": 900,
+			}
+		case "fee":
+			result = map[string]interface{}{
+				"status": "success",
+				"drops": map[string]interface{}{
+					"median_fee":      "2000",
+					"minimum_fee":     "10",
+					"open_ledger_fee": "10",
+					"base_fee_xrp":    "0.00001",
+				},
+				"ledger_current_index": 900,
+			}
+		case "server_state":
+			result = map[string]interface{}{
+				"status": "success",
+				"state": map[string]interface{}{
+					"validated_ledger": map[string]interface{}{"seq": 900},
+					"server_state":     "full",
+				},
+			}
+		case "sign":
+			// Assert server-side signing request shape.
+			if p["secret"] == nil {
+				t.Error("sign request must carry the seed as 'secret'")
+			}
+			txj, _ := p["tx_json"].(map[string]interface{})
+			if txj == nil || txj["TransactionType"] != "Payment" {
+				t.Errorf("sign tx_json must be a Payment, got %v", p["tx_json"])
+			}
+			result = map[string]interface{}{
+				"status":  "success",
+				"tx_blob": "SIGNEDBLOB0000",
+				"tx_json": map[string]interface{}{
+					"Account": "rODLSourceAccount111111111111111111",
+					"hash":    f.txHash,
+				},
+			}
+		case "submit":
+			if p["tx_blob"] == nil {
+				t.Error("submit request must carry tx_blob")
+			}
+			result = map[string]interface{}{
+				"status":                "success",
+				"engine_result":         f.engineResult,
+				"engine_result_message": "The transaction was applied.",
+				"tx_json":               map[string]interface{}{"hash": f.txHash},
+				"accepted":              f.engineResult == "tesSUCCESS",
+				"ledger_current_index":  901,
+			}
+		case "tx":
+			if p["transaction"] != f.txHash {
+				t.Errorf("tx lookup must use the rippled-returned hash, got %v", p["transaction"])
+			}
+			metaResult := f.engineResult
+			result = map[string]interface{}{
+				"status":       "success",
+				"hash":         f.txHash,
+				"validated":    f.txValidated,
+				"ledger_index": 902,
+				"meta":         map[string]interface{}{"TransactionResult": metaResult},
+			}
+		default:
+			result = map[string]interface{}{
+				"status":        "error",
+				"error":         "unknownCmd",
+				"error_message": "unknown method " + req.Method,
+				"error_code":    32,
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"result": result})
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func testXRPLConfig(url string) XRPLConfig {
+	return XRPLConfig{
+		RPCURL:              url,
+		Seed:                "sTestSeedDoNotUseOnMainnet",
+		Account:             "rODLSourceAccount111111111111111111",
+		Destination:         "rOffRampDest22222222222222222222",
+		RequestTimeout:      5 * time.Second,
+		ConfirmTimeout:      10 * time.Second,
+		MaxTransportRetries: 1,
+	}
+}
+
+func TestXRPL_RailAdapterGating(t *testing.T) {
+	// Unconfigured: fail closed.
+	t.Setenv("XRPL_RPC_URL", "")
+	t.Setenv("XRPL_SEED", "")
+	if railAdapterAvailable(ProviderRipple) {
+		t.Error("Ripple rail must be unavailable without XRPL_RPC_URL/XRPL_SEED")
+	}
+	// Other providers never available.
+	for _, p := range []ODLProvider{ProviderCircle, ProviderStellar, ProviderPolygon} {
+		if railAdapterAvailable(p) {
+			t.Errorf("provider %s must remain fail-closed", p)
+		}
+	}
+	// Configured: available.
+	t.Setenv("XRPL_RPC_URL", "http://127.0.0.1:1")
+	t.Setenv("XRPL_SEED", "sXXX")
+	if !railAdapterAvailable(ProviderRipple) {
+		t.Error("Ripple rail must be available when XRPL_RPC_URL+XRPL_SEED are set")
+	}
+}
+
+func TestXRPL_SendPayment_Success(t *testing.T) {
+	fake := newFakeRippled(t, "tesSUCCESS", true)
+	a := newXRPLAdapter(testXRPLConfig(fake.srv.URL))
+
+	outcome, err := a.SendXRPPayment(context.Background(), "25000000") // 25 XRP
+	if err != nil {
+		t.Fatalf("SendXRPPayment failed: %v", err)
+	}
+	if outcome.TxHash != fake.txHash {
+		t.Errorf("tx hash must come from rippled, got %q", outcome.TxHash)
+	}
+	if outcome.EngineResult != "tesSUCCESS" {
+		t.Errorf("engine_result = %q", outcome.EngineResult)
+	}
+	if outcome.LedgerIndex != 902 {
+		t.Errorf("ledger index = %d, want 902", outcome.LedgerIndex)
+	}
+	if outcome.FeeDrops != "2000" {
+		t.Errorf("fee = %q, want median_fee 2000", outcome.FeeDrops)
+	}
+
+	// Verify the JSON-RPC request sequence and shapes.
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	methods := []string{}
+	for _, r := range fake.requests {
+		methods = append(methods, r.Method)
+	}
+	wantPrefix := []string{"account_info", "fee", "server_state", "sign", "submit", "tx"}
+	if len(methods) < len(wantPrefix) {
+		t.Fatalf("too few RPC calls: %v", methods)
+	}
+	for i, m := range wantPrefix {
+		if methods[i] != m {
+			t.Errorf("rpc call %d = %s, want %s (all: %v)", i, methods[i], m, methods)
+		}
+	}
+}
+
+func TestXRPL_SendPayment_DestinationTag(t *testing.T) {
+	fake := newFakeRippled(t, "tesSUCCESS", true)
+	cfg := testXRPLConfig(fake.srv.URL)
+	tag := uint32(12345)
+	cfg.DestinationTag = &tag
+	a := newXRPLAdapter(cfg)
+
+	if _, err := a.SendXRPPayment(context.Background(), "1000000"); err != nil {
+		t.Fatalf("SendXRPPayment failed: %v", err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	for _, r := range fake.requests {
+		if r.Method == "sign" {
+			txj, _ := r.Params["tx_json"].(map[string]interface{})
+			if txj["DestinationTag"].(float64) != 12345 {
+				t.Errorf("DestinationTag not propagated, got %v", txj["DestinationTag"])
+			}
+			return
+		}
+	}
+	t.Error("no sign request recorded")
+}
+
+func TestXRPL_SendPayment_EngineFailure(t *testing.T) {
+	fake := newFakeRippled(t, "tecPATH_PARTIAL", false)
+	a := newXRPLAdapter(testXRPLConfig(fake.srv.URL))
+
+	outcome, err := a.SendXRPPayment(context.Background(), "25000000")
+	if err == nil {
+		t.Fatal("must fail when engine_result != tesSUCCESS")
+	}
+	if !strings.Contains(err.Error(), "tecPATH_PARTIAL") {
+		t.Errorf("error must cite the real engine_result, got %v", err)
+	}
+	// The outcome still carries the rippled-returned hash for reconciliation.
+	if outcome == nil || outcome.TxHash != fake.txHash {
+		t.Error("failed submission must still surface the rippled-returned hash")
+	}
+}
+
+func TestXRPL_SendPayment_RejectsIOUAmount(t *testing.T) {
+	fake := newFakeRippled(t, "tesSUCCESS", true)
+	a := newXRPLAdapter(testXRPLConfig(fake.srv.URL))
+	// Non-integer (e.g. decimal XRP or an IOU-ish value) must be refused.
+	for _, bad := range []string{"1.5", "abc", "", "-100"} {
+		if _, err := a.SendXRPPayment(context.Background(), bad); err == nil {
+			t.Errorf("amount %q must be rejected (XRP drops only)", bad)
+		}
+	}
+}
+
+func TestXRPL_SendPayment_TransportRetry(t *testing.T) {
+	// First server dies immediately; adapter must fail honestly after bounded
+	// retries, never hanging forever.
+	cfg := testXRPLConfig("http://127.0.0.1:1") // nothing listening
+	cfg.MaxTransportRetries = 1
+	cfg.RequestTimeout = 500 * time.Millisecond
+	cfg.ConfirmTimeout = 5 * time.Second
+	a := newXRPLAdapter(cfg)
+	start := time.Now()
+	_, err := a.SendXRPPayment(context.Background(), "1000000")
+	if err == nil {
+		t.Fatal("must fail against an unreachable rippled")
+	}
+	if time.Since(start) > 15*time.Second {
+		t.Error("bounded retries/timeouts violated — call took too long")
+	}
+}
+
+// TestODL_ExecuteSettlement_XRPL exercises the full Ripple dispatch with a
+// fake rippled and asserts the honest persistence payload.
+func TestODL_ExecuteSettlement_XRPL(t *testing.T) {
+	fake := newFakeRippled(t, "tesSUCCESS", true)
+	t.Setenv("XRPL_RPC_URL", fake.srv.URL)
+	t.Setenv("XRPL_SEED", "sTestSeed")
+	t.Setenv("XRPL_ACCOUNT", "rODLSourceAccount111111111111111111")
+	t.Setenv("XRPL_DESTINATION_ACCOUNT", "rOffRampDest22222222222222222222")
+
+	settlement := &ODLSettlement{
+		SettlementID:  "test-xrpl-001",
+		TransferID:    "tx-xrpl-001",
+		QuoteID:       "quote-xrpl-001",
+		Status:        StatusPending,
+		FromCurrency:  "USD",
+		ToCurrency:    "KES",
+		SendAmount:    100,
+		ReceiveAmount: 13000,
+		BridgeAsset:   BridgeXRP,
+		Provider:      ProviderRipple,
+		BridgeDrops:   "25000000",
+		CreatedAt:     time.Now(),
+		AuditTrail:    []AuditEvent{},
+	}
+
+	executeODLSettlement(context.Background(), settlement)
+
+	if settlement.Status != StatusCompleted {
+		t.Fatalf("expected COMPLETED, got %s (%s)", settlement.Status, settlement.FailureReason)
+	}
+	if settlement.BridgeTxHash != fake.txHash {
+		t.Errorf("bridge tx hash must be the rippled-returned hash, got %q", settlement.BridgeTxHash)
+	}
+	if settlement.XRPL == nil {
+		t.Fatal("XRPL execution record must be attached for persistence")
+	}
+	if settlement.XRPL.EngineResult != "tesSUCCESS" || settlement.XRPL.LedgerIndex != 902 {
+		t.Errorf("XRPL payload wrong: %+v", settlement.XRPL)
+	}
+	if settlement.CompletedAt == nil {
+		t.Error("CompletedAt must be set for a completed settlement")
+	}
+
+	// Missing bridge amount must fail honestly, never invent one.
+	s2 := &ODLSettlement{
+		SettlementID: "test-xrpl-002", Status: StatusPending,
+		FromCurrency: "USD", ToCurrency: "KES",
+		BridgeAsset: BridgeXRP, Provider: ProviderRipple,
+		CreatedAt: time.Now(), AuditTrail: []AuditEvent{},
+	}
+	executeODLSettlement(context.Background(), s2)
+	if s2.Status == StatusCompleted {
+		t.Error("settlement without partner-committed drops must never complete")
+	}
+}
+
+// ── XRP Corridor Quote Honesty ────────────────────────────────────────────────
+
+func TestODL_XRPQuote_UnavailableWithoutPartners(t *testing.T) {
+	// Outside dev, without partner endpoints, the XRP corridor is UNAVAILABLE
+	// rather than quoting fabricated figures.
+	t.Setenv("APP_ENV", "")
+	t.Setenv("ENV", "")
+	t.Setenv("GO_ENV", "")
+	t.Setenv("ODL_ONRAMP_URL", "")
+	t.Setenv("ODL_OFFRAMP_URL", "")
+	w := httptest.NewRecorder()
+	r, _ := http.NewRequest("GET", "/api/v1/quote?from=USD&to=KES&amount=1000", nil)
+	handleGetQuote(w, r)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 for unconfigured XRP corridor, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestODL_XRPQuote_DevSyntheticLabeled(t *testing.T) {
+	t.Setenv("APP_ENV", "dev")
+	t.Setenv("ODL_ONRAMP_URL", "")
+	t.Setenv("ODL_OFFRAMP_URL", "")
+	w := httptest.NewRecorder()
+	r, _ := http.NewRequest("GET", "/api/v1/quote?from=USD&to=KES&amount=1000", nil)
+	handleGetQuote(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 in dev mode, got %d: %s", w.Code, w.Body.String())
+	}
+	var q ODLQuote
+	if err := json.Unmarshal(w.Body.Bytes(), &q); err != nil {
+		t.Fatalf("parse quote: %v", err)
+	}
+	if !q.Synthetic {
+		t.Error("dev-mode placeholder quote MUST be labeled synthetic")
+	}
+}
+
+func TestODL_XRPQuote_PartnerEndpoints(t *testing.T) {
+	t.Setenv("APP_ENV", "")
+	t.Setenv("ENV", "")
+	t.Setenv("GO_ENV", "")
+	onramp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"fee_pct": 0.20})
+	}))
+	defer onramp.Close()
+	offramp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"fee_pct":        0.10,
+			"receive_amount": 128700,
+			"xrp_drops":      "50000000",
+		})
+	}))
+	defer offramp.Close()
+	t.Setenv("ODL_ONRAMP_URL", onramp.URL)
+	t.Setenv("ODL_OFFRAMP_URL", offramp.URL)
+
+	w := httptest.NewRecorder()
+	r, _ := http.NewRequest("GET", "/api/v1/quote?from=USD&to=KES&amount=1000", nil)
+	handleGetQuote(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 with partner endpoints, got %d: %s", w.Code, w.Body.String())
+	}
+	var q ODLQuote
+	if err := json.Unmarshal(w.Body.Bytes(), &q); err != nil {
+		t.Fatalf("parse quote: %v", err)
+	}
+	if q.Synthetic {
+		t.Error("partner-backed quote must not be labeled synthetic")
+	}
+	if math.Abs(q.TotalFeePct-0.30) > 0.0001 {
+		t.Errorf("fee must be the sum of partner fees (0.30), got %f", q.TotalFeePct)
+	}
+	if q.ReceiveAmount != 128700 {
+		t.Errorf("receive amount must come from off-ramp partner, got %f", q.ReceiveAmount)
+	}
+	if q.BridgeDrops != "50000000" {
+		t.Errorf("bridge drops must come from partner commitment, got %q", q.BridgeDrops)
 	}
 }

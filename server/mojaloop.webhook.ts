@@ -50,6 +50,21 @@ interface MojaloopTransferCallback {
 // process restart be matched and cleared instead of reported as "unknown".
 
 // ── PostgreSQL persistence ───────────────────────────────────────────────────
+// W21-H: runtime DDL removed — the mojaloop_pending_callbacks table exists via
+// migration drizzle/0080_mojaloop_pending_state.sql (columns verified to match:
+// correlation_id, expires_at, created_at, updated_at).
+//
+// Durability policy:
+//   - Transfer-state callbacks (correlationId "transfer:*"): persistence
+//     failure FAILS CLOSED — the caller responds 5xx so the Mojaloop switch
+//     retries instead of an acked-but-lost settlement state.
+//   - Party/quote callbacks: may degrade (in-memory waiter still resolves)
+//     but with a LOUD metric + error log, never silent.
+
+export const mojaloopWebhookCounters = {
+  persistenceFailures: 0,
+  degradedPartyQuoteCallbacks: 0,
+};
 
 let _wtDb: ReturnType<typeof import("drizzle-orm/postgres-js").drizzle> | null = null;
 
@@ -59,14 +74,24 @@ async function _getWtDb() {
     const { getDb } = await import("./db.js");
     _wtDb = await getDb();
     return _wtDb;
-  } catch {
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, "[Mojaloop] DB unavailable for pending-callback persistence");
     return null;
   }
 }
 
+/** Throws when the correlation is transfer-state (fail closed); degrades loudly otherwise. */
 async function _persistPendingCallback(correlationId: string, expiresAt: Date): Promise<void> {
+  const isTransferState = correlationId.startsWith("transfer:");
   const db = await _getWtDb();
-  if (!db) return;
+  if (!db) {
+    mojaloopWebhookCounters.persistenceFailures++;
+    const msg = `[Mojaloop] No DB handle — cannot persist pending callback ${correlationId}`;
+    if (isTransferState) throw new Error(msg);
+    mojaloopWebhookCounters.degradedPartyQuoteCallbacks++;
+    logger.error({ correlationId }, `${msg} — degraded (in-memory only)`);
+    return;
+  }
   try {
     await db.execute(sql`
       INSERT INTO mojaloop_pending_callbacks (correlation_id, expires_at, updated_at)
@@ -75,7 +100,12 @@ async function _persistPendingCallback(correlationId: string, expiresAt: Date): 
         SET expires_at = EXCLUDED.expires_at, updated_at = NOW()
     `);
   } catch (err: any) {
-    logger.warn({ data: (err as Error).message }, "[Mojaloop] Failed to persist pending callback (continuing in-memory)");
+    mojaloopWebhookCounters.persistenceFailures++;
+    if (isTransferState) {
+      throw new Error(`[Mojaloop] Failed to persist transfer-state pending callback ${correlationId}: ${err.message}`);
+    }
+    mojaloopWebhookCounters.degradedPartyQuoteCallbacks++;
+    logger.error({ correlationId, err: err.message }, "[Mojaloop] Failed to persist pending callback — degraded (in-memory only)");
   }
 }
 
@@ -84,7 +114,9 @@ async function _deletePendingCallback(correlationId: string): Promise<void> {
   if (!db) return;
   try {
     await db.execute(sql`DELETE FROM mojaloop_pending_callbacks WHERE correlation_id = ${correlationId}`);
-  } catch { /* silent */ }
+  } catch (err: any) {
+    logger.warn({ correlationId, err: err?.message }, "[Mojaloop] Failed to delete pending callback row");
+  }
 }
 
 async function _hasPendingCallback(correlationId: string): Promise<boolean> {
@@ -95,30 +127,25 @@ async function _hasPendingCallback(correlationId: string): Promise<boolean> {
       sql`SELECT correlation_id FROM mojaloop_pending_callbacks WHERE correlation_id = ${correlationId} AND expires_at > NOW()`
     );
     return (rows as any[]).length > 0;
-  } catch {
+  } catch (err: any) {
+    logger.warn({ correlationId, err: err?.message }, "[Mojaloop] Pending callback lookup failed");
     return false;
   }
 }
 
-async function _ensurePendingCallbacksTable(): Promise<void> {
+// Expire stale rows left by previous processes on module load (best-effort,
+// loud on failure — the table itself is owned by migration 0080).
+(async () => {
   const db = await _getWtDb();
   if (!db) return;
   try {
-    await db.execute(sql`
-      CREATE TABLE IF NOT EXISTS mojaloop_pending_callbacks (
-        correlation_id TEXT PRIMARY KEY,
-        expires_at TIMESTAMPTZ NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    // Expire stale rows left by previous processes
     await db.execute(sql`DELETE FROM mojaloop_pending_callbacks WHERE expires_at <= NOW()`);
-  } catch { /* silent */ }
-}
-
-// Initialize table on module load
-_ensurePendingCallbacksTable().catch(() => {});
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, "[Mojaloop] Stale pending-callback cleanup failed at boot");
+  }
+})().catch((err) => {
+  logger.warn({ err: err?.message }, "[Mojaloop] Boot-time pending-callback cleanup failed");
+});
 
 const pendingCallbacks = new Map<string, {
   resolve: (value: any) => void;
@@ -131,13 +158,21 @@ export function waitForCallback<T>(correlationId: string, timeoutMs = 30_000): P
     const timeout = setTimeout(() => {
       pendingCallbacks.delete(correlationId);
 
-      _deletePendingCallback(correlationId).catch(() => {});
+      _deletePendingCallback(correlationId).catch((err) => {
+        logger.warn({ correlationId, err: err?.message }, "[Mojaloop] Timeout cleanup delete failed");
+      });
       reject(new Error(`Mojaloop callback timeout after ${timeoutMs}ms for ${correlationId}`));
     }, timeoutMs);
 
     pendingCallbacks.set(correlationId, { resolve, reject, timeout });
 
-    _persistPendingCallback(correlationId, new Date(Date.now() + timeoutMs)).catch(() => {});
+    _persistPendingCallback(correlationId, new Date(Date.now() + timeoutMs)).catch((err) => {
+      // Transfer-state correlations fail closed: drop the in-memory waiter and
+      // reject so the pending transfer is never acked without durable state.
+      clearTimeout(timeout);
+      pendingCallbacks.delete(correlationId);
+      reject(err);
+    });
   });
 }
 
@@ -147,7 +182,9 @@ async function resolveCallback(correlationId: string, value: any) {
     clearTimeout(pending.timeout);
     pendingCallbacks.delete(correlationId);
 
-    _deletePendingCallback(correlationId).catch(() => {});
+    _deletePendingCallback(correlationId).catch((err) => {
+      logger.warn({ correlationId, err: err?.message }, "[Mojaloop] Callback cleanup delete failed");
+    });
     pending.resolve(value);
     return;
   }
@@ -258,7 +295,8 @@ export function registerMojaloopWebhooks(app: Express) {
 
     logger.info(`[Mojaloop] Transfer callback: ${transferId} state=${payload.transferState}`);
 
-    // Update DB record if it exists
+    // Update DB record if it exists — FAIL CLOSED: if the settlement state
+    // cannot be durably recorded we must NOT ack; 5xx makes the switch retry.
     try {
       const db = await getDb();
       if (db) {
@@ -269,17 +307,28 @@ export function registerMojaloopWebhooks(app: Express) {
             fulfilment: payload.fulfilment ?? null,
           })
           .where(sql`${mojaloopTransfers.transferId} = ${transferId}`);
+      } else {
+        throw new Error("No DB handle available");
       }
-    } catch (err) {
-      logger.warn({ data: err }, '[Mojaloop] DB update failed for transfer ${transferId}:');
+    } catch (err: any) {
+      mojaloopWebhookCounters.persistenceFailures++;
+      logger.error({ transferId, err: err?.message }, "[Mojaloop] FAIL-CLOSED: transfer-state DB update failed — responding 500 so the switch retries");
+      res.status(500).json({ error: "Transfer state persistence failed — retry" });
+      return;
     }
 
-    resolveCallback(correlationId, {
-      transferId,
-      transferState: payload.transferState ?? "COMMITTED",
-      completedTimestamp: payload.completedTimestamp,
-      fulfilment: payload.fulfilment,
-    }).catch(() => {});
+    try {
+      await resolveCallback(correlationId, {
+        transferId,
+        transferState: payload.transferState ?? "COMMITTED",
+        completedTimestamp: payload.completedTimestamp,
+        fulfilment: payload.fulfilment,
+      });
+    } catch (err: any) {
+      logger.error({ transferId, err: err?.message }, "[Mojaloop] FAIL-CLOSED: callback resolution failed — responding 500 so the switch retries");
+      res.status(500).json({ error: "Callback resolution failed — retry" });
+      return;
+    }
 
     // Advance main transfer state when settlement is confirmed
     if ((payload.transferState ?? "COMMITTED") === "COMMITTED") {
@@ -348,6 +397,8 @@ export function registerMojaloopWebhooks(app: Express) {
 
     logger.error({ err: payload.errorInformation }, '[Mojaloop] Transfer error callback: ${transferId}');
 
+    // FAIL CLOSED on the error path too: an acked-but-unrecorded abort leaves
+    // the transfer looking in-flight forever. 5xx → switch retries.
     try {
       const db = await getDb();
       if (db) {
@@ -358,9 +409,14 @@ export function registerMojaloopWebhooks(app: Express) {
             errorDescription: payload.errorInformation?.errorDescription ?? "Transfer aborted",
           })
           .where(sql`${mojaloopTransfers.transferId} = ${transferId}`);
+      } else {
+        throw new Error("No DB handle available");
       }
-    } catch (err) {
-      logger.warn({ data: err }, '[Mojaloop] DB update failed for aborted transfer ${transferId}:');
+    } catch (err: any) {
+      mojaloopWebhookCounters.persistenceFailures++;
+      logger.error({ transferId, err: err?.message }, "[Mojaloop] FAIL-CLOSED: aborted-transfer DB update failed — responding 500 so the switch retries");
+      res.status(500).json({ error: "Transfer error persistence failed — retry" });
+      return;
     }
 
     // BDC integration: compensate any IMTO payout leg awaiting this transfer.
@@ -382,11 +438,17 @@ export function registerMojaloopWebhooks(app: Express) {
       logger.error({ err: bdcErr, transferId }, "[Mojaloop] BDC IMTO abort compensation failed (non-blocking; recon net remains)");
     }
 
-    await resolveCallback(correlationId, {
-      transferId,
-      transferState: "ABORTED",
-      errorInformation: payload.errorInformation,
-    });
+    try {
+      await resolveCallback(correlationId, {
+        transferId,
+        transferState: "ABORTED",
+        errorInformation: payload.errorInformation,
+      });
+    } catch (err: any) {
+      logger.error({ transferId, err: err?.message }, "[Mojaloop] FAIL-CLOSED: error-callback resolution failed — responding 500 so the switch retries");
+      res.status(500).json({ error: "Callback resolution failed — retry" });
+      return;
+    }
 
     res.status(200).json({ received: true });
   });
@@ -430,7 +492,7 @@ export function registerMojaloopWebhooks(app: Express) {
       const correlationId = `transfer:${transferId}`;
       await resolveCallback(correlationId, payload);
 
-      // Update DB
+      // Update DB — fail closed (transfer-state callback): 5xx triggers retry.
       try {
         const db = await getDb();
         if (db) {
@@ -440,8 +502,15 @@ export function registerMojaloopWebhooks(app: Express) {
               completedAt: new Date(),
             })
             .where(sql`${mojaloopTransfers.transferId} = ${transferId}`);
+        } else {
+          throw new Error("No DB handle available");
         }
-      } catch { /* ignore */ }
+      } catch (err: any) {
+        mojaloopWebhookCounters.persistenceFailures++;
+        logger.error({ transferId, err: err?.message }, "[Mojaloop] FAIL-CLOSED: generic transfer DB update failed — responding 500");
+        res.status(500).json({ error: "Transfer state persistence failed — retry" });
+        return;
+      }
     }
     res.status(200).json({ received: true });
   });

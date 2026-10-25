@@ -34,7 +34,7 @@ import { TRPCError } from "@trpc/server";
 import { sql, eq, and, or, desc } from "drizzle-orm";
 import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { getDb } from "../db";
-import { paymentAliases, p2pPaymentRequests, p2pTransfers, wallets, transactions, users } from "../../drizzle/schema";
+import { paymentAliases, p2pPaymentRequests, p2pTransfers, wallets, transactions, users, fxRateHistory } from "../../drizzle/schema";
 import { logger } from "../_core/logger";
 import { lookupParty, requestQuote, initiateTransfer, getTransferStatus, generateIlpConditionPair } from "../mojaloop.service";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
@@ -49,12 +49,11 @@ import crypto from "crypto";
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const REMITFLOW_FSP_ID = process.env.MOJALOOP_FSP_ID ?? "remitflow-fsp";
-// Parked-rail-reconciliation marker (mirrors FIX-B's PAYOUT_RECON_PREFIX in
-// embeddedPayouts.ts): p2p_transfers has no metadata column and schema
-// changes are out of scope, so UNCERTAIN-park state is encoded in
-// failure_reason. A row with status='settling' whose failure_reason starts
-// with this prefix is PARKED pending rail reconciliation — NOT failed.
-const P2P_RECON_PREFIX = "RECON:";
+// Parked-rail-reconciliation state: UNCERTAIN cross-border rows are parked in
+// status='settling' with structured park state in the `metadata` jsonb column
+// (drizzle/0104_p2p_recon.sql) and recovered by server/_core/p2pReconWorker.ts.
+// (Replaces the W10 "RECON:" failure_reason string-marker hack — the marker
+// prefix is removed; p2p_transfers now has a real metadata column.)
 const REQUEST_EXPIRY_HOURS = 72;
 const MAX_ALIASES_PER_USER = 5;
 const P2P_DAILY_LIMIT_USD = 5000;
@@ -631,8 +630,17 @@ export const p2pInstantRouter = router({
           // Use quoted transfer amount if different currency
           receiveAmount = parseFloat(quote.transferAmount.amount);
           fxRate = receiveAmount / input.amount;
-        } catch {
-          // Fallback: use cached FX rate from the aggregator
+        } catch (quoteErr: any) {
+          // W21-G: NO silent localhost FX fallback in production. A fabricated
+          // receiveAmount/fxRate here is a money-correctness bug (the sender
+          // is debited against an invented quote). Production fails CLOSED:
+          // the caller gets an honest error and no transfer is created.
+          // Dev/test may keep the local aggregator fallback — loudly.
+          if (process.env.NODE_ENV === "production") {
+            logger.error({ err: quoteErr?.message, from: input.currency, to: receiverCurrency }, "[P2P] Mojaloop quote failed — REFUSING localhost FX fallback in production (fail closed)");
+            throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "FX quote unavailable for this corridor — no transfer was created and no funds were debited" });
+          }
+          logger.warn({ err: quoteErr?.message, from: input.currency, to: receiverCurrency }, "[P2P] DEV ONLY: Mojaloop quote failed — falling back to local FX aggregator; NEVER enabled in production");
           const fxResp = await fetch(`http://localhost:3001/api/fx/rate?from=${input.currency}&to=${receiverCurrency}&amount=${input.amount}`).catch(() => null);
           if (fxResp?.ok) {
             const fxData = await fxResp.json() as any;
@@ -905,18 +913,22 @@ export const p2pInstantRouter = router({
           // committed on the rail. PARK HONESTLY — do NOT mark completed
           // (fabricated success) and do NOT refund (a committed rail payout +
           // refund = double-pay). The row stays in the pending/processing
-          // state 'settling' with a RECON marker (mirrors the FIX-B
-          // embeddedPayouts PAYOUT_RECON_PREFIX pattern — p2p_transfers has no
-          // metadata column and schema changes are out of scope, so the marker
-          // is encoded in failure_reason; status='settling' + this prefix =
-          // PARKED, not failed). Guarded: only a row still in flight can be
-          // parked — a concurrently completed/compensated row is never
-          // clobbered.
+          // state 'settling' with structured park state in the `metadata`
+          // column (added by drizzle/0104_p2p_recon.sql — replaces the W10
+          // "RECON:" failure_reason marker hack). status='settling' +
+          // metadata.parked=true = PARKED, not failed. The p2pReconWorker
+          // (server/_core/p2pReconWorker.ts) drives these rows to a terminal
+          // state. Guarded: only a row still in flight can be parked — a
+          // concurrently completed/compensated row is never clobbered.
           const parkReason = resolvedResult
             ? (resolvedResult.errorInformation?.errorDescription ?? `Rail outcome uncertain (state=${resolvedState ?? "unknown"})`)
             : `Settlement call failed: ${settleErr?.message ?? "unknown error"}`;
-          const reconMarker = P2P_RECON_PREFIX + JSON.stringify({
+          const parkMetadata = JSON.stringify({
+            parked: true,
             railUncertain: true,
+            reconAttempts: 0,
+            lastReconAt: null,
+            escalated: false,
             transferId: resolvedResult?.transferId ?? null,
             railState: resolvedState,
             reason: parkReason.slice(0, 300),
@@ -924,12 +936,13 @@ export const p2pInstantRouter = router({
           });
           logger.error(
             { transferId: transfer.id, rail, mojaloopTransferId: resolvedResult?.transferId ?? null, railState: resolvedState, settleErr: settleErr?.message },
-            "[P2P] CRITICAL: cross-border settlement outcome UNCERTAIN — transfer PARKED in 'settling' with RECON marker; funds remain debited; MUST be reconciled against rail state (GET /transfers/{id}) before any completion or refund",
+            "[P2P] CRITICAL: cross-border settlement outcome UNCERTAIN — transfer PARKED in 'settling' (metadata.parked=true); funds remain debited; p2pReconWorker reconciles against rail state (GET /transfers/{id}) before any completion or refund",
           );
           await db.execute(sql`
             UPDATE p2p_transfers
             SET status = 'settling',
-                failure_reason = ${reconMarker.slice(0, 500)},
+                failure_reason = ${parkReason.slice(0, 500)},
+                metadata = COALESCE(metadata, '{}'::jsonb) || ${parkMetadata}::jsonb,
                 mojaloop_transfer_id = COALESCE(${resolvedResult?.transferId ?? null}, mojaloop_transfer_id),
                 updated_at = NOW()
             WHERE id = ${transfer.id}
@@ -1231,8 +1244,19 @@ export const p2pInstantRouter = router({
         .where(and(eq(paymentAliases.id, input.aliasId), eq(paymentAliases.userId, ctx.user.id)));
       if (!alias) throw new TRPCError({ code: "NOT_FOUND", message: "Alias not found" });
       if (alias.status === "active") return { verified: true, alreadyActive: true };
-      // OTP check (in production: verify against SMS/email code)
+      // W21-G OTP: no real SMS/email OTP verification path exists anywhere in
+      // the platform (verified by grep — there is no verifyOtp/otp store;
+      // totpStepUp is TOTP step-up for money-moving mutations, not alias
+      // delivery verification). Accepting any well-formed 6-digit code here
+      // would let anyone activate an alias they do not control. Production
+      // therefore fails CLOSED until a real OTP provider is wired; dev/test
+      // keeps a LOUD bypass so local flows remain usable.
       if (!/^\d{6}$/.test(input.otpCode)) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid OTP" });
+      if (process.env.NODE_ENV === "production") {
+        logger.error({ aliasId: input.aliasId, userId: ctx.user.id }, "[P2P] verifyAlias BLOCKED: no OTP verification provider configured — refusing to activate alias (fail closed)");
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Alias OTP verification is not available — no verification provider is configured" });
+      }
+      logger.warn({ aliasId: input.aliasId, userId: ctx.user.id }, "[P2P] DEV ONLY: alias OTP bypassed (no verification provider) — NEVER enabled in production");
       const [updated] = await db.update(paymentAliases)
         .set({ status: "active", verifiedAt: new Date(), updatedAt: new Date() })
         .where(eq(paymentAliases.id, input.aliasId))
@@ -1782,13 +1806,27 @@ export const p2pInstantRouter = router({
       receiveCurrency: z.string().length(3),
     }))
     .query(async ({ input }) => {
-      // Generate mock rate history (in production: from Redis/DB cache)
-      const rates = Array.from({ length: 30 }, (_, i) => ({
-        rate: 1600 + Math.sin(i / 5) * 50 + (crypto.randomInt(0, 20) - 10),
-        date: new Date(Date.now() - (30 - i) * 86400000).toISOString().slice(0, 10),
-      }));
+      // W21-G: NEVER fabricate a rate series (the old code fed Math.sin +
+      // crypto.randomInt noise into the trend model and presented it as
+      // analysis). Use ONLY real stored observations from fx_rate_history.
+      // When the corridor has no recorded history, return an EMPTY series
+      // with synthetic:false — honest absence, not invented data.
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const rows = await db.select({ rate: fxRateHistory.rate, recordedAt: fxRateHistory.recordedAt })
+        .from(fxRateHistory)
+        .where(and(eq(fxRateHistory.fromCurrency, input.sendCurrency), eq(fxRateHistory.toCurrency, input.receiveCurrency)))
+        .orderBy(desc(fxRateHistory.recordedAt))
+        .limit(30);
+      const rates = rows
+        .map((r: { rate: string; recordedAt: Date }) => ({ rate: Number(r.rate), date: r.recordedAt.toISOString().slice(0, 10) }))
+        .reverse();
+      if (rates.length === 0) {
+        logger.info({ corridor: `${input.sendCurrency}-${input.receiveCurrency}` }, "[P2P] fxAlert: no stored rate history — returning empty series (synthetic:false)");
+        return { corridor: `${input.sendCurrency}-${input.receiveCurrency}`, rates, synthetic: false, analysis: null };
+      }
       const analysis = await fetchIntelligence("/fx/trend", { rates, send_currency: input.sendCurrency, receive_currency: input.receiveCurrency });
-      return { corridor: `${input.sendCurrency}-${input.receiveCurrency}`, ...analysis };
+      return { corridor: `${input.sendCurrency}-${input.receiveCurrency}`, rates, synthetic: false, ...analysis };
     }),
 
   // #24: USSD command parser (via Python service) — offline P2P for feature phones

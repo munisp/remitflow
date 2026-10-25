@@ -260,6 +260,139 @@
       "when": 1776482075965,
       "tag": "0086_reconciliation_quarantine",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1776482135965,
+      "tag": "0087_wave10_melio_features",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1776482195965,
+      "tag": "0088_accounting_odoo",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1776482255965,
+      "tag": "0089_bdc_platform",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1776482315965,
+      "tag": "0090_bdc_hardening",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1776482375965,
+      "tag": "0091_wave12",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1776482435965,
+      "tag": "0092_wave13",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1776482495965,
+      "tag": "0093_wave13b",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1776482555965,
+      "tag": "0094_perf_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1776482615965,
+      "tag": "0095_kyc_wave15",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1776482675965,
+      "tag": "0096_kyc_lifecycle_uniq",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1776482735965,
+      "tag": "0097_insider_threat_persistence",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1776482795965,
+      "tag": "0098_inmemory_persistence",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1776482855965,
+      "tag": "0099_medium_persistence",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1776482915965,
+      "tag": "0100_payment_idempotency",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1776482975965,
+      "tag": "0101_fund_flow_dlq",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1776483035965,
+      "tag": "0102_saga_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1776483095965,
+      "tag": "0103_core_banking_shadow",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1776483155965,
+      "tag": "0104_p2p_recon",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1776483215965,
+      "tag": "0105_broker_fill_intents",
+      "breakpoints": true
     }
   ]
 }

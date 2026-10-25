@@ -23,6 +23,7 @@ import {
   wallets,
   transactions,
   users,
+  brokerFillIntents,
 } from "../../drizzle/schema.js";
 import crypto from "crypto";
 import { executeTransferPipeline } from "../_core/transferPipeline.js";
@@ -38,6 +39,39 @@ async function getDbConn() {
   const db = await getDb();
   if (!db) throw new Error("DB unavailable");
   return db;
+}
+
+// ─── W21-I: durable broker fill intent persistence ───────────────────────────
+// Insert a broker_fill_intents row BEFORE brokerWebhook throws NOT_IMPLEMENTED.
+// The insert is best-effort relative to the fail-closed throw: if the insert
+// itself fails we still throw NOT_IMPLEMENTED but log LOUDLY (the durable trace
+// is then missing — escalation-worthy, never silent).
+async function persistBrokerFillIntent(fields: {
+  brokerName: string;
+  reference?: string;
+  symbol?: string;
+  qty?: number | string;
+  price?: number | string;
+  payload: unknown;
+}): Promise<void> {
+  try {
+    const db = await getDb();
+    if (!db) throw new Error("DB unavailable for broker_fill_intents insert");
+    await db.insert(brokerFillIntents).values({
+      brokerName: fields.brokerName,
+      reference: fields.reference ?? null,
+      symbol: fields.symbol ?? null,
+      qty: fields.qty != null ? String(fields.qty) : null,
+      price: fields.price != null ? String(fields.price) : null,
+      status: "rejected_unimplemented",
+      payload: (fields.payload ?? {}) as any,
+    } as any);
+  } catch (insertErr) {
+    logger.error(
+      { err: insertErr instanceof Error ? insertErr.message : String(insertErr), brokerName: fields.brokerName, reference: fields.reference },
+      "[Investment] CRITICAL: broker_fill_intents durable insert FAILED — rejected fill has no durable trace; manual reconciliation required",
+    );
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -566,6 +600,16 @@ export const ngxStockRouter = router({
           },
           `[Investment] Broker fill intent REJECTED (${input.brokerName}) — broker not configured`,
         );
+        // W21-I: durable trace BEFORE the fail-closed throw (insert failure is
+        // logged loudly inside the helper; the throw still happens either way).
+        await persistBrokerFillIntent({
+          brokerName: input.brokerName,
+          reference: input.payload.brokerReference ?? input.payload.reference ?? undefined,
+          symbol: (input.payload as any)?.symbol ?? undefined,
+          qty: (input.payload as any)?.qty ?? (input.payload as any)?.quantity ?? undefined,
+          price: (input.payload as any)?.price ?? undefined,
+          payload: input.payload,
+        });
         throw new TRPCError({ code: "NOT_IMPLEMENTED", message: `Broker ${input.brokerName} is not configured — webhook ingestion unavailable` });
       }
       const ok = verifyBrokerWebhookSignature(input.brokerName, JSON.stringify(input.payload), input.signature);
@@ -574,14 +618,13 @@ export const ngxStockRouter = router({
       }
       // W20-F (DL-04): signature verified, but fill processing is intentionally
       // not implemented yet — fail closed with 501 instead of pretending.
-      // The structured record below is the durable trace of every verified
-      // fill we refused to ingest (intent fields included where the broker
-      // supplied them; symbol/qty/price are not in the current webhook schema
-      // and are logged as undefined until W21).
-      // TODO(W21): persist broker fill intents to a dedicated
-      // `broker_fill_intents` table (tenant_id, broker, reference, symbol,
-      // qty, price, status, received_at) with UNIQUE(broker, reference) for
-      // idempotent replay, then reconcile into ngx_orders. Tracked for W21.
+      // W21-I: the durable broker_fill_intents row (inserted below, before the
+      // throw) is the queryable trace of every verified fill we refused to
+      // ingest (intent fields included where the broker supplied them;
+      // symbol/qty/price are not in the current webhook schema and are stored
+      // as NULL until the schema is extended).
+      // TODO: reconcile broker_fill_intents rows into ngx_orders once real fill
+      // ingestion lands.
       logger.warn(
         {
           auditEvent: "broker_fill_intent_rejected",
@@ -598,6 +641,15 @@ export const ngxStockRouter = router({
         },
         `[Investment] VERIFIED broker fill REJECTED (${input.brokerName} ref=${input.payload.brokerReference ?? input.payload.reference ?? "?"}) — ingestion not implemented; manual reconciliation required`,
       );
+      // W21-I: durable trace BEFORE the fail-closed throw.
+      await persistBrokerFillIntent({
+        brokerName: input.brokerName,
+        reference: input.payload.brokerReference ?? input.payload.reference ?? undefined,
+        symbol: (input.payload as any)?.symbol ?? undefined,
+        qty: (input.payload as any)?.qty ?? (input.payload as any)?.quantity ?? undefined,
+        price: (input.payload as any)?.price ?? undefined,
+        payload: input.payload,
+      });
       throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "Broker fill ingestion not yet implemented — executions are reconciled manually by operations" });
     }),
 

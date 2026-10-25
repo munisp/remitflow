@@ -123,6 +123,14 @@ type ODLQuote struct {
 	SlippagePct    float64     `json:"slippage_pct"`
 	ExpiresAt      time.Time   `json:"expires_at"`
 	LockedRate     bool        `json:"locked_rate"`
+	// BridgeDrops is the XRP amount (integer drops) the off-ramp partner
+	// committed to receive on XRPL for this quote. Populated ONLY from a real
+	// partner quote response; empty when no partner quote exists.
+	BridgeDrops string `json:"bridge_amount_drops,omitempty"`
+	// Synthetic is true ONLY in dev/test environments (APP_ENV=dev) where no
+	// partner quote endpoints are configured. Synthetic quotes are explicitly
+	// labeled and must never be treated as executable pricing.
+	Synthetic bool `json:"synthetic,omitempty"`
 }
 
 // ODLSettlement tracks the full lifecycle of an ODL settlement.
@@ -141,10 +149,17 @@ type ODLSettlement struct {
 	BridgeTxHash   string              `json:"bridge_tx_hash,omitempty"`
 	OffRampTxID    string              `json:"off_ramp_tx_id,omitempty"`
 	ActualSlippage float64             `json:"actual_slippage_pct,omitempty"`
-	CreatedAt      time.Time           `json:"created_at"`
-	CompletedAt    *time.Time          `json:"completed_at,omitempty"`
-	FailureReason  string              `json:"failure_reason,omitempty"`
-	AuditTrail     []AuditEvent        `json:"audit_trail"`
+	// BridgeDrops is the XRP bridge amount (integer drops) carried over from
+	// the locked quote's partner commitment.
+	BridgeDrops string `json:"bridge_amount_drops,omitempty"`
+	// XRPL records the real XRPL execution (request/response: tx hash,
+	// engine_result, ledger index) when the Ripple rail executed. Persisted
+	// inside the odl_settlements payload.
+	XRPL          *XRPLExecution `json:"xrpl_execution,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+	CompletedAt   *time.Time     `json:"completed_at,omitempty"`
+	FailureReason string         `json:"failure_reason,omitempty"`
+	AuditTrail    []AuditEvent   `json:"audit_trail"`
 }
 
 // AuditEvent records a single step in the ODL settlement lifecycle.
@@ -192,10 +207,14 @@ func initCorridorRoutes() {
 		{FromCurrency: "USD", ToCurrency: "GHS", BridgeAsset: BridgeXLM,
 			Provider: ProviderStellar, EstimatedCost: 0.10, EstimatedTime: 5000,
 			Liquidity: 10_000_000, LastUpdated: time.Now()},
-		// USD → KES: Ripple XRP (M-Pesa integration)
+		// USD → KES: Ripple XRP (M-Pesa integration).
+		// HONESTY: no fabricated cost/liquidity figures — XRP corridor pricing
+		// comes from configured partner endpoints (ODL_ONRAMP_URL /
+		// ODL_OFFRAMP_URL) at quote time, or the corridor reports UNAVAILABLE
+		// (dev mode may emit explicitly-labeled synthetic quotes).
 		{FromCurrency: "USD", ToCurrency: "KES", BridgeAsset: BridgeXRP,
-			Provider: ProviderRipple, EstimatedCost: 0.12, EstimatedTime: 4000,
-			Liquidity: 20_000_000, LastUpdated: time.Now()},
+			Provider: ProviderRipple, EstimatedCost: 0, EstimatedTime: 4000,
+			Liquidity: 0, LastUpdated: time.Now()},
 		// EUR → NGN: Circle USDC
 		{FromCurrency: "EUR", ToCurrency: "NGN", BridgeAsset: BridgeUSDC,
 			Provider: ProviderCircle, EstimatedCost: 0.18, EstimatedTime: 9000,
@@ -212,10 +231,12 @@ func initCorridorRoutes() {
 		{FromCurrency: "USD", ToCurrency: "ZAR", BridgeAsset: BridgeUSDC,
 			Provider: ProviderCircle, EstimatedCost: 0.10, EstimatedTime: 6000,
 			Liquidity: 40_000_000, LastUpdated: time.Now()},
-		// USD → PHP: Ripple XRP (Southeast Asia)
+		// USD → PHP: Ripple XRP (Southeast Asia).
+		// HONESTY: fabricated cost/liquidity removed — real pricing only via
+		// ODL_ONRAMP_URL/ODL_OFFRAMP_URL partner quotes at quote time.
 		{FromCurrency: "USD", ToCurrency: "PHP", BridgeAsset: BridgeXRP,
-			Provider: ProviderRipple, EstimatedCost: 0.08, EstimatedTime: 3000,
-			Liquidity: 60_000_000, LastUpdated: time.Now()},
+			Provider: ProviderRipple, EstimatedCost: 0, EstimatedTime: 3000,
+			Liquidity: 0, LastUpdated: time.Now()},
 		// USD → INR: Polygon USDC (UPI integration)
 		{FromCurrency: "USD", ToCurrency: "INR", BridgeAsset: BridgeUSDC,
 			Provider: ProviderPolygon, EstimatedCost: 0.09, EstimatedTime: 4000,
@@ -272,14 +293,110 @@ func calculateSlippage(quotedRate, actualRate float64) float64 {
 // railAdapterAvailable reports whether a real settlement rail adapter is
 // implemented and configured for the given provider.
 //
-// FAIL-CLOSED (honesty audit): no on-ramp/bridge/off-ramp adapter exists for
-// ANY provider (Circle, Ripple, Stellar, Polygon) in this service — the
-// previous implementation fabricated "txIDs" via generateID and marked the
-// settlement COMPLETED. Until a real adapter is wired, this returns false and
-// every settlement terminates UNAVAILABLE. Do NOT flip this to true without a
-// real adapter performing actual execution.
+// FAIL-CLOSED (honesty audit): Circle, Stellar, and Polygon have no real
+// adapter in this service and always report false. Ripple reports true ONLY
+// when the XRPL adapter is configured (XRPL_RPC_URL + XRPL_SEED set — see the
+// trust-model banner in xrpl_adapter.go: the RPC endpoint must be a trusted
+// self-hosted rippled because the seed is used for server-side signing).
+// Without configuration every settlement terminates UNAVAILABLE; no
+// transaction ID is ever fabricated.
 func railAdapterAvailable(provider ODLProvider) bool {
+	if provider == ProviderRipple {
+		_, ok := xrplConfigFromEnv()
+		return ok
+	}
 	return false
+}
+
+// XRPLExecution is the durable record of a real XRPL bridge payment, stored
+// inside the odl_settlements payload (persistSettlement marshals the full
+// settlement struct, so this request/response detail lands in Postgres).
+type XRPLExecution struct {
+	TxHash       string `json:"tx_hash"`
+	EngineResult string `json:"engine_result"`
+	LedgerIndex  int64  `json:"ledger_index"`
+	FeeDrops     string `json:"fee_drops"`
+	Account      string `json:"account"`
+	Destination  string `json:"destination"`
+	AmountDrops  string `json:"amount_drops"`
+}
+
+// executeXRPLBridge runs the real XRPL bridge leg for a Ripple settlement.
+// The XRP amount (drops) MUST come from the locked quote's partner commitment
+// (quote.BridgeDrops) — it is never invented locally. On success the
+// settlement is marked COMPLETED with the rippled-returned tx hash; on any
+// failure it is FAILED/UNAVAILABLE with an honest reason and the partial
+// XRPL execution record (if any) is retained for reconciliation.
+func executeXRPLBridge(ctx context.Context, settlement *ODLSettlement) {
+	cfg, ok := xrplConfigFromEnv()
+	if !ok {
+		settlement.Status = StatusUnavailable
+		settlement.FailureReason = "XRPL rail not configured (XRPL_RPC_URL/XRPL_SEED unset)"
+		failedSettlements.Add(1)
+		return
+	}
+	if settlement.BridgeDrops == "" {
+		settlement.Status = StatusFailed
+		settlement.FailureReason = "no partner-committed XRP amount on quote (bridge_amount_drops empty); refusing to invent a bridge amount"
+		failedSettlements.Add(1)
+		return
+	}
+
+	adapter := newXRPLAdapter(*cfg)
+	outcome, err := adapter.SendXRPPayment(ctx, settlement.BridgeDrops)
+	if outcome != nil {
+		// Persist request/response detail (tx hash, engine_result, ledger
+		// index) on the settlement payload regardless of outcome, for audit
+		// and reconciliation.
+		settlement.XRPL = &XRPLExecution{
+			TxHash:       outcome.TxHash,
+			EngineResult: outcome.EngineResult,
+			LedgerIndex:  outcome.LedgerIndex,
+			FeeDrops:     outcome.FeeDrops,
+			Account:      outcome.Account,
+			Destination:  outcome.Destination,
+			AmountDrops:  outcome.AmountDrops,
+		}
+		settlement.BridgeTxHash = outcome.TxHash
+		settlement.AuditTrail = append(settlement.AuditTrail, AuditEvent{
+			Timestamp: time.Now(),
+			Event:     "XRPL_SUBMITTED",
+			Details:   fmt.Sprintf("engine_result=%s ledger_index=%d fee_drops=%s", outcome.EngineResult, outcome.LedgerIndex, outcome.FeeDrops),
+			TxID:      outcome.TxHash,
+		})
+	}
+	if err != nil {
+		settlement.Status = StatusFailed
+		settlement.FailureReason = fmt.Sprintf("XRPL bridge payment failed: %v", err)
+		settlement.AuditTrail = append(settlement.AuditTrail, AuditEvent{
+			Timestamp: time.Now(),
+			Event:     "XRPL_FAILED",
+			Details:   err.Error(),
+		})
+		failedSettlements.Add(1)
+		slog.Error("XRPL bridge payment failed",
+			"id", settlement.SettlementID,
+			"tx_hash", settlement.BridgeTxHash,
+			"err", err,
+		)
+		return
+	}
+
+	now := time.Now()
+	settlement.Status = StatusCompleted
+	settlement.CompletedAt = &now
+	settlement.AuditTrail = append(settlement.AuditTrail, AuditEvent{
+		Timestamp: now,
+		Event:     "SETTLEMENT_COMPLETED",
+		Details:   fmt.Sprintf("XRPL payment %s validated in ledger %d", outcome.TxHash, outcome.LedgerIndex),
+		TxID:      outcome.TxHash,
+	})
+	successfulSettlements.Add(1)
+	slog.Info("ODL settlement completed via XRPL",
+		"id", settlement.SettlementID,
+		"tx_hash", outcome.TxHash,
+		"ledger_index", outcome.LedgerIndex,
+	)
 }
 
 // executeODLSettlement runs the ODL settlement pipeline.
@@ -295,7 +412,7 @@ func executeODLSettlement(ctx context.Context, settlement *ODLSettlement) {
 
 	if !railAdapterAvailable(settlement.Provider) {
 		reason := fmt.Sprintf(
-			"settlement rail adapter not implemented for provider %s (bridge asset %s); "+
+			"settlement rail adapter not implemented or not configured for provider %s (bridge asset %s); "+
 				"refusing to fabricate on-chain transaction IDs or mark settlement COMPLETED",
 			settlement.Provider, settlement.BridgeAsset,
 		)
@@ -315,17 +432,124 @@ func executeODLSettlement(ctx context.Context, settlement *ODLSettlement) {
 		return
 	}
 
-	// Unreachable until a real rail adapter is implemented and
-	// railAdapterAvailable reports it. A real implementation must populate
-	// OnRampTxID / BridgeTxHash / OffRampTxID with values returned by the
-	// actual rail/blockchain, and only then may set StatusCompleted.
-	settlement.Status = StatusFailed
-	settlement.FailureReason = "rail adapter reported available but no execution path exists"
-	failedSettlements.Add(1)
-	slog.Error("ODL settlement invariant violated", "id", settlement.SettlementID)
+	// Real rail adapters. Ripple dispatches to the XRPL adapter (see
+	// xrpl_adapter.go). It populates BridgeTxHash with the rippled-returned
+	// transaction hash and only then may set StatusCompleted.
+	switch settlement.Provider {
+	case ProviderRipple:
+		settlement.Status = StatusBridging
+		settlement.AuditTrail = append(settlement.AuditTrail, AuditEvent{
+			Timestamp: time.Now(),
+			Event:     "BRIDGE_STARTED",
+			Details:   "XRPL bridge leg started (sign → submit → validated confirmation)",
+		})
+		executeXRPLBridge(ctx, settlement)
+		return
+	default:
+		settlement.Status = StatusFailed
+		settlement.FailureReason = "rail adapter reported available but no execution path exists"
+		failedSettlements.Add(1)
+		slog.Error("ODL settlement invariant violated", "id", settlement.SettlementID)
+	}
 }
 
 // ── HTTP Handlers ─────────────────────────────────────────────────────────────
+
+// partnerQuote is the response shape expected from the configured ODL
+// on-ramp / off-ramp partner endpoints (ODL_ONRAMP_URL / ODL_OFFRAMP_URL).
+// All fields are optional; absent fields are treated honestly (cost defaults
+// only when the partner provides it, drops stay empty → settlement refuses).
+type partnerQuote struct {
+	FeePct        float64 `json:"fee_pct"`
+	ReceiveAmount float64 `json:"receive_amount"`
+	XrpDrops      string  `json:"xrp_drops"`
+}
+
+// fetchPartnerQuote performs a bounded real HTTP GET to a configured partner
+// quote endpoint. A non-200 or malformed response is an honest error, never a
+// fabricated quote.
+func fetchPartnerQuote(ctx context.Context, baseURL, from, to string, amount float64) (*partnerQuote, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	url := fmt.Sprintf("%s?from=%s&to=%s&amount=%f", baseURL, from, to, amount)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("partner quote endpoint returned HTTP %d", resp.StatusCode)
+	}
+	var q partnerQuote
+	if err := json.NewDecoder(http.MaxBytesReader(nil, resp.Body, 1<<20)).Decode(&q); err != nil {
+		return nil, fmt.Errorf("malformed partner quote response: %v", err)
+	}
+	return &q, nil
+}
+
+// buildXRPCorridorQuote builds a quote for a Ripple/XRP corridor.
+//
+// HONESTY: pricing comes from the configured partner endpoints
+// (ODL_ONRAMP_URL / ODL_OFFRAMP_URL). When they are not configured or fail,
+// the corridor is UNAVAILABLE — EXCEPT in dev/test (APP_ENV=dev etc.), where
+// an explicitly-labeled synthetic quote ("synthetic": true) is returned for
+// local development. Static fabricated costs were removed from the corridor
+// matrix; they must never come back as implicit defaults.
+func buildXRPCorridorQuote(ctx context.Context, fromCcy, toCcy string, amount float64, route *CorridorRoute) (*ODLQuote, error) {
+	quote := &ODLQuote{
+		QuoteID:      generateID("QUOTE"),
+		FromCurrency: fromCcy,
+		ToCurrency:   toCcy,
+		SendAmount:   amount,
+		BridgeAsset:  route.BridgeAsset,
+		Provider:     route.Provider,
+		ExpiresAt:    time.Now().Add(30 * time.Second),
+		LockedRate:   true,
+	}
+
+	onrampURL, offrampURL := os.Getenv("ODL_ONRAMP_URL"), os.Getenv("ODL_OFFRAMP_URL")
+	if onrampURL == "" || offrampURL == "" {
+		if !devEnv() {
+			return nil, fmt.Errorf("XRP corridor %s→%s unavailable: ODL_ONRAMP_URL/ODL_OFFRAMP_URL not configured", fromCcy, toCcy)
+		}
+		// Dev-mode synthetic placeholder — explicitly labeled, never
+		// presented as real pricing.
+		quote.Synthetic = true
+		quote.ExchangeRate = 1.0
+		quote.BridgeRate = 1.0
+		quote.TotalFeePct = 0.5
+		quote.TotalFeeAmount = amount * 0.5 / 100
+		quote.SlippagePct = 0.05
+		quote.ReceiveAmount = amount * (1 - 0.5/100)
+		return quote, nil
+	}
+
+	onramp, err := fetchPartnerQuote(ctx, onrampURL, fromCcy, "XRP", amount)
+	if err != nil {
+		return nil, fmt.Errorf("on-ramp partner quote failed: %w", err)
+	}
+	offramp, err := fetchPartnerQuote(ctx, offrampURL, "XRP", toCcy, amount)
+	if err != nil {
+		return nil, fmt.Errorf("off-ramp partner quote failed: %w", err)
+	}
+
+	totalFeePct := onramp.FeePct + offramp.FeePct
+	quote.ExchangeRate = 1.0
+	quote.BridgeRate = 1.0
+	quote.TotalFeePct = totalFeePct
+	quote.TotalFeeAmount = amount * totalFeePct / 100
+	quote.SlippagePct = 0.05
+	quote.ReceiveAmount = offramp.ReceiveAmount
+	if quote.ReceiveAmount <= 0 {
+		quote.ReceiveAmount = amount * (1 - totalFeePct/100)
+	}
+	quote.BridgeDrops = offramp.XrpDrops
+	return quote, nil
+}
 
 // handleGetQuote returns a real-time ODL quote for a corridor.
 func handleGetQuote(w http.ResponseWriter, r *http.Request) {
@@ -351,22 +575,40 @@ func handleGetQuote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build quote
-	quote := ODLQuote{
-		QuoteID:        generateID("QUOTE"),
-		FromCurrency:   fromCcy,
-		ToCurrency:     toCcy,
-		SendAmount:     amount,
-		BridgeAsset:    route.BridgeAsset,
-		Provider:       route.Provider,
-		ExchangeRate:   1.0, // Would be fetched from live FX feed
-		BridgeRate:     1.0,
-		TotalFeePct:    route.EstimatedCost,
-		TotalFeeAmount: amount * route.EstimatedCost / 100,
-		SlippagePct:    0.05,
-		ReceiveAmount:  amount * (1 - route.EstimatedCost/100),
-		ExpiresAt:      time.Now().Add(30 * time.Second),
-		LockedRate:     true,
+	var quote ODLQuote
+	if route.Provider == ProviderRipple {
+		// XRP corridors carry NO static pricing; the quote is built from real
+		// partner endpoints, a labeled dev-mode synthetic placeholder, or the
+		// corridor reports UNAVAILABLE.
+		q, err := buildXRPCorridorQuote(r.Context(), fromCcy, toCcy, amount, route)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":  err.Error(),
+				"status": string(StatusUnavailable),
+			})
+			return
+		}
+		quote = *q
+	} else {
+		// Build quote
+		quote = ODLQuote{
+			QuoteID:        generateID("QUOTE"),
+			FromCurrency:   fromCcy,
+			ToCurrency:     toCcy,
+			SendAmount:     amount,
+			BridgeAsset:    route.BridgeAsset,
+			Provider:       route.Provider,
+			ExchangeRate:   1.0, // Would be fetched from live FX feed
+			BridgeRate:     1.0,
+			TotalFeePct:    route.EstimatedCost,
+			TotalFeeAmount: amount * route.EstimatedCost / 100,
+			SlippagePct:    0.05,
+			ReceiveAmount:  amount * (1 - route.EstimatedCost/100),
+			ExpiresAt:      time.Now().Add(30 * time.Second),
+			LockedRate:     true,
+		}
 	}
 
 	// Fail closed: persist the rate-locked quote before admitting it in-memory.
@@ -420,6 +662,7 @@ func handleInitiateSettlement(w http.ResponseWriter, r *http.Request) {
 		ReceiveAmount: quote.ReceiveAmount,
 		BridgeAsset:   quote.BridgeAsset,
 		Provider:      quote.Provider,
+		BridgeDrops:   quote.BridgeDrops,
 		CreatedAt:     time.Now(),
 		AuditTrail:    []AuditEvent{},
 	}

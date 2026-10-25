@@ -305,6 +305,12 @@ FALLBACK_RATES: Dict[str, float] = {
     "NGNT": 1538.46, "cUSD": 1.0, "AFRO": 0.1,
 }
 
+# Honest fallback labeling: assets whose live feed failed and are currently
+# served from the static FALLBACK_RATES table above (e.g. XRP when CoinGecko
+# is unreachable). Exposed via /rates and /health so callers can distinguish
+# live rates from static fallbacks instead of mistaking them for real prices.
+_fallback_assets: set = set()
+
 
 # ─── Rate fetching ─────────────────────────────────────────────────────────────
 async def fetch_fiat_rates() -> Dict[str, float]:
@@ -319,9 +325,11 @@ async def fetch_fiat_rates() -> Dict[str, float]:
             data = resp.json()
             rates = {"USD": 1.0}
             rates.update(data.get("rates", {}))
+            _fallback_assets.difference_update(FIAT_CURRENCIES)
             return rates
     except Exception as e:
-        logger.warning(f"Fiat rate fetch failed: {e}, using fallback")
+        logger.warning(f"Fiat rate fetch failed: {e}, using STATIC FALLBACK rates (labeled)")
+        _fallback_assets.update(k for k in FALLBACK_RATES if k in FIAT_CURRENCIES)
         return {k: v for k, v in FALLBACK_RATES.items() if k in FIAT_CURRENCIES}
 
 
@@ -358,9 +366,13 @@ async def fetch_crypto_rates() -> Dict[str, float]:
                 usd_price = prices["usd"]
                 # Store as asset/USD (how many USD per 1 asset)
                 rates[ticker] = usd_price
+        _fallback_assets.difference_update(CRYPTO_ASSETS.keys())
         return rates
     except Exception as e:
-        logger.warning(f"Crypto rate fetch failed: {e}, using fallback")
+        # XRP and all crypto fall back to static FALLBACK_RATES — labeled in
+        # _fallback_assets and exposed via /rates & /health (honest labeling).
+        logger.warning(f"Crypto rate fetch failed: {e}, using STATIC FALLBACK rates (labeled)")
+        _fallback_assets.update(k for k in FALLBACK_RATES if k in CRYPTO_ASSETS)
         return {k: v for k, v in FALLBACK_RATES.items() if k in CRYPTO_ASSETS}
 
 
@@ -380,6 +392,7 @@ async def refresh_rates() -> Dict[str, float]:
         merged.update(fiat)
     else:
         logger.error(f"Fiat fetch exception: {fiat}")
+        _fallback_assets.update(k for k in FALLBACK_RATES if k in FIAT_CURRENCIES)
         merged.update({k: v for k, v in FALLBACK_RATES.items() if k in FIAT_CURRENCIES})
 
     if isinstance(crypto, dict):
@@ -390,6 +403,7 @@ async def refresh_rates() -> Dict[str, float]:
         merged.update(crypto)
     else:
         logger.error(f"Crypto fetch exception: {crypto}")
+        _fallback_assets.update(k for k in FALLBACK_RATES if k in CRYPTO_ASSETS)
         merged.update({k: v for k, v in FALLBACK_RATES.items() if k in CRYPTO_ASSETS})
 
     _rate_cache = merged
@@ -527,6 +541,9 @@ async def health():
         "isStale": is_stale,
         "coingeckoTier": "pro" if COINGECKO_API_KEY else "free",
         "activeLocks": len(_rate_locks),
+        # Honest labeling: assets currently served from static FALLBACK_RATES
+        # because the live feed failed (XRP included when CoinGecko is down).
+        "fallbackAssets": sorted(_fallback_assets),
     }
 
 
@@ -539,6 +556,7 @@ async def get_all_rates():
         "fetchedAt": int(_cache_updated_at * 1000),
         "isStale": is_stale,
         "assetCount": len(rates),
+        "fallbackAssets": sorted(_fallback_assets),
     }
 
 

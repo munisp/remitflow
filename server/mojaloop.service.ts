@@ -34,8 +34,34 @@ function mojaloopEnv(name: string, sandboxFallback: string): string {
 const MOJALOOP_BASE_URL = mojaloopEnv("MOJALOOP_SWITCH_URL", "https://sandbox.mojaloop.io");
 const MOJALOOP_FSP_ID = mojaloopEnv("MOJALOOP_FSP_ID", "remitflow-fsp");
 const MOJALOOP_API_KEY = mojaloopEnv("MOJALOOP_API_KEY", "remitflow-sandbox-key");
-const MOJALOOP_CALLBACK_URL =
-  process.env.MOJALOOP_CALLBACK_URL ?? "https://remitflow.example.com/api/mojaloop/callback";
+
+const DEFAULT_CALLBACK_URL = "https://remitflow.example.com/api/mojaloop/callback";
+const MOJALOOP_CALLBACK_URL = process.env.MOJALOOP_CALLBACK_URL ?? DEFAULT_CALLBACK_URL;
+
+/**
+ * W21-H: Fail closed in production when any Mojaloop connection parameter is
+ * unset or still a sandbox/placeholder default. Called lazily at first use of
+ * every outbound rail operation (party lookup, quote, transfer, status,
+ * participants) so the misconfiguration surfaces as a hard MojaloopError at
+ * boot/first use rather than silently transacting against the public sandbox.
+ * Development keeps the sandbox defaults (warned above by mojaloopEnv).
+ */
+function assertMojaloopConfigured(): void {
+  if (!IS_PRODUCTION) return;
+  const missing: string[] = [];
+  if (!MOJALOOP_BASE_URL || MOJALOOP_BASE_URL.includes("sandbox.mojaloop.io")) missing.push("MOJALOOP_SWITCH_URL");
+  if (!MOJALOOP_FSP_ID || MOJALOOP_FSP_ID === "remitflow-fsp") missing.push("MOJALOOP_FSP_ID");
+  if (!MOJALOOP_API_KEY || MOJALOOP_API_KEY === "remitflow-sandbox-key") missing.push("MOJALOOP_API_KEY");
+  if (!MOJALOOP_CALLBACK_URL || MOJALOOP_CALLBACK_URL === DEFAULT_CALLBACK_URL || MOJALOOP_CALLBACK_URL.includes("example.com")) {
+    missing.push("MOJALOOP_CALLBACK_URL");
+  }
+  if (missing.length > 0) {
+    throw new MojaloopError(
+      "2000",
+      `[Mojaloop] FAIL-CLOSED in production: ${missing.join(", ")} unset or still a sandbox/placeholder default — refusing to use the Mojaloop rail`,
+    );
+  }
+}
 
 // ─── FSPIOP JWS keys ──────────────────────────────────────────────────────────
 // MOJALOOP_JWS_PRIVATE_KEY — our RSA private key (PEM) used to sign outgoing requests.
@@ -367,6 +393,7 @@ export async function lookupParty(
   partyIdType: MojaloopParty["partyIdType"],
   partyIdentifier: string
 ): Promise<{ found: boolean; party?: MojaloopParty; fspId?: string; error?: string }> {
+  assertMojaloopConfigured();
   const uri = `/parties/${partyIdType}/${encodeURIComponent(partyIdentifier)}`;
   try {
     const url = `${MOJALOOP_BASE_URL}${uri}`;
@@ -424,6 +451,7 @@ export async function requestQuote(params: {
 }> {
   const quoteId = generateUUID();
   const transactionId = generateUUID();
+  assertMojaloopConfigured();
 
   const quoteRequest: MojaloopQuoteRequest = {
     quoteId,
@@ -516,6 +544,7 @@ export async function initiateTransfer(params: {
   condition: string;
   expirationSeconds?: number;
 }): Promise<MojaloopTransferResult> {
+  assertMojaloopConfigured();
   const transferId = generateUUID();
   const expiration = new Date(
     Date.now() + (params.expirationSeconds ?? 30) * 1000
@@ -628,6 +657,7 @@ export async function initiateTransfer(params: {
 
 // ─── Transfer Status ──────────────────────────────────────────────────────────
 export async function getTransferStatus(transferId: string): Promise<MojaloopTransferResult> {
+  assertMojaloopConfigured();
   try {
     const uri = `/transfers/${transferId}`;
     const resp = await circuitBreakers.mojaloop.execute(() => fetch(`${MOJALOOP_BASE_URL}${uri}`, {
@@ -670,6 +700,7 @@ export async function getFSPParticipants(): Promise<Array<{
   country: string;
   active: boolean;
 }>> {
+  assertMojaloopConfigured();
   try {
     const resp = await circuitBreakers.mojaloop.execute(() => fetch(`${MOJALOOP_BASE_URL}/participants`, {
       headers: getMojaloopHeaders({ method: "GET", uri: "/participants" }),
@@ -679,7 +710,9 @@ export async function getFSPParticipants(): Promise<Array<{
       const body = await resp.json() as any;
       return Array.isArray(body) ? body : body.participants ?? [];
     }
-  } catch { /* fallback */ }
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, "[Mojaloop] Participants fetch failed");
+  }
 
   logger.warn("[Mojaloop] Participants endpoint unavailable — returning empty list");
   return [];
@@ -770,14 +803,18 @@ async function _getWtDb() {
     const { getDb } = await import("./db.js");
     _wtDb = await getDb();
     return _wtDb;
-  } catch {
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, "[Mojaloop] DB unavailable for pending-transfer persistence");
     return null;
   }
 }
 
 async function _persistPendingTransfer(transferId: string, condition: string, expiresAt: Date): Promise<void> {
   const db = await _getWtDb();
-  if (!db) return;
+  if (!db) {
+    logger.warn({ transferId }, "[Mojaloop] No DB handle — pending transfer kept in-memory only (lost on restart)");
+    return;
+  }
   try {
     const { sql } = await import("drizzle-orm");
     await (db as any).execute(sql`
@@ -787,7 +824,9 @@ async function _persistPendingTransfer(transferId: string, condition: string, ex
         SET condition = EXCLUDED.condition, expires_at = EXCLUDED.expires_at, updated_at = NOW()
     `);
   } catch (err: any) {
-    logger.warn({ data: err.message }, "[Mojaloop] Failed to persist pending transfer (continuing in-memory)");
+    // W21-H: degrade is tolerated here (the in-memory waiter still resolves),
+    // but it must be LOUD — after a restart the callback would be unmatched.
+    logger.error({ transferId, err: err.message }, "[Mojaloop] FAILED to persist pending transfer — callback will not survive a restart");
   }
 }
 
@@ -797,7 +836,9 @@ async function _deletePendingTransfer(transferId: string): Promise<void> {
   try {
     const { sql } = await import("drizzle-orm");
     await (db as any).execute(sql`DELETE FROM mojaloop_pending_transfers WHERE transfer_id = ${transferId}`);
-  } catch { /* silent */ }
+  } catch (err: any) {
+    logger.warn({ transferId, err: err.message }, "[Mojaloop] Failed to delete pending transfer row (expires via expiry reaper)");
+  }
 }
 
 async function _loadPendingTransfer(transferId: string): Promise<{ condition: string; expiresAt: Date } | null> {
@@ -811,27 +852,16 @@ async function _loadPendingTransfer(transferId: string): Promise<{ condition: st
     const row = (rows as any[])[0];
     if (!row) return null;
     return { condition: row.condition, expiresAt: new Date(row.expires_at) };
-  } catch {
+  } catch (err: any) {
+    logger.warn({ transferId, err: err.message }, "[Mojaloop] Failed to load persisted pending transfer");
     return null;
   }
 }
 
-async function _ensurePendingTransfersTable(): Promise<void> {
-  const db = await _getWtDb();
-  if (!db) return;
-  try {
-    const { sql } = await import("drizzle-orm");
-    await (db as any).execute(sql`
-      CREATE TABLE IF NOT EXISTS mojaloop_pending_transfers (
-        transfer_id TEXT PRIMARY KEY,
-        condition TEXT NOT NULL,
-        expires_at TIMESTAMPTZ NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-  } catch { /* silent */ }
-}
+// W21-H: runtime DDL removed. The mojaloop_pending_transfers table is created
+// exclusively by migration drizzle/0080_mojaloop_pending_state.sql (columns
+// verified to match the statements above: transfer_id, condition, expires_at,
+// created_at, updated_at). No opportunistic CREATE TABLE at module load.
 
 const pendingTransfers = new Map<string, {
   condition: string;
@@ -863,7 +893,9 @@ async function _restorePendingTransfers(): Promise<void> {
       }
       const timeout = setTimeout(() => {
         pendingTransfers.delete(row.transfer_id);
-        _deletePendingTransfer(row.transfer_id).catch(() => {});
+        _deletePendingTransfer(row.transfer_id).catch((err) => {
+          logger.warn({ transferId: row.transfer_id, err: err?.message }, "[Mojaloop] Expiry cleanup delete failed");
+        });
         logger.warn(`[Mojaloop] Restored pending transfer expired: ${row.transfer_id}`);
       }, remainingMs);
       pendingTransfers.set(row.transfer_id, { condition: row.condition, timeout });
@@ -876,10 +908,10 @@ async function _restorePendingTransfers(): Promise<void> {
   }
 }
 
-// Initialize table and restore surviving pending transfers on module load
-_ensurePendingTransfersTable()
-  .then(() => _restorePendingTransfers())
-  .catch(() => {});
+// Restore surviving pending transfers on module load (table exists via migration 0080)
+_restorePendingTransfers().catch((err) => {
+  logger.warn({ err: err?.message }, "[Mojaloop] Pending-transfer restore failed at boot");
+});
 
 /**
  * Register a transfer as pending, waiting for Mojaloop callback.
@@ -894,7 +926,9 @@ export function awaitTransferCallback(
     const timeout = setTimeout(() => {
       pendingTransfers.delete(transferId);
 
-      _deletePendingTransfer(transferId).catch(() => {});
+      _deletePendingTransfer(transferId).catch((err) => {
+        logger.warn({ transferId, err: err?.message }, "[Mojaloop] Timeout cleanup delete failed");
+      });
       resolve({
         transferId,
         transferState: "ABORTED",
@@ -904,7 +938,9 @@ export function awaitTransferCallback(
 
     pendingTransfers.set(transferId, { condition, resolve, timeout });
 
-    _persistPendingTransfer(transferId, condition, new Date(Date.now() + timeoutMs)).catch(() => {});
+    _persistPendingTransfer(transferId, condition, new Date(Date.now() + timeoutMs)).catch((err) => {
+      logger.error({ transferId, err: err?.message }, "[Mojaloop] Pending transfer persistence failed (in-memory only)");
+    });
   });
 }
 
@@ -922,7 +958,9 @@ export function handleMojaloopCallback(callback: MojaloopCallback): { accepted: 
   clearTimeout(pending.timeout);
   pendingTransfers.delete(callback.transferId);
 
-  _deletePendingTransfer(callback.transferId).catch(() => {});
+  _deletePendingTransfer(callback.transferId).catch((err) => {
+    logger.warn({ transferId: callback.transferId, err: err?.message }, "[Mojaloop] Callback cleanup delete failed");
+  });
 
   // Verify ILP fulfillment if present
   if (callback.fulfilment && !verifyIlpFulfillment(pending.condition, callback.fulfilment)) {

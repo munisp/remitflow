@@ -7452,3 +7452,27 @@ export const corridorKillSwitches = pgTable("corridor_kill_switches", {
 });
 export type CorridorKillSwitch = typeof corridorKillSwitches.$inferSelect;
 export type InsertCorridorKillSwitch = typeof corridorKillSwitches.$inferInsert;
+
+// ─── W21-I: durable broker fill intents ──────────────────────────────────────
+// Every broker fill webhook that is rejected (broker not configured, or fill
+// ingestion not yet implemented) is persisted here BEFORE the endpoint throws
+// NOT_IMPLEMENTED, so operations has a durable, queryable trace of every fill
+// the platform refused to ingest. Raw-SQL mirror: drizzle/0105_broker_fill_intents.sql
+export const brokerFillIntents = pgTable("broker_fill_intents", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id"),
+  userId: integer("user_id"),
+  brokerName: varchar("broker_name", { length: 64 }).notNull(),
+  symbol: varchar("symbol", { length: 32 }),
+  qty: numeric("qty", { precision: 30, scale: 8 }),
+  price: numeric("price", { precision: 30, scale: 8 }),
+  reference: text("reference"),
+  status: text("status").notNull().default("rejected_unimplemented"),
+  payload: jsonb("payload").notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("broker_fill_intents_broker_ref_idx").on(t.brokerName, t.reference),
+  index("broker_fill_intents_created_idx").on(t.createdAt),
+]);
+export type BrokerFillIntent = typeof brokerFillIntents.$inferSelect;
+export type InsertBrokerFillIntent = typeof brokerFillIntents.$inferInsert;

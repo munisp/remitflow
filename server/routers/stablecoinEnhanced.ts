@@ -15,7 +15,7 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { eq, and, desc, gte, lte, sql } from "drizzle-orm";
-import { router, protectedProcedure, adminProcedure } from "../trpc.js";
+import { router, protectedProcedure, adminProcedure, publicProcedure } from "../trpc.js";
 import { getDb, createAuditLog } from "../db.js";
 import { wallets, transactions, auditLogs, users, stablecoinReserves } from "../../drizzle/schema.js";
 import { createId } from "@paralleldrive/cuid2";
@@ -170,6 +170,47 @@ async function publishStablecoinEvent(action: string, userId: number, payload: R
 
 // ── Router ────────────────────────────────────────────────────────────────────
 export const stablecoinEnhancedRouter = router({
+
+  // ── Capability flags (W21 Lane K) ─────────────────────────────────────────
+  // Honest, cheap (config read only, no I/O) capability report so the UI can
+  // disable on-chain send instead of discovering NOT_IMPLEMENTED at submit
+  // time (see routers.ts stablecoin.send — no blockchain broadcast client
+  // exists in the dependency tree, so it fails closed).
+  //
+  // onChainSendEnabled is true only when BOTH:
+  //   1. a real custody provider (fireblocks|bitgo) is configured with key
+  //      material (mounted secret file / KMS envelope / dev env var), and
+  //   2. a real on-chain executor is wired via STABLECOIN_ONCHAIN_EXECUTOR_URL.
+  // No such executor exists today, so this is false until one is built.
+  capabilities: publicProcedure.query(() => {
+    const rawProvider = (process.env.CUSTODY_PROVIDER ?? "mock").trim().toLowerCase();
+    const isProd = process.env.NODE_ENV === "production";
+    const fireblocksConfigured = !!(
+      process.env.FIREBLOCKS_API_KEY?.trim() &&
+      (process.env.FIREBLOCKS_API_SECRET_FILE?.trim() ||
+        process.env.FIREBLOCKS_API_SECRET_CIPHERTEXT_B64?.trim() ||
+        (!isProd && process.env.FIREBLOCKS_API_SECRET?.trim()))
+    );
+    const bitgoConfigured = !!(
+      process.env.BITGO_WALLET_ID?.trim() &&
+      (process.env.BITGO_TOKEN_FILE?.trim() ||
+        process.env.BITGO_TOKEN_CIPHERTEXT_B64?.trim() ||
+        (!isProd && process.env.BITGO_ACCESS_TOKEN?.trim()))
+    );
+    const custodyProvider: "fireblocks" | "bitgo" | "none" =
+      rawProvider === "fireblocks" && fireblocksConfigured ? "fireblocks"
+      : rawProvider === "bitgo" && bitgoConfigured ? "bitgo"
+      : "none";
+    // No real on-chain broadcast executor exists in the tree (routers.ts
+    // stablecoin.send throws NOT_IMPLEMENTED). STABLECOIN_ONCHAIN_EXECUTOR_URL
+    // is the documented hook for a future real executor service.
+    const executorConfigured = !!process.env.STABLECOIN_ONCHAIN_EXECUTOR_URL?.trim();
+    return {
+      custodyProvider,
+      onChainSendEnabled: custodyProvider !== "none" && executorConfigured,
+      chains: SUPPORTED_CHAINS,
+    };
+  }),
 
   // ── On-Ramp: Fiat → Stablecoin ─────────────────────────────────────────────
   onramp: protectedProcedure
@@ -601,7 +642,11 @@ export const stablecoinEnhancedRouter = router({
       [...latestBySymbol.values()].map(async (row) => {
         // Latest oracle price is contextual only — it never upgrades the
         // stored verification status.
-        const live = await getLiveStablecoinPrice(row.symbol).catch(() => null);
+        const live = await getLiveStablecoinPrice(row.symbol).catch((err: unknown) => {
+          // Oracle price is contextual only — fail open but never silent.
+          logger.warn({ symbol: row.symbol, err: err instanceof Error ? err.message : String(err) }, "[Stablecoin] live price lookup failed; continuing without oracle context");
+          return null;
+        });
         return {
           symbol: row.symbol,
           onChainBalance: row.onChainBalance,
