@@ -25,6 +25,7 @@ import { requestStablecoinEngine, requestStablecoinEngineGet, submitTravelRuleRe
 import { getLiveStablecoinPrice } from "../middleware/stablecoinAtomicity.js";
 import { createStablecoinP2PClaim, reserveStablecoinP2PClaim, completeStablecoinP2PClaim, releaseStablecoinP2PClaim, deleteStablecoinP2PClaim, failStablecoinP2PClaim, cancelStablecoinP2PClaim } from "../services/stablecoinP2PClaims.js";
 import { logger } from "../_core/logger.js";
+import { isCircleCctpConfigured } from "../_core/circleCctp.js";
 import { assertFeatureEligible } from "../_core/featureGuard.js";
 
 // ── D5: TOTP step-up (Contract 2) — enrolled users MUST pass 2FA before
@@ -205,9 +206,16 @@ export const stablecoinEnhancedRouter = router({
     // stablecoin.send throws NOT_IMPLEMENTED). STABLECOIN_ONCHAIN_EXECUTOR_URL
     // is the documented hook for a future real executor service.
     const executorConfigured = !!process.env.STABLECOIN_ONCHAIN_EXECUTOR_URL?.trim();
+    // W22-M: USDC CCTP bridging capability. True only when a real Circle
+    // configuration is present (CIRCLE_API_KEY). CCTP attestation polling
+    // (server/_core/circleCctp.ts) persists to cctp_transfers and fails
+    // closed without config/durability — this flag is config-presence only
+    // and performs no I/O.
+    const usdcCctpEnabled = isCircleCctpConfigured();
     return {
       custodyProvider,
       onChainSendEnabled: custodyProvider !== "none" && executorConfigured,
+      usdcCctpEnabled,
       chains: SUPPORTED_CHAINS,
     };
   }),

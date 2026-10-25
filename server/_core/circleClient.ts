@@ -14,7 +14,7 @@
  * Endpoints: https://api.circle.com/v1/ (production) or https://api-sandbox.circle.com/v1/ (sandbox)
  */
 
-import { randomBytes } from "crypto";
+import { randomBytes, createHmac, timingSafeEqual } from "crypto";
 import { logger } from "./logger";
 import { getCircuitBreaker, emitFeatureEvent } from "./featurePersistence";
 
@@ -22,9 +22,14 @@ import { getCircuitBreaker, emitFeatureEvent } from "./featurePersistence";
 
 const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY || "";
 const CIRCLE_ENTITY_SECRET = process.env.CIRCLE_ENTITY_SECRET || "";
-const CIRCLE_BASE_URL = process.env.CIRCLE_ENV === "production"
+// W22-M: CIRCLE_ENV=production is itself a production gate — the sandbox
+// endpoint is the default ONLY outside prod, and prod requires a real key
+// (fail closed at first use, enforced in circleRequest below).
+const CIRCLE_ENV_PROD = process.env.CIRCLE_ENV === "production";
+const CIRCLE_BASE_URL = CIRCLE_ENV_PROD
   ? "https://api.circle.com/v1"
   : "https://api-sandbox.circle.com/v1";
+const CIRCLE_WEBHOOK_SECRET = process.env.CIRCLE_WEBHOOK_SECRET || "";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -100,7 +105,10 @@ const circleBreaker = getCircuitBreaker("circle-api");
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [1000, 2000, 4000];
 
-const IS_PRODUCTION = process.env.NODE_ENV === "production";
+// W22-M: production means NODE_ENV=production OR CIRCLE_ENV=production —
+// pointing at the live Circle API without a key must fail closed regardless
+// of how the node process was launched.
+const IS_PRODUCTION = process.env.NODE_ENV === "production" || CIRCLE_ENV_PROD;
 async function circleRequest<T>(
   method: string,
   path: string,
@@ -334,4 +342,40 @@ export async function getBusinessBalance(): Promise<{
   unsettled: Array<{ amount: string; currency: string }>;
 }> {
   return circleRequest("GET", "/businessAccount/balances");
+}
+
+// ── Webhook signature verification (W22-M) ──────────────────────────────────
+//
+// Circle signs webhook notifications with HMAC-SHA256 of the raw request body
+// using the webhook subscription's secret key; the digest is sent in the
+// X-Circle-Signature header (hex). No other verification mechanism is
+// documented in this codebase, so we verify against CIRCLE_WEBHOOK_SECRET.
+//
+// Fail-closed rules (never silently accept):
+//   - production (NODE_ENV=production or CIRCLE_ENV=production) with no
+//     CIRCLE_WEBHOOK_SECRET configured → THROW (configuration error), so the
+//     consumer rejects the notification.
+//   - missing/invalid signature → return false (consumer must reject).
+//   - non-prod with no secret → return false + warn (no silent acceptance).
+export function verifyCircleWebhookSignature(
+  rawBody: string | Buffer,
+  signatureHeader: string | undefined | null,
+): boolean {
+  if (!CIRCLE_WEBHOOK_SECRET) {
+    if (IS_PRODUCTION) {
+      throw new Error("[Circle] FAIL-CLOSED: CIRCLE_WEBHOOK_SECRET not configured in production — rejecting webhook notification");
+    }
+    logger.warn("[Circle] CIRCLE_WEBHOOK_SECRET not configured — webhook notification rejected (dev)");
+    return false;
+  }
+  if (!signatureHeader) {
+    logger.warn("[Circle] webhook notification missing X-Circle-Signature header — rejected");
+    return false;
+  }
+  const expected = createHmac("sha256", CIRCLE_WEBHOOK_SECRET)
+    .update(typeof rawBody === "string" ? Buffer.from(rawBody, "utf8") : rawBody)
+    .digest("hex");
+  const provided = signatureHeader.trim().replace(/^sha256=/i, "").toLowerCase();
+  if (provided.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(provided, "utf8"), Buffer.from(expected, "utf8"));
 }

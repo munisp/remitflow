@@ -45,6 +45,7 @@ import { reportWriteThroughFailure } from "../lib/writeThroughTelemetry";
 // (fundFlowHardening). Imported exactly as named; calls are guarded below.
 import { startPendingDeliveryWorker } from "./pendingDeliveryWorker";
 import { startP2PReconWorker } from "./p2pReconWorker";
+import { resumeIncompleteCctpTransfers } from "./circleCctp";
 import { resumeIncompleteSagas } from "./fundFlowHardening";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -1419,6 +1420,14 @@ function requireScheduledTaskAuth(req: express.Request, res: express.Response): 
     } catch (err: unknown) {
       logger.error({ errMsg: err instanceof Error ? err.message : String(err) }, "[W21/P2PRecon] Worker start FAILED — settling p2p_transfers require manual reconciliation:");
       reportWriteThroughFailure("boot_p2p_recon_worker", err, "error");
+    }
+    // ── W22 boot registration: Circle CCTP attestation resume (Lane M) ───────
+    try {
+      await resumeIncompleteCctpTransfers();
+      logger.info("[W22/CCTP] Incomplete CCTP transfer scan complete");
+    } catch (err: unknown) {
+      logger.error({ errMsg: err instanceof Error ? err.message : String(err) }, "[W22/CCTP] resumeIncompleteCctpTransfers FAILED — in-flight CCTP transfers require manual reconciliation:");
+      reportWriteThroughFailure("boot_cctp_resume", err, "error");
     }
     // ── W10 boot registrations (SPEC-wave10) — all guarded, non-blocking ─────
     // C2: daily AR aging schedule (Temporal cron `0 6 * * *`, queue ar-aging).
