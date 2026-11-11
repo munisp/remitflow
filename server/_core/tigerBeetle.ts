@@ -578,18 +578,70 @@ export async function provisionUserAccounts(userId: number, currencies: string[]
  * one row per (system user, currency) per pool type via tb_account_id.
  *
  * NOTE: the mapping table keys on (user_id, currency), so each pool type uses
- * its own synthetic system user id derived from systemUserId:
- *   float = systemUserId, fee = systemUserId + 1, settlement = +2, suspense = +3.
+ * its own synthetic system user id derived from systemUserId (see
+ * TB_POOL_OFFSETS): float = systemUserId, fee = +1, settlement = +2,
+ * suspense = +3, nostro = +4, vostro = +5.
+ *
+ * Idempotent (exists → skip): account ids are deterministic composites, and
+ * createAccounts treats TigerBeetle's Exists (21) result as an idempotent
+ * no-op, so re-provisioning never duplicates or repoints an account.
  */
+/**
+ * W23 Lane P: synthetic-user offsets for the platform pool accounts. Each pool
+ * type gets its own (systemUserId + offset) row namespace in the
+ * tigerbeetle_accounts mapping table (UNIQUE(user_id, currency)); the same
+ * offset feeds the userId bits of the composite account id, so offsets MUST
+ * stay stable forever — renumbering would mint new accounts and orphan funds.
+ */
+export const TB_POOL_OFFSETS = {
+  FLOAT_POOL: 0,
+  FEE_COLLECTION: 1,
+  SETTLEMENT: 2,
+  SUSPENSE: 3,
+  NOSTRO: 4,
+  VOSTRO: 5,
+} as const;
+
+/**
+ * Deterministic TigerBeetle account id (decimal string) of the platform NOSTRO
+ * account for `currency` — the pooled asset account holding funds at the
+ * correspondent on that currency's ledger. Matches the account provisioned by
+ * provisionPlatformAccounts() (same composite id scheme: userId bits =
+ * PLATFORM_SYSTEM_USER_ID + NOSTRO offset, kind bits = code 7000, sequence 0).
+ * Throws (fail-closed) on an unknown currency.
+ */
+export function tbNostroAccountId(currency: string): string {
+  const ledger = TB_LEDGERS[currency];
+  if (!ledger) throw new Error(`[TigerBeetle] Unknown currency for nostro account: ${currency}`);
+  return compositeAccountId(PLATFORM_SYSTEM_USER_ID + TB_POOL_OFFSETS.NOSTRO, TB_ACCOUNT_CODES.NOSTRO, ledger, 0n);
+}
+
+/**
+ * Deterministic TigerBeetle account id (decimal string) of the platform VOSTRO
+ * account for `currency` — the liability account tracking correspondent funds
+ * held by us on that currency's ledger. Same scheme as tbNostroAccountId.
+ */
+export function tbVostroAccountId(currency: string): string {
+  const ledger = TB_LEDGERS[currency];
+  if (!ledger) throw new Error(`[TigerBeetle] Unknown currency for vostro account: ${currency}`);
+  return compositeAccountId(PLATFORM_SYSTEM_USER_ID + TB_POOL_OFFSETS.VOSTRO, TB_ACCOUNT_CODES.VOSTRO, ledger, 0n);
+}
+
 export async function provisionPlatformAccounts(
   systemUserId: number = PLATFORM_SYSTEM_USER_ID,
   currencies: string[] = Object.keys(TB_LEDGERS),
 ): Promise<void> {
   const pools = [
-    { offset: 0, code: TB_ACCOUNT_CODES.FLOAT_POOL, flags: TB_FLAGS.DEBITS_MUST_NOT_EXCEED_CREDITS },
-    { offset: 1, code: TB_ACCOUNT_CODES.FEE_COLLECTION, flags: TB_FLAGS.CREDITS_MUST_NOT_EXCEED_DEBITS },
-    { offset: 2, code: TB_ACCOUNT_CODES.SETTLEMENT, flags: TB_FLAGS.DEBITS_MUST_NOT_EXCEED_CREDITS },
-    { offset: 3, code: TB_ACCOUNT_CODES.SUSPENSE, flags: 0 },
+    { offset: TB_POOL_OFFSETS.FLOAT_POOL, code: TB_ACCOUNT_CODES.FLOAT_POOL, flags: TB_FLAGS.DEBITS_MUST_NOT_EXCEED_CREDITS },
+    { offset: TB_POOL_OFFSETS.FEE_COLLECTION, code: TB_ACCOUNT_CODES.FEE_COLLECTION, flags: TB_FLAGS.CREDITS_MUST_NOT_EXCEED_DEBITS },
+    { offset: TB_POOL_OFFSETS.SETTLEMENT, code: TB_ACCOUNT_CODES.SETTLEMENT, flags: TB_FLAGS.DEBITS_MUST_NOT_EXCEED_CREDITS },
+    { offset: TB_POOL_OFFSETS.SUSPENSE, code: TB_ACCOUNT_CODES.SUSPENSE, flags: 0 },
+    // W23 Lane P: nostro (asset — funds at the correspondent: debits must not
+    // exceed credits) and vostro (liability — correspondent's funds held by
+    // us: credits must not exceed debits). Provisioned at the same place as
+    // SETTLEMENT/SUSPENSE so every boot/reprovision covers them.
+    { offset: TB_POOL_OFFSETS.NOSTRO, code: TB_ACCOUNT_CODES.NOSTRO, flags: TB_FLAGS.DEBITS_MUST_NOT_EXCEED_CREDITS },
+    { offset: TB_POOL_OFFSETS.VOSTRO, code: TB_ACCOUNT_CODES.VOSTRO, flags: TB_FLAGS.CREDITS_MUST_NOT_EXCEED_DEBITS },
   ];
   const accounts: CreateAccountRequest[] = [];
   const mappings: Array<{ userId: number; currency: string; tbAccountId: string; ledger: number; code: number; flags: number; userData128: string }> = [];
@@ -701,6 +753,8 @@ export const tigerBeetle = {
   voidPendingTransfer,
   provisionUserAccounts,
   provisionPlatformAccounts,
+  tbNostroAccountId,
+  tbVostroAccountId,
   reconcileWithPostgres,
   checkHealth: checkTigerBeetleHealth,
   LEDGERS: TB_LEDGERS,

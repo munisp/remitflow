@@ -39,14 +39,19 @@
  *   try { startP2PReconWorker(); } catch (err) { logger.error({ err }, "[P2PRecon] worker start failed"); }
  */
 import { hostname } from "node:os";
+import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
-import { getDb } from "../db";
+import { getDb, insertOutboxEvent } from "../db";
 import { auditLogs, transactions } from "../../drizzle/schema";
 import { logger } from "./logger";
 import { getTransferStatus } from "../mojaloop.service";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 import { recordTigerBeetleDualWrite } from "./fundFlowHardening";
-import { TB_ACCOUNT_CODES } from "./tigerBeetle";
+import { atomicTransfer, compositeAccountId, toMinorUnits, TB_ACCOUNT_CODES, TB_LEDGERS, PLATFORM_SYSTEM_USER_ID } from "./tigerBeetle";
+// W23-O: namespace import so the module still compiles while the parallel
+// Lane P branch adds the export; the call site below verifies it exists at
+// runtime and fails OPEN (loud + outbox) if it does not.
+import * as tigerBeetleCore from "./tigerBeetle";
 
 const POLL_INTERVAL_MS = 60_000;
 /** A row must be parked at least this long before the first reconciliation. */
@@ -85,8 +90,140 @@ interface ParkedRow {
   fee: string | null;
   rail: string | null;
   mojaloopTransferId: string | null;
-  metadata: { parked?: boolean; reconAttempts?: number; escalated?: boolean; lastReconAt?: string | null; reason?: string } | null;
+  metadata: { parked?: boolean; reconAttempts?: number; escalated?: boolean; lastReconAt?: string | null; reason?: string; tbSuspMoved?: boolean } | null;
   updatedAt: Date;
+}
+
+// ─── W23-O: TigerBeetle settlement legs + settlement_journal coverage ───────
+
+/**
+ * Deterministic 128-bit TB transfer id for a P2P reference — byte-identical
+ * derivation to tbTransferId() in fundFlowHardening.ts (which is private
+ * there), so ids are consistent platform-wide and replays dedupe in TB.
+ */
+function p2pTbTransferId(reference: string): bigint {
+  const hex = createHash("sha256").update(`tb:${reference}`).digest("hex").slice(0, 31);
+  return BigInt(`0x${hex}`);
+}
+
+/**
+ * COMMITTED settlement leg: move the parked value OUT of the platform
+ * SETTLEMENT pool into the NOSTRO account for the destination currency, so
+ * cross-border value actually leaves SETTLEMENT instead of parking forever.
+ *
+ * recordTigerBeetleDualWrite (fundFlowHardening.ts — not this lane's file)
+ * cannot express this leg: it composes BOTH accounts from (userId, code,
+ * ledger) and has no raw-account target, and the NOSTRO account is only
+ * addressable via Lane P's tbNostroAccountId(currency). This mirrors that
+ * helper exactly: deterministic id (replay-safe), NEVER throws (fail-open —
+ * PG stays source of truth), loud log + PG outbox event on failure so the
+ * reconciliation sweep can repair the missed ledger write.
+ *
+ * NOTE (single-ledger constraint): one TB transfer cannot span ledgers. Per
+ * the W23 plan the leg is posted on the DESTINATION currency ledger; when
+ * sendCurrency != receiveCurrency the SETTLEMENT account on that ledger is
+ * not the account holding the park and TB will reject it — the failure lands
+ * in the outbox and the journal row records posted=false so reconciliation
+ * catches it. Same-currency corridors settle cleanly.
+ */
+export async function recordP2PSettlementToNostro(params: {
+  /** Deterministic reference: `P2P_{id}_SETTLE`. */
+  reference: string;
+  /** Amount in MAJOR units (totalDebit: principal + fee). */
+  amount: number;
+  /** Destination (receive) currency — selects the NOSTRO account/ledger. */
+  currency: string;
+  mojaloopTransferId: string | null;
+}): Promise<{ posted: boolean; tbTransferId: string }> {
+  const { reference, amount, currency, mojaloopTransferId } = params;
+  const id = p2pTbTransferId(reference);
+  try {
+    const ledger = TB_LEDGERS[currency];
+    if (!ledger) throw new Error(`unknown TB ledger for currency ${currency}`);
+    const tbNostroAccountId = (tigerBeetleCore as unknown as { tbNostroAccountId?: (currency: string) => string | bigint }).tbNostroAccountId;
+    if (typeof tbNostroAccountId !== "function") {
+      throw new Error("tbNostroAccountId is not exported from server/_core/tigerBeetle.ts yet (parallel Lane P dependency) — settlement leg deferred to reconciliation");
+    }
+    const fromAccountId = BigInt(compositeAccountId(PLATFORM_SYSTEM_USER_ID, TB_ACCOUNT_CODES.SETTLEMENT, ledger));
+    const toAccountId = BigInt(tbNostroAccountId(currency));
+    await atomicTransfer({
+      id,
+      fromAccountId,
+      toAccountId,
+      amount: toMinorUnits(amount),
+      currency,
+      code: TB_ACCOUNT_CODES.SETTLEMENT,
+    });
+    logger.info({ reference, tbTransferId: id.toString(), amount, currency, mojaloopTransferId }, "[TigerBeetle] P2P settlement leg posted: SETTLEMENT → NOSTRO");
+    return { posted: true, tbTransferId: id.toString() };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    // LOUD, never silent (fail-open for the money path — PG already committed
+    // and remains authoritative; the ledger write must be repaired).
+    logger.error({ reference, amount, currency, mojaloopTransferId, errMsg }, "[TigerBeetle] P2P settlement leg FAILED — PG committed, funds remain parked in SETTLEMENT; queued for reconciliation");
+    try {
+      const db = await getDb();
+      if (!db) throw new Error("DB unavailable for outbox fallback");
+      await insertOutboxEvent(db, {
+        aggregateId: reference,
+        aggregateType: "tigerbeetle",
+        eventType: "dual_write_failed",
+        payload: {
+          reference,
+          leg: "p2p_settlement_out",
+          amount,
+          currency,
+          fromUserId: PLATFORM_SYSTEM_USER_ID,
+          fromCode: TB_ACCOUNT_CODES.SETTLEMENT,
+          toPool: "NOSTRO",
+          mojaloopTransferId,
+          error: errMsg,
+          failedAt: new Date().toISOString(),
+        },
+      });
+    } catch (outboxErr) {
+      logger.error({ reference, err: outboxErr instanceof Error ? outboxErr.message : String(outboxErr) }, "[TigerBeetle] CRITICAL: P2P settlement-leg outbox fallback ALSO failed — manual reconciliation required");
+    }
+    return { posted: false, tbTransferId: id.toString() };
+  }
+}
+
+/**
+ * settlement_journal coverage for cross-border P2P (drizzle/0084): the row is
+ * inserted as 'debited' by the router in the SAME transaction as the wallet
+ * debit; terminal paths move it to 'posted' (+ the TB leg id in
+ * tb_pending_id) / 'refunded' / 'reconcile_required'. Never throws — the PG
+ * money transition already committed; a journal update failure is logged
+ * LOUDLY and leaves the row in 'debited', which the reconciliation sweep
+ * (settlement_journal_status_idx) picks up.
+ */
+export async function updateP2PSettlementJournal(
+  db: any,
+  p2pTransferId: number,
+  status: "posted" | "refunded" | "reconcile_required" | "post_failed",
+  tbLegTransferId?: string,
+): Promise<void> {
+  const journalId = `P2P_${p2pTransferId}`;
+  try {
+    await db.execute(sql`
+      UPDATE settlement_journal
+      SET status = ${status},
+          tb_pending_id = COALESCE(${tbLegTransferId ?? null}, tb_pending_id),
+          updated_at = NOW()
+      WHERE transfer_id = ${journalId}
+    `);
+  } catch (err) {
+    logger.error({ err, p2pTransferId, journalId, status }, "[P2P] settlement_journal update FAILED — journal left in prior state for the reconciliation sweep");
+  }
+}
+
+/** Persist the TB settlement-leg reference on the transfer row (0107 column). */
+async function setP2PTbSettlementRef(db: any, p2pTransferId: number, reference: string): Promise<void> {
+  try {
+    await db.execute(sql`UPDATE p2p_transfers SET tb_settlement_ref = ${reference} WHERE id = ${p2pTransferId}`);
+  } catch (err) {
+    logger.error({ err, p2pTransferId, reference }, "[P2P] tb_settlement_ref update FAILED — reference recoverable from settlement_journal");
+  }
 }
 
 /**
@@ -97,7 +234,7 @@ interface ParkedRow {
 async function completeParked(db: any, row: ParkedRow, mojaloopTransferId: string): Promise<boolean> {
   const totalDebit = Number(row.sendAmount) + Number(row.fee ?? 0);
   const receiveAmount = Number(row.receiveAmount ?? 0);
-  return db.transaction(async (tx: any) => {
+  const won = await db.transaction(async (tx: any) => {
     const claim = (await tx.execute(sql`
       UPDATE p2p_transfers
       SET status = 'completed', completed_at = NOW(),
@@ -128,6 +265,25 @@ async function completeParked(db: any, row: ParkedRow, mojaloopTransferId: strin
     });
     return true;
   });
+
+  if (won) {
+    // W23-O: the rail COMMITTED — the parked value must actually LEAVE the
+    // platform SETTLEMENT pool. Post the settlement leg SETTLEMENT → NOSTRO
+    // (destination currency) with a deterministic id (`P2P_{id}_SETTLE` →
+    // replay-safe in TB) and mojaloopTransferId carried in the outbox/journal
+    // evidence. Fail-open: on failure the journal row records posted=false
+    // ('post_failed') so reconciliation catches the miss.
+    const settleRef = `P2P_${row.id}_SETTLE`;
+    const leg = await recordP2PSettlementToNostro({
+      reference: settleRef,
+      amount: totalDebit,
+      currency: row.receiveCurrency ?? row.sendCurrency,
+      mojaloopTransferId,
+    });
+    await setP2PTbSettlementRef(db, row.id, settleRef);
+    await updateP2PSettlementJournal(db, row.id, leg.posted ? "posted" : "post_failed", leg.tbTransferId);
+  }
+  return won;
 }
 
 /**
@@ -187,6 +343,8 @@ async function compensateParked(db: any, row: ParkedRow, mojaloopTransferId: str
     // TigerBeetle reversal of the settlement park (mirrors the router's
     // ABORTED path; deterministic id → idempotent; fail-open w/ outbox).
     await recordTigerBeetleDualWrite({ reference: `P2P_${row.id}_COMP`, fromCode: TB_ACCOUNT_CODES.SETTLEMENT, toUserId: row.senderId, toCode: TB_ACCOUNT_CODES.USER_WALLET, amount: totalDebit, currency: row.sendCurrency });
+    // W23-O: settlement_journal coverage — the parked debit was refunded.
+    await updateP2PSettlementJournal(db, row.id, "refunded");
     // Honest user notification — the sender was told "reconciliation in
     // progress"; now they get the truth.
     await publishEvent(KAFKA_TOPICS.NOTIFICATIONS, String(row.senderId), {
@@ -206,10 +364,26 @@ async function escalate(db: any, row: ParkedRow, reason: string): Promise<void> 
     { transferId: row.id, senderId: row.senderId, amount: row.sendAmount, currency: row.sendCurrency, mojaloopTransferId: row.mojaloopTransferId, attempts: row.metadata?.reconAttempts ?? 0, reason },
     "[P2PRecon] CRITICAL: parked cross-border transfer UNRESOLVED after max reconciliation attempts — funds remain debited; OPS ACTION REQUIRED; row stays parked and keeps retrying at reduced frequency",
   );
+  // W23-O: segregate the parked value in TB — move SETTLEMENT → SUSPENSE so
+  // the unresolved amount is visibly isolated for ops. Check-before-act via
+  // metadata.tbSuspMoved (the deterministic TB id `P2P_{id}_SUSP` also makes
+  // any retry a no-op in TigerBeetle). Fail-open via the dual-write helper
+  // (outbox on failure); the journal row goes 'reconcile_required' either way.
+  const totalDebit = Number(row.sendAmount) + Number(row.fee ?? 0);
+  const alreadyMoved = row.metadata?.tbSuspMoved === true;
+  if (!alreadyMoved) {
+    await recordTigerBeetleDualWrite({
+      reference: `P2P_${row.id}_SUSP`,
+      fromCode: TB_ACCOUNT_CODES.SETTLEMENT,
+      toCode: TB_ACCOUNT_CODES.SUSPENSE,
+      amount: totalDebit,
+      currency: row.sendCurrency,
+    });
+  }
   await db.transaction(async (tx: any) => {
     await tx.execute(sql`
       UPDATE p2p_transfers
-      SET metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({ escalated: true, escalatedAt: new Date().toISOString() })}::jsonb,
+      SET metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({ escalated: true, escalatedAt: new Date().toISOString(), ...(alreadyMoved ? {} : { tbSuspMoved: true, tbSuspRef: `P2P_${row.id}_SUSP` }) })}::jsonb,
           updated_at = updated_at
       WHERE id = ${row.id} AND status = 'settling'
     `);
@@ -233,6 +407,8 @@ async function escalate(db: any, row: ParkedRow, reason: string): Promise<void> 
     reason,
     timestamp: new Date().toISOString(),
   }).catch((err: any) => logger.error({ err, transferId: row.id }, "[P2PRecon] Escalation alert publish failed (row still escalated in DB + audit log)"));
+  // W23-O: journal coverage — an escalated row needs manual reconciliation.
+  await updateP2PSettlementJournal(db, row.id, "reconcile_required");
 }
 
 async function processRow(db: any, row: ParkedRow): Promise<void> {
