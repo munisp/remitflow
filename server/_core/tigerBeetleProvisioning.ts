@@ -29,6 +29,13 @@ import { TRPCError } from "@trpc/server";
 import { tigerBeetle } from "../middleware/middlewareIntegration";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 import { logger } from "./logger";
+import {
+  lookupAccounts,
+  provisionPlatformAccounts,
+  tbNostroAccountId,
+  tbVostroAccountId,
+  TB_LEDGERS,
+} from "./tigerBeetle";
 
 // Account type constants matching TigerBeetle service
 const ACCOUNT_TYPE_WALLET = 1000;
@@ -187,6 +194,43 @@ export async function provisionTigerBeetleAccounts(
 }
 
 /**
+ * W23 Lane P: ensure the platform NOSTRO (7000) and VOSTRO (7001) accounts
+ * exist for every given currency. Verifies via a bridge lookup first and only
+ * provisions the currencies whose accounts are missing (exists → skip).
+ * Provisioning delegates to provisionPlatformAccounts() in tigerBeetle.ts —
+ * the same code path that creates SETTLEMENT/SUSPENSE — so composite ids and
+ * mapping rows stay consistent. Fail-closed: a bridge/DB failure throws.
+ */
+export async function ensureNostroVostroProvisioned(
+  currencies: string[] = Object.keys(TB_LEDGERS),
+): Promise<{ checked: number; alreadyExists: number; provisioned: string[] }> {
+  const expectedIds: Array<{ currency: string; kind: "nostro" | "vostro"; id: bigint }> = [];
+  for (const currency of currencies) {
+    // tbNostroAccountId/tbVostroAccountId throw on unknown currency (fail-closed).
+    expectedIds.push(
+      { currency, kind: "nostro", id: BigInt(tbNostroAccountId(currency)) },
+      { currency, kind: "vostro", id: BigInt(tbVostroAccountId(currency)) },
+    );
+  }
+
+  const found = new Set((await lookupAccounts(expectedIds.map(e => e.id))).map(a => a.id.toString()));
+  const missingCurrencies = [...new Set(expectedIds.filter(e => !found.has(e.id.toString())).map(e => e.currency))];
+  const alreadyExists = expectedIds.length - expectedIds.filter(e => !found.has(e.id.toString())).length;
+
+  if (missingCurrencies.length > 0) {
+    logger.warn({ missingCurrencies }, "[TigerBeetle] NOSTRO/VOSTRO accounts missing — provisioning");
+    // Idempotent: deterministic ids + Exists-tolerant create; the mapping
+    // upsert re-asserts the same deterministic tb_account_id.
+    await provisionPlatformAccounts(undefined, missingCurrencies);
+    logger.info({ missingCurrencies }, "[TigerBeetle] NOSTRO/VOSTRO accounts provisioned");
+  } else {
+    logger.info({ currencies: currencies.length }, "[TigerBeetle] NOSTRO/VOSTRO accounts verified present");
+  }
+
+  return { checked: expectedIds.length, alreadyExists, provisioned: missingCurrencies };
+}
+
+/**
  * Get the TigerBeetle account IDs for a user.
  * Used by transfer pipeline to resolve account IDs deterministically.
  */
@@ -226,7 +270,9 @@ export async function verifyUserAccounts(
   try {
     const balance = await tigerBeetle.getAvailableBalance(walletAccountId);
     return { verified: balance !== null, walletBalance: balance };
-  } catch {
+  } catch (err) {
+    // W23 sweep: never silent — verification failure is reported, not swallowed.
+    logger.warn({ userId, currency, err: err instanceof Error ? err.message : String(err) }, "[TigerBeetle] Account verification failed — reporting unverified");
     return { verified: false, walletBalance: null };
   }
 }

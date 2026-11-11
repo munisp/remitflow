@@ -400,6 +400,13 @@
       "when": 1776483275965,
       "tag": "0106_circle_cctp",
       "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1776483335965,
+      "tag": "0107_p2p_tb_settlement",
+      "breakpoints": true
     }
   ]
 }

@@ -8,7 +8,7 @@
 //   POST /api/mojaloop/callback           — generic callback (from Go FSP service)
 // ============================================================================
 import type { Express, Request, Response } from "express";
-import { getDb, createAuditLog } from "./db.js";
+import { getDb, createAuditLog, insertOutboxEvent } from "./db.js";
 import { mojaloopTransfers, transactions } from "../drizzle/schema.js";
 import { eq, sql } from "drizzle-orm";
 import { logger } from './_core/logger';
@@ -119,8 +119,42 @@ async function _deletePendingCallback(correlationId: string): Promise<void> {
   }
 }
 
-async function _hasPendingCallback(correlationId: string): Promise<boolean> {
-  const db = await _getWtDb();
+// ─── W23 Lane P: durable terminal-state evidence ─────────────────────────────
+// Terminal transfer states (FSPIOP). Only these get a TigerBeetle outbox
+// event — RECEIVED/RESERVED are in-flight and need no ledger resolution.
+const TERMINAL_TRANSFER_STATES = new Set(["COMMITTED", "ABORTED"]);
+
+/**
+ * Update the mojaloop_transfers row AND — for terminal states — enqueue a
+ * durable outbox event (aggregateType 'tigerbeetle', eventType
+ * 'mojaloop_terminal_state', payload {transferId, state, ...}) in the SAME
+ * db.transaction, so ledger-resolution evidence commits or rolls back with
+ * the state update and survives crashes. Throws on failure (callers fail
+ * closed with a 5xx so the switch retries). Never silent.
+ */
+async function _updateTransferStateWithOutbox(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  transferId: string,
+  state: string,
+  set: Record<string, unknown>,
+  extraPayload: Record<string, unknown> = {},
+): Promise<void> {
+  await (db as any).transaction(async (tx: any) => {
+    await tx.update(mojaloopTransfers)
+      .set(set)
+      .where(sql`${mojaloopTransfers.transferId} = ${transferId}`);
+    if (TERMINAL_TRANSFER_STATES.has(state)) {
+      await insertOutboxEvent(tx, {
+        aggregateId: transferId,
+        aggregateType: "tigerbeetle",
+        eventType: "mojaloop_terminal_state",
+        payload: { transferId, state, ...extraPayload, recordedAt: new Date().toISOString() },
+      });
+    }
+  });
+}
+
+async function _hasPendingCallback(correlationId: string): Promise<boolean> {  const db = await _getWtDb();
   if (!db) return false;
   try {
     const rows = await db.execute(
@@ -300,13 +334,11 @@ export function registerMojaloopWebhooks(app: Express) {
     try {
       const db = await getDb();
       if (db) {
-        await db.update(mojaloopTransfers)
-          .set({
-            status: payload.transferState ?? "COMMITTED",
-            completedAt: payload.completedTimestamp ? new Date(payload.completedTimestamp) : new Date(),
-            fulfilment: payload.fulfilment ?? null,
-          })
-          .where(sql`${mojaloopTransfers.transferId} = ${transferId}`);
+        await _updateTransferStateWithOutbox(db, transferId, payload.transferState ?? "COMMITTED", {
+          status: payload.transferState ?? "COMMITTED",
+          completedAt: payload.completedTimestamp ? new Date(payload.completedTimestamp) : new Date(),
+          fulfilment: payload.fulfilment ?? null,
+        }, { source: "fspiop_transfer_callback", fulfilment: payload.fulfilment ?? null });
       } else {
         throw new Error("No DB handle available");
       }
@@ -402,13 +434,11 @@ export function registerMojaloopWebhooks(app: Express) {
     try {
       const db = await getDb();
       if (db) {
-        await db.update(mojaloopTransfers)
-          .set({
-            status: "ABORTED",
-            errorCode: payload.errorInformation?.errorCode ?? "UNKNOWN",
-            errorDescription: payload.errorInformation?.errorDescription ?? "Transfer aborted",
-          })
-          .where(sql`${mojaloopTransfers.transferId} = ${transferId}`);
+        await _updateTransferStateWithOutbox(db, transferId, "ABORTED", {
+          status: "ABORTED",
+          errorCode: payload.errorInformation?.errorCode ?? "UNKNOWN",
+          errorDescription: payload.errorInformation?.errorDescription ?? "Transfer aborted",
+        }, { source: "fspiop_transfer_error_callback", errorCode: payload.errorInformation?.errorCode ?? "UNKNOWN" });
       } else {
         throw new Error("No DB handle available");
       }
@@ -496,12 +526,10 @@ export function registerMojaloopWebhooks(app: Express) {
       try {
         const db = await getDb();
         if (db) {
-          await db.update(mojaloopTransfers)
-            .set({
-              status: transferState ?? "COMMITTED",
-              completedAt: new Date(),
-            })
-            .where(sql`${mojaloopTransfers.transferId} = ${transferId}`);
+          await _updateTransferStateWithOutbox(db, transferId, transferState ?? "COMMITTED", {
+            status: transferState ?? "COMMITTED",
+            completedAt: new Date(),
+          }, { source: "go_fsp_generic_callback" });
         } else {
           throw new Error("No DB handle available");
         }

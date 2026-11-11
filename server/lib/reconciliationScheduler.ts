@@ -4,7 +4,10 @@
  * Runs the PG↔TigerBeetle balance reconciliation (server/ledger-sync.ts
  * reconcileBalances) on a fixed daily cadence — TigerBeetle is the source of
  * truth and this pass repairs any PostgreSQL cache drift from failed
- * dual-writes.
+ * dual-writes. W23 Lane P: the same pass also runs the TigerBeetle
+ * reconciliation engine (server/integrations/tigerbeetle/reconciliation.ts —
+ * account balances, p2p_transfers, nostro positions, Mojaloop↔TB settlement
+ * legs), guarded independently and never silent.
  *
  * Cadence: RECONCILIATION_INTERVAL_MS overrides the default 24h interval; the
  * first run is delayed RECONCILIATION_STARTUP_DELAY_MS (default 5 minutes) so
@@ -15,6 +18,7 @@
  */
 
 import { reconcileBalances } from "../ledger-sync";
+import { runScheduledReconciliation } from "../integrations/tigerbeetle/reconciliation";
 import { logger } from "../_core/logger";
 
 const DEFAULT_INTERVAL_MS = 24 * 60 * 60 * 1_000; // daily
@@ -39,6 +43,18 @@ async function runPass(): Promise<void> {
     logger.error(
       { err: err instanceof Error ? err.message : String(err) },
       "[Reconciliation] Scheduled pass failed — will retry on next tick",
+    );
+  }
+  // W23 Lane P: TigerBeetle reconciliation engine (account balances,
+  // p2p_transfers, nostro positions, Mojaloop↔TB settlement legs) runs in the
+  // same daily pass. Guarded separately so a TB-recon failure never suppresses
+  // the next reconcileBalances tick — fail-open telemetry, but NEVER silent.
+  try {
+    await runScheduledReconciliation();
+  } catch (err) {
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      "[Reconciliation] TigerBeetle reconciliation engine failed — will retry on next tick",
     );
   } finally {
     running = false;
