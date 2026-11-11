@@ -1368,8 +1368,35 @@ function requireScheduledTaskAuth(req: express.Request, res: express.Response): 
     startScheduler();
     // Auto-start polyglot microservices in development (no-op in production)
     startMicroservices();
-    // Start automated daily reconciliation scheduler
-    import("../lib/reconciliationScheduler").then(({ startReconciliationScheduler }) => startReconciliationScheduler()).catch(err => logger.warn({ errMsg: err?.message }, "[Reconciliation] Scheduler init failed (non-blocking):"));
+    // ── W23 boot registration: daily PG↔TB + Mojaloop↔TB reconciliation (Lane P) ──
+    try {
+      const { startReconciliationScheduler } = await import("../lib/reconciliationScheduler");
+      startReconciliationScheduler();
+      logger.info("[W23/Reconciliation] Scheduler started at boot — daily PG↔TB balance repair + TigerBeetle reconciliation engine (transfers, nostro positions, Mojaloop settlement legs)");
+    } catch (err) {
+      logger.error({ errMsg: err instanceof Error ? err.message : String(err) }, "[W23/Reconciliation] Scheduler start FAILED — balance drift and settlement-leg discrepancies require MANUAL reconciliation:");
+    }
+    // ── W23 boot registration: NOSTRO/VOSTRO platform account provisioning (Lane P) ──
+    // Async and NON-BLOCKING: the TB bridge may still be down at boot.
+    // Provisioning is Exists-tolerant + deterministic (composite ids), so an
+    // ops re-run of ensureNostroVostroProvisioned() safely retries. Currencies:
+    // the canonical TB ledger list (TB_LEDGERS keys).
+    try {
+      const [{ ensureNostroVostroProvisioned }, { TB_LEDGERS }] = await Promise.all([
+        import("./tigerBeetleProvisioning"),
+        import("./tigerBeetle"),
+      ]);
+      void ensureNostroVostroProvisioned(Object.keys(TB_LEDGERS))
+        .then((result) => logger.info({ ...result }, "[W23/NostroProvision] NOSTRO/VOSTRO platform accounts verified/provisioned at boot"))
+        .catch((err) => {
+          reportWriteThroughFailure("nostro_vostro_provisioning", err, "error");
+          logger.error({ errMsg: err instanceof Error ? err.message : String(err) }, "[W23/NostroProvision] NOSTRO/VOSTRO provisioning FAILED at boot (bridge likely down) — Exists-tolerant; retry via ops: ensureNostroVostroProvisioned()");
+        });
+      logger.info("[W23/NostroProvision] NOSTRO/VOSTRO provisioning kicked off at boot (async, non-blocking)");
+    } catch (err) {
+      reportWriteThroughFailure("nostro_vostro_provisioning", err, "error");
+      logger.error({ errMsg: err instanceof Error ? err.message : String(err) }, "[W23/NostroProvision] Nostro/vostro provisioning registration FAILED — settlement legs to NOSTRO will fail until provisioned (MANUAL retry required):");
+    }
     // FF-001: settlement reaper — retries failed TB posts, refunds PG when a
     // hold expired unposted, and alerts. Holds must never silently expire
     // unposted for completed transfers.
