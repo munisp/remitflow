@@ -43,7 +43,11 @@ import { screenSanctions } from "../_core/polyglotClient";
 // W19-F: TigerBeetle write-through for the sender debit / compensation
 // (fail-open emit; PG stays source of truth; outbox fallback inside helper).
 import { recordTigerBeetleDualWrite } from "../_core/fundFlowHardening";
-import { TB_ACCOUNT_CODES } from "../_core/tigerBeetle";
+import { TB_ACCOUNT_CODES, toMinorUnits } from "../_core/tigerBeetle";
+// W23-O: COMMITTED settlement leg (SETTLEMENT → NOSTRO) + settlement_journal
+// coverage. The helpers live in p2pReconWorker.ts (same lane) and are
+// fail-open with PG outbox fallback, mirroring recordTigerBeetleDualWrite.
+import { recordP2PSettlementToNostro, updateP2PSettlementJournal } from "../_core/p2pReconWorker";
 import crypto from "crypto";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -705,6 +709,21 @@ export const p2pInstantRouter = router({
             idempotencyKey: idemKey,
           }).returning();
 
+          // W23-O: settlement_journal coverage (drizzle/0084) — cross-border
+          // sends park value in the TB SETTLEMENT pool until the rail resolves;
+          // the journal row is the exactly-once record of that park, inserted
+          // in the SAME transaction as the wallet debit (status 'debited';
+          // COMMITTED → 'posted', ABORTED → 'refunded', escalation →
+          // 'reconcile_required'). transfer_id = `P2P_${t.id}`; amount_minor is
+          // the exact minor-unit totalDebit. Internal-rail transfers settle
+          // wallet→wallet synchronously and are not journaled here.
+          if (!(receiverId && receiverFspId === REMITFLOW_FSP_ID)) {
+            await tx.execute(sql`
+              INSERT INTO settlement_journal (transfer_id, user_id, amount_minor, currency, status, tb_pending_id, created_at, updated_at)
+              VALUES (${`P2P_${t.id}`}, ${ctx.user.id}, ${toMinorUnits(totalDebit).toString()}, ${input.currency}, 'debited', NULL, NOW(), NOW())
+            `);
+          }
+
           // Step 6 (internal): receiver credit — row-count CHECKED; 0 rows
           // aborts the transaction so the sender debit is rolled back too.
           if (receiverId && receiverFspId === REMITFLOW_FSP_ID) {
@@ -777,7 +796,17 @@ export const p2pInstantRouter = router({
       if (receiverId && receiverFspId === REMITFLOW_FSP_ID) {
         // Internal: sender wallet → receiver wallet (principal) + fee to the
         // platform fee-collection account.
-        await recordTigerBeetleDualWrite({ reference: `P2P_${transfer.id}_SEND`, fromUserId: ctx.user.id, fromCode: TB_ACCOUNT_CODES.USER_WALLET, toUserId: receiverId, toCode: TB_ACCOUNT_CODES.USER_WALLET, amount: receiveAmount, currency: input.currency });
+        // W23-O (Gap 9): the previous single wallet→wallet write posted BOTH
+        // legs on the sender-currency ledger while the PG receiver credit is
+        // denominated in receiverCurrency. recordTigerBeetleDualWrite resolves
+        // both accounts from ONE currency (TB transfers are single-ledger) and
+        // fundFlowHardening.ts is not this lane's file, so the movement is
+        // posted as two currency-correct writes bridged through the platform
+        // SETTLEMENT pool: (1) sender wallet → SETTLEMENT in input.currency,
+        // (2) SETTLEMENT → receiver wallet in receiverCurrency. Deterministic
+        // per-leg references keep replays idempotent.
+        await recordTigerBeetleDualWrite({ reference: `P2P_${transfer.id}_SEND`, fromUserId: ctx.user.id, fromCode: TB_ACCOUNT_CODES.USER_WALLET, toCode: TB_ACCOUNT_CODES.SETTLEMENT, amount: input.amount, currency: input.currency });
+        await recordTigerBeetleDualWrite({ reference: `P2P_${transfer.id}_RECV`, fromCode: TB_ACCOUNT_CODES.SETTLEMENT, toUserId: receiverId, toCode: TB_ACCOUNT_CODES.USER_WALLET, amount: receiveAmount, currency: receiverCurrency });
         if (fee > 0) {
           await recordTigerBeetleDualWrite({ reference: `P2P_${transfer.id}_FEE`, fromUserId: ctx.user.id, fromCode: TB_ACCOUNT_CODES.USER_WALLET, toCode: TB_ACCOUNT_CODES.FEE_COLLECTION, amount: fee, currency: input.currency });
         }
@@ -860,6 +889,25 @@ export const p2pInstantRouter = router({
             metadata: { p2pTransferId: transfer.id, rail, mojaloopTransferId: resolvedResult.transferId, leg: "sender_debit", sendAmount: input.amount.toFixed(2), sendCurrency: input.currency },
           } as any);
 
+          // W23-O: the rail COMMITTED — settle the parked value OUT of the TB
+          // SETTLEMENT pool into the NOSTRO account for the destination
+          // currency (deterministic id `P2P_{id}_SETTLE`, replay-safe;
+          // fail-open with outbox). The settlement_journal row records whether
+          // the leg posted so reconciliation catches a miss.
+          const settleRef = `P2P_${transfer.id}_SETTLE`;
+          const settleLeg = await recordP2PSettlementToNostro({
+            reference: settleRef,
+            amount: totalDebit,
+            currency: receiverCurrency,
+            mojaloopTransferId: resolvedResult.transferId ?? null,
+          });
+          try {
+            await db.execute(sql`UPDATE p2p_transfers SET tb_settlement_ref = ${settleRef} WHERE id = ${transfer.id}`);
+          } catch (refErr) {
+            logger.error({ err: refErr, transferId: transfer.id, settleRef }, "[P2P] tb_settlement_ref update FAILED — reference recoverable from settlement_journal");
+          }
+          await updateP2PSettlementJournal(db, transfer.id, settleLeg.posted ? "posted" : "post_failed", settleLeg.tbTransferId);
+
           logger.info({ transferId: transfer.id, rail, mojaloopTransferId: resolvedResult.transferId }, "[P2P] Cross-border transfer initiated");
           externalOutcome = "completed";
         } else if (resolvedResult && resolvedState === "ABORTED") {
@@ -906,6 +954,9 @@ export const p2pInstantRouter = router({
             // W19-F: reverse the ledger debit written above (settlement →
             // sender). Deterministic id per transfer; fail-open w/ outbox.
             await recordTigerBeetleDualWrite({ reference: `P2P_${transfer.id}_COMP`, fromCode: TB_ACCOUNT_CODES.SETTLEMENT, toUserId: ctx.user.id, toCode: TB_ACCOUNT_CODES.USER_WALLET, amount: totalDebit, currency: input.currency });
+            // W23-O: settlement_journal coverage — the parked debit was
+            // refunded to the sender (SETTLEMENT → wallet reversal above).
+            await updateP2PSettlementJournal(db, transfer.id, "refunded");
           }
           externalOutcome = "failed";
         } else {
@@ -1011,7 +1062,7 @@ export const p2pInstantRouter = router({
       };
     }),
 
-  // ── Request Money ──────────────────────────────────────────────────────────
+  // ── Request Money ───────────────────────────────────────────────────────────
   requestMoney: protectedProcedure
     .input(z.object({
       payerAlias: z.string().min(3).max(320),
